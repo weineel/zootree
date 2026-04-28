@@ -1,5 +1,6 @@
-mod runner;
+use anyhow::Result;
 
-fn main() {
+fn main() -> Result<()> {
     println!("zootree");
+    Ok(())
 }
