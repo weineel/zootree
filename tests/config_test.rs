@@ -69,3 +69,48 @@ path = "~/projects/backend"
     assert!(config.default_target_branch.is_none());
     assert!(config.copy_files.is_empty());
 }
+
+use zootree::config::workspace::{WorkspaceConfig, WorkspaceStatus, RepoEntry, Event};
+
+#[test]
+fn test_parse_workspace_config() {
+    let toml_str = r#"
+title = "用户认证功能"
+name = "calm-river"
+description = "前后端联调 OAuth2 登录"
+branch = "zootree/calm-river"
+workspace_dir = "~/zootree-workspaces/calm-river"
+created_at = "2026-04-28T10:30:00+08:00"
+
+[[repos]]
+name = "frontend"
+target_branch = "develop"
+
+[[repos]]
+name = "backend"
+target_branch = "develop"
+
+[[events]]
+action = "created"
+timestamp = "2026-04-28T10:30:00+08:00"
+"#;
+    let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.title, "用户认证功能");
+    assert_eq!(config.name, "calm-river");
+    assert_eq!(config.repos.len(), 2);
+    assert_eq!(config.repos[0].name, "frontend");
+    assert_eq!(config.repos[0].target_branch, "develop");
+    assert_eq!(config.events.len(), 1);
+}
+
+#[test]
+fn test_parse_template_config() {
+    let toml_str = r#"
+repos = ["frontend", "backend", "shared-lib"]
+layout = "default"
+session_mode = "standalone"
+"#;
+    let config: zootree::config::template::TemplateConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.repos, vec!["frontend", "backend", "shared-lib"]);
+    assert_eq!(config.layout, Some("default".into()));
+}
