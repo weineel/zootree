@@ -1,4 +1,5 @@
 pub mod global;
+pub mod repo;
 
 use std::path::PathBuf;
 use anyhow::Result;
@@ -46,6 +47,46 @@ impl ConfigManager {
         let path = self.base_dir.join("config.toml");
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn repos_dir(&self) -> PathBuf {
+        self.base_dir.join("repos")
+    }
+
+    pub fn load_repo_config(&self, name: &str) -> Result<repo::RepoConfig> {
+        let path = self.repos_dir().join(format!("{}.toml", name));
+        let content = std::fs::read_to_string(&path)?;
+        Ok(toml::from_str(&content)?)
+    }
+
+    pub fn save_repo_config(&self, name: &str, config: &repo::RepoConfig) -> Result<()> {
+        let path = self.repos_dir().join(format!("{}.toml", name));
+        let content = toml::to_string_pretty(config)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn list_repos(&self) -> Result<Vec<String>> {
+        let dir = self.repos_dir();
+        let mut names = Vec::new();
+        if dir.exists() {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                if let Some(name) = entry.path().file_stem() {
+                    if entry.path().extension().map_or(false, |e| e == "toml") {
+                        names.push(name.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn remove_repo_config(&self, name: &str) -> Result<()> {
+        let path = self.repos_dir().join(format!("{}.toml", name));
+        std::fs::remove_file(path)?;
         Ok(())
     }
 }
