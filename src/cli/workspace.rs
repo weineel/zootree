@@ -412,3 +412,251 @@ pub struct CancelArgs {
     #[arg(long)]
     pub force: bool,
 }
+
+pub fn handle_done(args: &DoneArgs) -> Result<()> {
+    let config_mgr = ConfigManager::new()?;
+    let global = config_mgr.load_global_config()?;
+    let runner = RealRunner;
+    let git = GitOps::new(&runner);
+    let hook_engine = HookEngine::new(&runner);
+    let zellij = ZellijOps::new(&runner);
+
+    let name = match &args.name {
+        Some(n) => n.clone(),
+        None => {
+            let in_progress = config_mgr.list_workspaces(Some(&WorkspaceStatus::InProgress))?;
+            if in_progress.is_empty() {
+                anyhow::bail!("no in_progress workspaces");
+            }
+            let names: Vec<String> = in_progress.iter().map(|w| format!("{} - {}", w.name, w.title)).collect();
+            let idx = tui::select_one("Select workspace to complete", &names)?;
+            in_progress[idx].name.clone()
+        }
+    };
+
+    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
+    if !matches!(status, WorkspaceStatus::InProgress) {
+        anyhow::bail!("workspace '{}' is not in_progress", name);
+    }
+
+    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+
+    if args.dry_run {
+        println!("dry run for workspace '{}':", name);
+        if !args.no_merge {
+            for repo_entry in &workspace.repos {
+                println!("  merge {} -> {}", workspace.branch, repo_entry.target_branch);
+            }
+        }
+        if !args.no_clean {
+            println!("  clean worktrees and workspace directory");
+        }
+        return Ok(());
+    }
+
+    // pre_done hook
+    if !args.force {
+        hook_engine.execute_if_set(&global.hooks.pre_done, &HookContext {
+            workspace: workspace.name.clone(),
+            repo: None,
+            branch: workspace.branch.clone(),
+            target_branch: None,
+            worktree_path: None,
+            workspace_dir: ws_dir.clone(),
+        })?;
+    }
+
+    for repo_entry in &workspace.repos {
+        let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
+        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+        let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
+
+        // Check uncommitted changes
+        if git.has_uncommitted_changes(&worktree_path)? {
+            if !args.force {
+                anyhow::bail!(
+                    "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
+                    repo_entry.name, worktree_path
+                );
+            }
+        }
+
+        // Merge
+        if !args.no_merge {
+            let strategy = args.strategy.as_deref();
+            git.merge(&repo_path, &workspace.branch, &repo_entry.target_branch, strategy)?;
+            println!("  merged {} -> {} ({})", workspace.branch, repo_entry.target_branch, repo_entry.name);
+
+            if args.push {
+                git.push(&repo_path, &repo_entry.target_branch)?;
+                println!("  pushed {} ({})", repo_entry.target_branch, repo_entry.name);
+            }
+
+            if args.delete_remote {
+                git.delete_remote_branch(&repo_path, &workspace.branch)?;
+                println!("  deleted remote branch {} ({})", workspace.branch, repo_entry.name);
+            }
+        }
+
+        // Clean
+        if !args.no_clean {
+            let hook = repo_config.hooks.pre_remove.as_ref()
+                .or(global.hooks.pre_remove.as_ref());
+            if let Some(h) = hook {
+                if !args.force {
+                    hook_engine.execute(h, &HookContext {
+                        workspace: workspace.name.clone(),
+                        repo: Some(repo_entry.name.clone()),
+                        branch: workspace.branch.clone(),
+                        target_branch: Some(repo_entry.target_branch.clone()),
+                        worktree_path: Some(worktree_path.clone()),
+                        workspace_dir: ws_dir.clone(),
+                    })?;
+                }
+            }
+
+            git.worktree_remove(&repo_path, &worktree_path, false)?;
+            git.delete_local_branch(&repo_path, &workspace.branch, false)?;
+        }
+    }
+
+    // Remove workspace directory
+    if !args.no_clean {
+        if Path::new(&ws_dir).exists() {
+            std::fs::remove_dir_all(&ws_dir)?;
+        }
+    }
+
+    // Kill zellij session
+    let session_name = match workspace.session_mode.as_str() {
+        "shared" => workspace.session_name.clone(),
+        _ => Some(format!("zootree-{}", workspace.name)),
+    };
+    if let Some(sn) = &session_name {
+        let _ = zellij.kill_session(sn);
+    }
+
+    // Archive
+    let now = Local::now().to_rfc3339();
+    workspace.events.push(Event {
+        action: "done".into(),
+        timestamp: now,
+        detail: None,
+    });
+    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
+    config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Done)?;
+
+    println!("workspace '{}' completed", name);
+    Ok(())
+}
+
+pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
+    let config_mgr = ConfigManager::new()?;
+    let global = config_mgr.load_global_config()?;
+    let runner = RealRunner;
+    let git = GitOps::new(&runner);
+    let hook_engine = HookEngine::new(&runner);
+    let zellij = ZellijOps::new(&runner);
+
+    let name = match &args.name {
+        Some(n) => n.clone(),
+        None => {
+            let in_progress = config_mgr.list_workspaces(Some(&WorkspaceStatus::InProgress))?;
+            if in_progress.is_empty() {
+                anyhow::bail!("no in_progress workspaces");
+            }
+            let names: Vec<String> = in_progress.iter().map(|w| format!("{} - {}", w.name, w.title)).collect();
+            let idx = tui::select_one("Select workspace to cancel", &names)?;
+            in_progress[idx].name.clone()
+        }
+    };
+
+    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
+    if !matches!(status, WorkspaceStatus::InProgress) {
+        anyhow::bail!("workspace '{}' is not in_progress", name);
+    }
+
+    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+
+    // Confirm if uncommitted changes exist
+    if !args.force {
+        for repo_entry in &workspace.repos {
+            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
+            if Path::new(&worktree_path).exists() && git.has_uncommitted_changes(&worktree_path)? {
+                if !tui::confirm(
+                    &format!("repo '{}' has uncommitted changes. Continue?", repo_entry.name),
+                    false,
+                )? {
+                    anyhow::bail!("canceled by user");
+                }
+            }
+        }
+    }
+
+    // pre_cancel hook
+    if !args.force {
+        hook_engine.execute_if_set(&global.hooks.pre_cancel, &HookContext {
+            workspace: workspace.name.clone(),
+            repo: None,
+            branch: workspace.branch.clone(),
+            target_branch: None,
+            worktree_path: None,
+            workspace_dir: ws_dir.clone(),
+        })?;
+    }
+
+    if !args.no_clean {
+        for repo_entry in &workspace.repos {
+            let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
+            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
+
+            // pre_remove hook
+            let hook = repo_config.hooks.pre_remove.as_ref()
+                .or(global.hooks.pre_remove.as_ref());
+            if let Some(h) = hook {
+                if !args.force {
+                    let _ = hook_engine.execute(h, &HookContext {
+                        workspace: workspace.name.clone(),
+                        repo: Some(repo_entry.name.clone()),
+                        branch: workspace.branch.clone(),
+                        target_branch: Some(repo_entry.target_branch.clone()),
+                        worktree_path: Some(worktree_path.clone()),
+                        workspace_dir: ws_dir.clone(),
+                    });
+                }
+            }
+
+            if Path::new(&worktree_path).exists() {
+                git.worktree_remove(&repo_path, &worktree_path, args.force)?;
+            }
+            git.delete_local_branch(&repo_path, &workspace.branch, true)?;
+        }
+
+        if Path::new(&ws_dir).exists() {
+            std::fs::remove_dir_all(&ws_dir)?;
+        }
+    }
+
+    // Kill zellij session
+    let session_name = match workspace.session_mode.as_str() {
+        "shared" => workspace.session_name.clone(),
+        _ => Some(format!("zootree-{}", workspace.name)),
+    };
+    if let Some(sn) = &session_name {
+        let _ = zellij.kill_session(sn);
+    }
+
+    // Archive
+    let now = Local::now().to_rfc3339();
+    workspace.events.push(Event {
+        action: "canceled".into(),
+        timestamp: now,
+        detail: None,
+    });
+    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
+    config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Canceled)?;
+
+    println!("workspace '{}' canceled", name);
+    Ok(())
+}

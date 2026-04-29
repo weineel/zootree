@@ -21,11 +21,11 @@ fn main() -> Result<()> {
         Commands::Open(args) => {
             zootree::cli::workspace::handle_open(&args)?;
         }
-        Commands::Done(_args) => {
-            println!("done workspace");
+        Commands::Done(args) => {
+            zootree::cli::workspace::handle_done(&args)?;
         }
-        Commands::Cancel(_args) => {
-            println!("cancel workspace");
+        Commands::Cancel(args) => {
+            zootree::cli::workspace::handle_cancel(&args)?;
         }
         Commands::Template(_args) => {
             println!("template command");
