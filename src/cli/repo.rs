@@ -14,8 +14,8 @@ pub struct RepoArgs {
 #[derive(Subcommand)]
 pub enum RepoCommands {
     Add {
-        name: String,
         #[arg(long)]
+        name: Option<String>,
         path: String,
         #[arg(long)]
         default_target_branch: Option<String>,
@@ -39,6 +39,13 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
             let abs_path = std::fs::canonicalize(&expanded)
                 .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
 
+            let repo_name = name.clone().unwrap_or_else(|| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone())
+            });
+
             let repo_config = RepoConfig {
                 path: abs_path.to_string_lossy().into_owned(),
                 default_target_branch: default_target_branch.clone(),
@@ -47,8 +54,8 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
                 lazygit: None,
                 layout: None,
             };
-            config_mgr.save_repo_config(name, &repo_config)?;
-            println!("repo '{}' registered at {}", name, abs_path.display());
+            config_mgr.save_repo_config(&repo_name, &repo_config)?;
+            println!("repo '{}' registered at {}", repo_name, abs_path.display());
             Ok(())
         }
         RepoCommands::List => {

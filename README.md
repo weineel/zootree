@@ -31,8 +31,11 @@ mkdir -p ~/.config/zootree
 # 交互式添加
 zootree repo add
 
-# 命令行添加
-zootree repo add myrepo --path ~/projects/myrepo --target-branch develop
+# 命令行添加 (自动从路径提取名称)
+zootree repo add ~/projects/myrepo
+
+# 指定仓库名称
+zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
 ```
 
 ### 3. 创建工作空间
@@ -71,7 +74,7 @@ zootree done --push
 ### 仓库管理
 
 ```bash
-zootree repo add <name>              # 添加仓库
+zootree repo add <path>              # 添加仓库
 zootree repo list                    # 列出仓库
 zootree repo remove <name>           # 移除仓库
 ```
