@@ -235,6 +235,62 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn handle_list(args: &ListArgs) -> Result<()> {
+    let config_mgr = ConfigManager::new()?;
+
+    let status_filter = args.status.as_deref().map(|s| match s {
+        "pending" => WorkspaceStatus::Pending,
+        "in_progress" => WorkspaceStatus::InProgress,
+        "done" => WorkspaceStatus::Done,
+        "canceled" => WorkspaceStatus::Canceled,
+        _ => WorkspaceStatus::Pending,
+    });
+
+    let workspaces = config_mgr.list_workspaces(status_filter.as_ref())?;
+
+    if workspaces.is_empty() {
+        println!("no workspaces found");
+        return Ok(());
+    }
+
+    for ws in &workspaces {
+        let repos_str = ws.repos.iter()
+            .map(|r| format!("{}:{}", r.name, r.target_branch))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} - {} [{}]", ws.name, ws.title, repos_str);
+    }
+
+    Ok(())
+}
+
+pub fn handle_open(args: &OpenArgs) -> Result<()> {
+    let config_mgr = ConfigManager::new()?;
+    let global = config_mgr.load_global_config()?;
+    let runner = RealRunner;
+
+    let name = match &args.name {
+        Some(n) => n.clone(),
+        None => {
+            let in_progress = config_mgr.list_workspaces(Some(&WorkspaceStatus::InProgress))?;
+            if in_progress.is_empty() {
+                anyhow::bail!("no in_progress workspaces");
+            }
+            let names: Vec<String> = in_progress.iter().map(|w| format!("{} - {}", w.name, w.title)).collect();
+            let idx = tui::select_one("Select workspace to open", &names)?;
+            in_progress[idx].name.clone()
+        }
+    };
+
+    let (status, workspace) = config_mgr.load_workspace(&name)?;
+    if !matches!(status, WorkspaceStatus::InProgress) {
+        anyhow::bail!("workspace '{}' is not in_progress", name);
+    }
+
+    launch_zellij(&config_mgr, &global, &workspace, &runner)?;
+    Ok(())
+}
+
 fn launch_zellij(
     config_mgr: &ConfigManager,
     global: &crate::config::global::GlobalConfig,

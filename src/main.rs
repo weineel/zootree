@@ -12,14 +12,14 @@ fn main() -> Result<()> {
         Commands::Create(args) => {
             zootree::cli::workspace::handle_create(&args)?;
         }
-        Commands::List(_args) => {
-            println!("list workspaces");
+        Commands::List(args) => {
+            zootree::cli::workspace::handle_list(&args)?;
         }
         Commands::Start(args) => {
             zootree::cli::workspace::handle_start(&args)?;
         }
-        Commands::Open(_args) => {
-            println!("open workspace");
+        Commands::Open(args) => {
+            zootree::cli::workspace::handle_open(&args)?;
         }
         Commands::Done(_args) => {
             println!("done workspace");
