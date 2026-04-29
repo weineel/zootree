@@ -71,7 +71,7 @@ path = "~/projects/backend"
     assert!(config.copy_files.is_empty());
 }
 
-use zootree::config::workspace::{WorkspaceConfig, WorkspaceStatus, RepoEntry, Event};
+use zootree::config::workspace::WorkspaceConfig;
 
 #[test]
 fn test_parse_workspace_config() {
