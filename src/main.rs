@@ -27,14 +27,27 @@ fn main() -> Result<()> {
         Commands::Cancel(args) => {
             zootree::cli::workspace::handle_cancel(&args)?;
         }
-        Commands::Template(_args) => {
-            println!("template command");
+        Commands::Template(args) => {
+            zootree::cli::template::handle_template_command(&args.command)?;
         }
-        Commands::Prune(_args) => {
-            println!("prune");
+        Commands::Prune(args) => {
+            zootree::cli::prune::handle_prune(&args)?;
         }
         Commands::Logs => {
-            println!("logs");
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| anyhow::anyhow!("cannot find config directory"))?
+                .join("zootree/logs/zootree.log");
+            if config_dir.exists() {
+                let status = std::process::Command::new("tail")
+                    .args(["-f", "-n", "100"])
+                    .arg(&config_dir)
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("tail exited with error");
+                }
+            } else {
+                println!("no log file found at {}", config_dir.display());
+            }
         }
     }
 
