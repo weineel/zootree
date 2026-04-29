@@ -12,8 +12,9 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new() -> Result<Self> {
-        let base_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot find config directory"))?
+        let base_dir = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?
+            .join(".config")
             .join("zootree");
         Ok(Self { base_dir })
     }
