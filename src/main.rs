@@ -1,9 +1,51 @@
 use anyhow::Result;
 use clap::Parser;
+use tracing_appender::rolling;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use zootree::cli::{Cli, Commands};
+
+fn init_tracing(
+    verbose: bool,
+    quiet: bool,
+) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot find config directory"))?
+        .join("zootree/logs");
+    std::fs::create_dir_all(&config_dir)?;
+
+    let file_appender = rolling::daily(&config_dir, "zootree.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let terminal_level = if quiet {
+        "error"
+    } else if verbose {
+        "debug"
+    } else {
+        "info"
+    };
+
+    let terminal_layer = fmt::layer()
+        .with_target(false)
+        .with_level(true)
+        .with_filter(tracing_subscriber::EnvFilter::new(terminal_level));
+
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+    tracing_subscriber::registry()
+        .with(terminal_layer)
+        .with(file_layer)
+        .init();
+
+    Ok(guard)
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    let _guard = init_tracing(cli.verbose, cli.quiet)?;
 
     match cli.command {
         Commands::Repo(args) => {
