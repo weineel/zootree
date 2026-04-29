@@ -15,8 +15,8 @@ fn main() -> Result<()> {
         Commands::List(_args) => {
             println!("list workspaces");
         }
-        Commands::Start(_args) => {
-            println!("start workspace");
+        Commands::Start(args) => {
+            zootree::cli::workspace::handle_start(&args)?;
         }
         Commands::Open(_args) => {
             println!("open workspace");
