@@ -17,3 +17,4 @@ tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 anyhow = "1"
+shellexpand = "3"

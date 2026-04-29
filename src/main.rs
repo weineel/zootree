@@ -6,8 +6,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Repo(_args) => {
-            println!("repo command");
+        Commands::Repo(args) => {
+            zootree::cli::repo::handle_repo_command(&args.command)?;
         }
         Commands::Create(_args) => {
             println!("create workspace");
