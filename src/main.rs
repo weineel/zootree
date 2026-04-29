@@ -9,8 +9,8 @@ fn main() -> Result<()> {
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;
         }
-        Commands::Create(_args) => {
-            println!("create workspace");
+        Commands::Create(args) => {
+            zootree::cli::workspace::handle_create(&args)?;
         }
         Commands::List(_args) => {
             println!("list workspaces");

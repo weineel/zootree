@@ -1,3 +1,4 @@
+use zootree::cli::workspace::parse_repos_arg;
 use zootree::config::global::GlobalConfig;
 use zootree::config::repo::RepoConfig;
 use zootree::config::global::HookValue;
@@ -113,4 +114,20 @@ session_mode = "standalone"
     let config: zootree::config::template::TemplateConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.repos, vec!["frontend", "backend", "shared-lib"]);
     assert_eq!(config.layout, Some("default".into()));
+}
+
+#[test]
+fn test_parse_repos_arg() {
+    let result = parse_repos_arg("frontend:develop,backend,shared-lib:main");
+    assert_eq!(result, vec![
+        ("frontend".into(), Some("develop".into())),
+        ("backend".into(), None),
+        ("shared-lib".into(), Some("main".into())),
+    ]);
+}
+
+#[test]
+fn test_parse_repos_arg_single() {
+    let result = parse_repos_arg("frontend:develop");
+    assert_eq!(result, vec![("frontend".into(), Some("develop".into()))]);
 }
