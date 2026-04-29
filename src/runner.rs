@@ -30,13 +30,11 @@ impl CommandRunner for RealRunner {
     }
 }
 
-#[cfg(test)]
 pub struct MockRunner {
     pub calls: std::cell::RefCell<Vec<CommandSpec>>,
     pub responses: std::cell::RefCell<Vec<Output>>,
 }
 
-#[cfg(test)]
 impl MockRunner {
     pub fn new() -> Self {
         Self {
@@ -54,7 +52,6 @@ impl MockRunner {
     }
 }
 
-#[cfg(test)]
 impl CommandRunner for MockRunner {
     fn run(&self, spec: &CommandSpec) -> Result<Output> {
         self.calls.borrow_mut().push(CommandSpec {
