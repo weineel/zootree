@@ -64,15 +64,16 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
     pub fn merge(&self, repo_path: &str, branch: &str, target: &str, strategy: Option<&str>) -> Result<()> {
         self.git(repo_path, vec!["checkout", target])?;
         match strategy {
-            Some("squash") => {
-                self.git(repo_path, vec!["merge", "--squash", branch])?;
-                self.git(repo_path, vec!["commit", "-m", &format!("squash merge {}", branch)])?;
-            }
             Some("rebase") => {
                 self.git(repo_path, vec!["rebase", branch])?;
             }
-            _ => {
+            Some("merge") => {
                 self.git(repo_path, vec!["merge", branch])?;
+            }
+            _ => {
+                // 默认使用 squash 方式
+                self.git(repo_path, vec!["merge", "--squash", branch])?;
+                self.git(repo_path, vec!["commit", "-m", &format!("squash merge {}", branch)])?;
             }
         }
         Ok(())
