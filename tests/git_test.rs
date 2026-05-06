@@ -89,7 +89,8 @@ fn test_merge_command() {
         "/home/user/projects/frontend",
         "zootree/calm-river",
         "develop",
-        None,
+        Some("merge"),
+        "squash merge zootree/calm-river",
     ).unwrap();
 
     let calls = runner.take_calls();
@@ -111,11 +112,13 @@ fn test_merge_squash() {
         "zootree/calm-river",
         "develop",
         Some("squash"),
+        "fix: resolve login issue",
     ).unwrap();
 
     let calls = runner.take_calls();
     assert_eq!(calls.len(), 3);
     assert_eq!(calls[1].args, vec!["-C", "/home/user/projects/frontend", "merge", "--squash", "zootree/calm-river"]);
+    assert_eq!(calls[2].args, vec!["-C", "/home/user/projects/frontend", "commit", "-m", "fix: resolve login issue"]);
 }
 
 #[test]

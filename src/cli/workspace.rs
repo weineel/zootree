@@ -554,7 +554,12 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         // Merge
         if !args.no_merge {
             let strategy = args.strategy.as_deref();
-            git.merge(&repo_path, &workspace.branch, &target_branch, strategy)?;
+            let message = if workspace.description.is_empty() {
+                workspace.title.clone()
+            } else {
+                format!("{}\n\n{}", workspace.title, workspace.description)
+            };
+            git.merge(&repo_path, &workspace.branch, &target_branch, strategy, &message)?;
             println!("  merged {} -> {} ({})", workspace.branch, target_branch, repo_entry.name);
 
             if args.push {
