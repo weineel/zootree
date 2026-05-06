@@ -23,8 +23,14 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         let output = self.runner.run(&spec)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let err_output = if stderr.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                stderr.trim().to_string()
+            };
             let cmd = format!("git {}", full_args.join(" "));
-            bail!("git command failed:\n  command: {}\n  error: {}", cmd, stderr.trim());
+            bail!("git command failed:\n  command: {}\n  error: {}", cmd, err_output);
         }
         Ok(output)
     }
