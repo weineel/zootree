@@ -130,10 +130,10 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub fn list_workspaces(&self, status: Option<&workspace::WorkspaceStatus>) -> Result<Vec<workspace::WorkspaceConfig>> {
+    pub fn list_workspaces(&self, status: Option<&[workspace::WorkspaceStatus]>) -> Result<Vec<workspace::WorkspaceConfig>> {
         use workspace::WorkspaceStatus::*;
         let statuses = match status {
-            Some(s) => vec![s.clone()],
+            Some(s) => s.to_vec(),
             None => vec![Pending, InProgress, Done, Canceled],
         };
         let mut workspaces = Vec::new();

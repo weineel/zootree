@@ -97,7 +97,7 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     };
 
     let name_gen = NameGenerator::new();
-    let existing: Vec<String> = config_mgr.list_workspaces(None)?
+    let existing: Vec<String> = config_mgr.list_workspaces(None::<&[WorkspaceStatus]>)?
         .iter().map(|w| w.name.clone()).collect();
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -161,7 +161,7 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            let pending = config_mgr.list_workspaces(Some(&WorkspaceStatus::Pending))?;
+            let pending = config_mgr.list_workspaces(Some(&[WorkspaceStatus::Pending]))?;
             if pending.is_empty() {
                 anyhow::bail!("no pending workspaces");
             }
@@ -265,15 +265,13 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
 pub fn handle_list(args: &ListArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
 
-    let status_filter = args.status.as_deref().map(|s| match s {
-        "pending" => WorkspaceStatus::Pending,
-        "in_progress" => WorkspaceStatus::InProgress,
-        "done" => WorkspaceStatus::Done,
-        "canceled" => WorkspaceStatus::Canceled,
-        _ => WorkspaceStatus::Pending,
-    });
+    let status_filter: Vec<WorkspaceStatus> = if args.status.is_empty() {
+        vec![WorkspaceStatus::Pending, WorkspaceStatus::InProgress]
+    } else {
+        args.status.iter().map(|s| parse_status(s)).collect::<Result<Vec<_>>>()?
+    };
 
-    let workspaces = config_mgr.list_workspaces(status_filter.as_ref())?;
+    let workspaces = config_mgr.list_workspaces(Some(status_filter.as_slice()))?;
 
     if workspaces.is_empty() {
         println!("no workspaces found");
@@ -281,14 +279,39 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     }
 
     for ws in &workspaces {
+        let (status, _) = config_mgr.load_workspace(&ws.name)?;
+        let status_str = format_status(&status);
         let repos_str = ws.repos.iter()
             .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
             .collect::<Vec<_>>()
             .join(", ");
-        println!("  {} - {} [{}]", ws.name, ws.title, repos_str);
+        if matches!(status, WorkspaceStatus::InProgress) {
+            println!("  {} ({}) - {} [{}] {}", ws.name, status_str, ws.title, repos_str, ws.workspace_dir);
+        } else {
+            println!("  {} ({}) - {} [{}]", ws.name, status_str, ws.title, repos_str);
+        }
     }
 
     Ok(())
+}
+
+fn parse_status(s: &str) -> Result<WorkspaceStatus> {
+    match s {
+        "pending" => Ok(WorkspaceStatus::Pending),
+        "in_progress" => Ok(WorkspaceStatus::InProgress),
+        "done" => Ok(WorkspaceStatus::Done),
+        "canceled" => Ok(WorkspaceStatus::Canceled),
+        _ => anyhow::bail!("invalid status '{}', available: pending, in_progress, done, canceled", s),
+    }
+}
+
+fn format_status(status: &WorkspaceStatus) -> &'static str {
+    match status {
+        WorkspaceStatus::Pending => "pending",
+        WorkspaceStatus::InProgress => "in_progress",
+        WorkspaceStatus::Done => "done",
+        WorkspaceStatus::Canceled => "canceled",
+    }
 }
 
 pub fn handle_open(args: &OpenArgs) -> Result<()> {
@@ -299,7 +322,7 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            let in_progress = config_mgr.list_workspaces(Some(&WorkspaceStatus::InProgress))?;
+            let in_progress = config_mgr.list_workspaces(Some(&[WorkspaceStatus::InProgress]))?;
             if in_progress.is_empty() {
                 anyhow::bail!("no in_progress workspaces");
             }
@@ -396,8 +419,8 @@ pub struct CreateArgs {
 
 #[derive(Args)]
 pub struct ListArgs {
-    #[arg(long)]
-    pub status: Option<String>,
+    #[arg(long, help = "Filter by status [available: pending, in_progress, done, canceled]")]
+    pub status: Vec<String>,
 }
 
 #[derive(Args)]
@@ -451,7 +474,7 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            let in_progress = config_mgr.list_workspaces(Some(&WorkspaceStatus::InProgress))?;
+            let in_progress = config_mgr.list_workspaces(Some(&[WorkspaceStatus::InProgress]))?;
             if in_progress.is_empty() {
                 anyhow::bail!("no in_progress workspaces");
             }
@@ -608,7 +631,7 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            let in_progress = config_mgr.list_workspaces(Some(&WorkspaceStatus::InProgress))?;
+            let in_progress = config_mgr.list_workspaces(Some(&[WorkspaceStatus::InProgress]))?;
             if in_progress.is_empty() {
                 anyhow::bail!("no in_progress workspaces");
             }

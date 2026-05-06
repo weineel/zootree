@@ -16,7 +16,7 @@ pub fn handle_prune(args: &PruneArgs) -> Result<()> {
 
     let mut archived = Vec::new();
     for status in [WorkspaceStatus::Done, WorkspaceStatus::Canceled] {
-        let workspaces = config_mgr.list_workspaces(Some(&status))?;
+        let workspaces = config_mgr.list_workspaces(Some(&[status.clone()]))?;
         for ws in workspaces {
             archived.push((status.clone(), ws));
         }
