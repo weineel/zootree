@@ -20,14 +20,24 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(about = "Manage registered repositories")]
     Repo(repo::RepoArgs),
+    #[command(about = "Create a new workspace")]
     Create(workspace::CreateArgs),
+    #[command(about = "List workspaces")]
     List(workspace::ListArgs),
+    #[command(about = "Start a pending workspace (create worktrees and launch zellij)")]
     Start(workspace::StartArgs),
+    #[command(about = "Open an in-progress workspace in zellij")]
     Open(workspace::OpenArgs),
+    #[command(about = "Complete a workspace (merge, clean up worktrees)")]
     Done(workspace::DoneArgs),
+    #[command(about = "Cancel a workspace (discard worktrees without merging)")]
     Cancel(workspace::CancelArgs),
+    #[command(about = "Manage workspace templates")]
     Template(template::TemplateArgs),
+    #[command(about = "Remove archived workspace directories and configs")]
     Prune(prune::PruneArgs),
+    #[command(about = "Show log file location")]
     Logs,
 }

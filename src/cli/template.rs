@@ -11,7 +11,9 @@ pub struct TemplateArgs {
 
 #[derive(Subcommand)]
 pub enum TemplateCommands {
+    #[command(about = "List saved templates")]
     List,
+    #[command(about = "Save a workspace as a template")]
     Save {
         name: String,
         #[arg(long)]

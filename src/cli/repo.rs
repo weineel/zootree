@@ -13,6 +13,7 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum RepoCommands {
+    #[command(about = "Register a new repository")]
     Add {
         #[arg(long)]
         name: Option<String>,
@@ -20,10 +21,13 @@ pub enum RepoCommands {
         #[arg(long)]
         default_target_branch: Option<String>,
     },
+    #[command(about = "List registered repositories")]
     List,
+    #[command(about = "Edit a repository config file")]
     Edit {
         name: Option<String>,
     },
+    #[command(about = "Unregister a repository")]
     Remove {
         name: Option<String>,
     },
