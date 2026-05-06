@@ -12,7 +12,7 @@ pub enum WorkspaceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoEntry {
     pub name: String,
-    pub target_branch: String,
+    pub target_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

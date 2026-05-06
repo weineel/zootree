@@ -31,6 +31,8 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.ensure_dirs()?;
     let global = config_mgr.load_global_config()?;
+    let runner = RealRunner;
+    let git = GitOps::new(&runner);
 
     let title = match &args.title {
         Some(t) => t.clone(),
@@ -47,10 +49,11 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
         let mut entries = Vec::new();
         for (name, branch) in parsed {
             let repo_config = config_mgr.load_repo_config(&name)?;
+            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
             let target_branch = branch
                 .or(repo_config.default_target_branch.clone())
-                .ok_or_else(|| anyhow::anyhow!("target branch required for repo '{}'", name))?;
-            entries.push(RepoEntry { name, target_branch });
+                .unwrap_or_else(|| git.current_branch(&repo_path).unwrap_or_else(|_| "main".into()));
+            entries.push(RepoEntry { name, target_branch: Some(target_branch) });
         }
         entries
     } else {
@@ -76,15 +79,18 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
             let name = &all_repos[idx];
             let repo_config = config_mgr.load_repo_config(name)?;
 
+            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+            let current = git.current_branch(&repo_path).unwrap_or_else(|_| "main".into());
             let target_branch = if let Some(default) = &repo_config.default_target_branch {
                 default.clone()
             } else {
-                tui::input_required(&format!("Target branch for {}", name))?
+                let input = tui::input_optional(&format!("Target branch for {} (default: {})", name, current))?;
+                input.unwrap_or(current)
             };
 
             entries.push(RepoEntry {
                 name: name.clone(),
-                target_branch,
+                target_branch: Some(target_branch),
             });
         }
         entries
@@ -140,7 +146,7 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
 
     println!("workspace '{}' created (pending)", name);
     println!("  branch: {}", workspace.branch);
-    println!("  repos: {}", workspace.repos.iter().map(|r| format!("{}:{}", r.name, r.target_branch)).collect::<Vec<_>>().join(", "));
+    println!("  repos: {}", workspace.repos.iter().map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*"))).collect::<Vec<_>>().join(", "));
 
     Ok(())
 }
@@ -176,10 +182,31 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     for repo_entry in &workspace.repos {
         let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
         let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+
+        let target_branch = match &repo_entry.target_branch {
+            Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
+            Some(tb) => {
+                let current = git.current_branch(&repo_path)?;
+                tracing::warn!(
+                    "target branch '{}' not found in repo '{}', using current branch '{}'",
+                    tb, repo_entry.name, current
+                );
+                current
+            }
+            None => {
+                let current = git.current_branch(&repo_path)?;
+                tracing::warn!(
+                    "target branch not configured for repo '{}', using current branch '{}'",
+                    repo_entry.name, current
+                );
+                current
+            }
+        };
+
         let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
 
         tracing::info!("creating worktree for {} at {}", repo_entry.name, worktree_path);
-        git.worktree_add(&repo_path, &workspace.branch, &worktree_path, &repo_entry.target_branch)?;
+        git.worktree_add(&repo_path, &workspace.branch, &worktree_path, &target_branch)?;
 
         let patterns = copy_files::merge_copy_files(&global.copy_files, &repo_config.copy_files);
         if !patterns.is_empty() {
@@ -197,7 +224,7 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
                 workspace: workspace.name.clone(),
                 repo: Some(repo_entry.name.clone()),
                 branch: workspace.branch.clone(),
-                target_branch: Some(repo_entry.target_branch.clone()),
+                target_branch: Some(target_branch.clone()),
                 worktree_path: Some(worktree_path.clone()),
                 workspace_dir: ws_dir.clone(),
             };
@@ -255,7 +282,7 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
 
     for ws in &workspaces {
         let repos_str = ws.repos.iter()
-            .map(|r| format!("{}:{}", r.name, r.target_branch))
+            .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
             .collect::<Vec<_>>()
             .join(", ");
         println!("  {} - {} [{}]", ws.name, ws.title, repos_str);
@@ -445,7 +472,7 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         println!("dry run for workspace '{}':", name);
         if !args.no_merge {
             for repo_entry in &workspace.repos {
-                println!("  merge {} -> {}", workspace.branch, repo_entry.target_branch);
+                println!("  merge {} -> {}", workspace.branch, repo_entry.target_branch.as_deref().unwrap_or("*"));
             }
         }
         if !args.no_clean {
@@ -471,6 +498,26 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
         let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
 
+        let target_branch = match &repo_entry.target_branch {
+            Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
+            Some(tb) => {
+                let current = git.current_branch(&repo_path)?;
+                tracing::warn!(
+                    "target branch '{}' not found in repo '{}', using current branch '{}'",
+                    tb, repo_entry.name, current
+                );
+                current
+            }
+            None => {
+                let current = git.current_branch(&repo_path)?;
+                tracing::warn!(
+                    "target branch not configured for repo '{}', using current branch '{}'",
+                    repo_entry.name, current
+                );
+                current
+            }
+        };
+
         // Check uncommitted changes
         if git.has_uncommitted_changes(&worktree_path)? {
             if !args.force {
@@ -484,12 +531,12 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         // Merge
         if !args.no_merge {
             let strategy = args.strategy.as_deref();
-            git.merge(&repo_path, &workspace.branch, &repo_entry.target_branch, strategy)?;
-            println!("  merged {} -> {} ({})", workspace.branch, repo_entry.target_branch, repo_entry.name);
+            git.merge(&repo_path, &workspace.branch, &target_branch, strategy)?;
+            println!("  merged {} -> {} ({})", workspace.branch, target_branch, repo_entry.name);
 
             if args.push {
-                git.push(&repo_path, &repo_entry.target_branch)?;
-                println!("  pushed {} ({})", repo_entry.target_branch, repo_entry.name);
+                git.push(&repo_path, &target_branch)?;
+                println!("  pushed {} ({})", target_branch, repo_entry.name);
             }
 
             if args.delete_remote {
@@ -508,7 +555,7 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
                         workspace: workspace.name.clone(),
                         repo: Some(repo_entry.name.clone()),
                         branch: workspace.branch.clone(),
-                        target_branch: Some(repo_entry.target_branch.clone()),
+                        target_branch: Some(target_branch.clone()),
                         worktree_path: Some(worktree_path.clone()),
                         workspace_dir: ws_dir.clone(),
                     })?;
@@ -620,7 +667,7 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
                         workspace: workspace.name.clone(),
                         repo: Some(repo_entry.name.clone()),
                         branch: workspace.branch.clone(),
-                        target_branch: Some(repo_entry.target_branch.clone()),
+                        target_branch: repo_entry.target_branch.clone(),
                         worktree_path: Some(worktree_path.clone()),
                         workspace_dir: ws_dir.clone(),
                     });
