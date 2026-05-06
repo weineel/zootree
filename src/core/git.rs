@@ -16,14 +16,15 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         full_args.extend(args.into_iter().map(String::from));
         let spec = CommandSpec {
             program: "git".into(),
-            args: full_args,
+            args: full_args.clone(),
             cwd: None,
             env: HashMap::new(),
         };
         let output = self.runner.run(&spec)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git command failed: {}", stderr);
+            let cmd = format!("git {}", full_args.join(" "));
+            bail!("git command failed:\n  command: {}\n  error: {}", cmd, stderr.trim());
         }
         Ok(output)
     }
