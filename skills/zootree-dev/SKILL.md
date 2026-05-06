@@ -180,3 +180,49 @@ fn test_something() {
 1. 在 `src/config/global.rs` 的 `HooksConfig` 中添加 `pub <hook_name>: Option<HookValue>`
 2. 在对应功能点调用 `hook_engine.execute_if_set(&config.hooks.<hook_name>, &ctx)`
 3. 构造 `HookContext` 时填充相关字段
+
+## Skill 自我迭代
+
+**核心规则：每次对 zootree 代码做出结构性变更后，必须同步更新本 skill 文件。**
+
+### 什么时候需要更新 skill
+
+| 变更类型 | 需要更新的 skill 章节 |
+|----------|----------------------|
+| 新增/删除/重命名源文件或模块 | 项目架构 |
+| 新增顶级命令或子命令 | 添加新命令 + 项目架构 |
+| 新增/移除 crate 依赖 | 关键依赖 |
+| 改变核心设计模式（如新增 trait、改变 ConfigManager 接口） | 核心设计模式 |
+| 新增编码约定或改变现有约定 | 代码约定 |
+| 新增常见开发任务模式 | 常见开发任务 |
+| 改变测试模式或测试文件组织方式 | 测试规范 |
+
+### 如何更新
+
+1. **完成代码变更后**，回顾本次改动是否属于上表中的变更类型
+2. **直接编辑本文件** (`skills/zootree-dev/SKILL.md`)，保持内容与代码同步
+3. 更新时遵循以下原则：
+   - 项目架构树只反映实际文件结构，用 `find src -type f` 验证
+   - 代码示例必须来自真实代码，不要编造
+   - 删除已不存在的内容，不要保留过时信息
+   - 新增内容保持与现有风格一致（中文描述、代码示例、表格格式）
+
+### 更新检查清单
+
+完成代码修改后，执行以下检查：
+
+```bash
+# 验证架构树是否与实际文件一致
+find src -type f -name "*.rs" | sort
+
+# 验证模块声明
+grep -r "^pub mod\|^mod" src/lib.rs src/cli/mod.rs src/core/mod.rs src/config/mod.rs
+
+# 验证依赖列表
+grep "^\[dependencies" Cargo.toml -A 100 | grep -v "^\[" | grep -v "^$" | grep -v "^#"
+
+# 验证 Commands enum
+grep -A 30 "enum Commands" src/cli/mod.rs
+```
+
+如果任何输出与本 skill 中的描述不一致，立即更新 skill。
