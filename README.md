@@ -1,132 +1,134 @@
 # zootree
 
-多仓库协作开发工作空间管理工具。基于 Git Worktree + Zellij + LazyGit 实现。
+A multi-repo workspace management tool. Built on Git Worktree + Zellij + LazyGit.
 
-## 功能特性
+[中文文档](README.zh-CN.md)
 
-- **多仓库管理** - 同时在多个仓库的同一分支上工作
-- **工作空间** - 创建、管理和清理工作空间
-- **Zellij 集成** - 自动启动布局好的终端环境
-- **Hook 机制** - 自定义钩子支持 (simple/file/inline)
-- **文件复制** - 自动复制配置文件到 worktree
-- **模板系统** - 保存和复用工作空间配置
+## Features
 
-## 安装
+- **Multi-repo management** - Work on the same branch across multiple repositories simultaneously
+- **Workspaces** - Create, manage, and clean up workspaces
+- **Zellij integration** - Automatically launch a well-organized terminal environment
+- **Hook system** - Custom hooks support (simple/file/inline)
+- **File copying** - Automatically copy config files to worktrees
+- **Template system** - Save and reuse workspace configurations
+
+## Installation
 
 ```bash
 cargo install --path .
 ```
 
-## 快速开始
+## Quick Start
 
-### 1. 初始化配置目录
+### 1. Initialize config directory
 
 ```bash
 mkdir -p ~/.config/zootree
 ```
 
-### 2. 添加仓库
+### 2. Add repositories
 
 ```bash
-# 交互式添加
+# Interactive
 zootree repo add
 
-# 命令行添加 (自动从路径提取名称)
+# From path (name auto-extracted)
 zootree repo add ~/projects/myrepo
 
-# 指定仓库名称
+# With options
 zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
 ```
 
-### 3. 创建工作空间
+### 3. Create a workspace
 
 ```bash
-# 交互式创建
+# Interactive
 zootree create
 
-# 命令行创建
-zootree create --title "新功能开发" --repos frontend:feature/abc,backend:feature/abc
+# With options
+zootree create --title "New feature" --repos frontend:feature/abc,backend:feature/abc
 ```
 
-### 4. 启动工作空间
+### 4. Start a workspace
 
 ```bash
 zootree start
-# 或指定名称
+# Or specify by name
 zootree start my-workspace
 ```
 
-### 5. 完成工作空间
+### 5. Finish a workspace
 
 ```bash
-# 合并分支并清理
+# Merge branches and clean up
 zootree done
 
-# 仅合并不清理
+# Merge only, no cleanup
 zootree done --no-clean
 
-# 合并并推送
+# Merge and push
 zootree done --push
 ```
 
-## 命令参考
+## Command Reference
 
-### 仓库管理
+### Repository Management
 
 ```bash
-zootree repo add <path>              # 添加仓库
-zootree repo list                    # 列出仓库
-zootree repo remove <name>           # 移除仓库
+zootree repo add <path>              # Add a repository
+zootree repo list                    # List repositories
+zootree repo remove <name>           # Remove a repository
 ```
 
-### 工作空间
+### Workspaces
 
 ```bash
-zootree create [options]             # 创建工作空间
-  --title <title>                    # 标题
-  --name <name>                      # 工作空间名称
-  --repos <repos>                    # 仓库列表 (repo:branch 格式)
-  --branch <branch>                  # 分支名
-  --template <name>                  # 使用模板
+zootree create [options]             # Create a workspace
+  --title <title>                    # Title
+  --name <name>                      # Workspace name
+  --repos <repos>                    # Repo list (repo:branch format)
+  --branch <branch>                  # Branch name
+  --template <name>                  # Use a template
 
-zootree start [name]                 # 启动工作空间
-  --no-zellij                        # 不启动 Zellij
+zootree start [name]                 # Start a workspace
+  --no-zellij                        # Don't launch Zellij
 
-zootree list                         # 列出工作空间
+zootree list                         # List workspaces
   --status pending|in_progress|done|canceled
 
-zootree open [name]                  # 打开已有工作空间
+zootree open [name]                  # Open an existing workspace
 
-zootree done [name]                  # 完成工作空间
-  --no-merge                         # 不合并
-  --no-clean                         # 不清理
-  --push                             # 推送
-  --delete-remote                    # 删除远程分支
-  --force                            # 强制执行
+zootree done [name]                  # Finish a workspace
+  --no-merge                         # Skip merge
+  --no-clean                         # Skip cleanup
+  --push                             # Push branches
+  --delete-remote                    # Delete remote branches
+  --force                            # Force execution
 
-zootree cancel [name]                # 取消工作空间
-  --no-clean                         # 不清理
-  --force                            # 强制执行
+zootree cancel [name]                # Cancel a workspace
+  --no-clean                         # Skip cleanup
+  --force                            # Force execution
 ```
 
-### 模板
+### Templates
 
 ```bash
-zootree template list                # 列出模板
-zootree template show <name>         # 显示模板
-zootree template delete <name>       # 删除模板
+zootree template list                # List templates
+zootree template show <name>         # Show a template
+zootree template delete <name>       # Delete a template
 ```
 
-### 工具
+### Utilities
 
 ```bash
-zootree prune                        # 清理孤立 worktree
-zootree logs                         # 查看日志
+zootree prune                        # Clean up orphaned worktrees
+zootree logs                         # View logs
 ```
 
-## 配置文件
+## Configuration
 
-### 全局配置 (~/.config/zootree/config.toml)
+### Global config (~/.config/zootree/config.toml)
 
 ```toml
 default_layout = "default"
@@ -145,7 +147,7 @@ pre_remove = "echo removed"
 max_files = 5
 ```
 
-### 仓库配置 (~/.config/zootree/repos/<name>.toml)
+### Repo config (~/.config/zootree/repos/<name>.toml)
 
 ```toml
 path = "~/projects/myrepo"
@@ -159,28 +161,28 @@ post_create = "npm install"
 config = "~/projects/myrepo/.lazygit.yml"
 ```
 
-### Hook 格式
+### Hook formats
 
 ```toml
-# 简单命令
+# Simple command
 post_create = "echo hello"
 
-# 文件脚本
+# File script
 pre_remove = { file = "~/.config/zootree/hooks/cleanup.sh" }
 
-# 内联脚本
+# Inline script
 pre_done = { inline = "echo 'cleaning up' && rm -rf $WORKTREE_PATH" }
 ```
 
-Hook 可用环境变量：
-- `WORKSPACE` - 工作空间名称
-- `REPO` - 仓库名称
-- `BRANCH` - 分支名
-- `TARGET_BRANCH` - 目标分支
-- `WORKTREE_PATH` - worktree 路径
-- `WORKSPACE_DIR` - 工作空间目录
+Available environment variables in hooks:
+- `WORKSPACE` - Workspace name
+- `REPO` - Repository name
+- `BRANCH` - Branch name
+- `TARGET_BRANCH` - Target branch
+- `WORKTREE_PATH` - Worktree path
+- `WORKSPACE_DIR` - Workspace directory
 
-### 布局模板 (~/.config/zootree/layouts/<name>.kdl)
+### Layout templates (~/.config/zootree/layouts/<name>.kdl)
 
 ```kdl
 layout {
@@ -191,24 +193,24 @@ layout {
 }
 ```
 
-可用变量：
-- `@REPO_NAME@` - 仓库名
-- `@WORKTREE_PATH@` - worktree 路径
-- `@BRANCH@` - 分支名
-- `@WORKSPACE_NAME@` - 工作空间名
-- `@WORKSPACE_DIR@` - 工作空间目录
+Available variables:
+- `@REPO_NAME@` - Repository name
+- `@WORKTREE_PATH@` - Worktree path
+- `@BRANCH@` - Branch name
+- `@WORKSPACE_NAME@` - Workspace name
+- `@WORKSPACE_DIR@` - Workspace directory
 
-## 选项
+## Options
 
 ```bash
--v, --verbose    # 详细输出
--q, --quiet      # 静默输出
--h, --help       # 帮助
---version        # 版本
+-v, --verbose    # Verbose output
+-q, --quiet      # Quiet output
+-h, --help       # Help
+--version        # Version
 ```
 
-## 依赖
+## Dependencies
 
 - Git
 - Zellij
-- LazyGit (可选)
+- LazyGit (optional)
