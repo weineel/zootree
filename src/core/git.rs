@@ -28,6 +28,23 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(output)
     }
 
+    pub fn current_branch(&self, repo_path: &str) -> Result<String> {
+        let output = self.git(repo_path, vec!["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(branch)
+    }
+
+    pub fn branch_exists(&self, repo_path: &str, branch: &str) -> Result<bool> {
+        let spec = CommandSpec {
+            program: "git".into(),
+            args: vec!["-C".into(), repo_path.into(), "rev-parse".into(), "--verify".into(), format!("refs/heads/{}", branch)],
+            cwd: None,
+            env: HashMap::new(),
+        };
+        let output = self.runner.run(&spec)?;
+        Ok(output.status.success())
+    }
+
     pub fn worktree_add(&self, repo_path: &str, branch: &str, worktree_path: &str, base: &str) -> Result<()> {
         self.git(repo_path, vec!["worktree", "add", "-b", branch, worktree_path, base])?;
         Ok(())

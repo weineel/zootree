@@ -42,12 +42,25 @@ fn init_tracing(
     Ok(guard)
 }
 
-fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
 
-    let _guard = init_tracing(cli.verbose, cli.quiet)?;
+    let _guard = match init_tracing(cli.verbose, cli.quiet) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("Error: failed to initialize tracing: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    match cli.command {
+    if let Err(e) = run(cli.command) {
+        tracing::error!("{:#}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run(command: Commands) -> Result<()> {
+    match command {
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;
         }
