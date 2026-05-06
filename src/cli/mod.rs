@@ -11,10 +11,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Enable verbose logging output")]
     pub verbose: bool,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Suppress all output except errors")]
     pub quiet: bool,
 }
 

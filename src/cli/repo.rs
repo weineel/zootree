@@ -15,20 +15,23 @@ pub struct RepoArgs {
 pub enum RepoCommands {
     #[command(about = "Register a new repository")]
     Add {
-        #[arg(long)]
+        #[arg(long, help = "Custom name for the repo (defaults to directory name)")]
         name: Option<String>,
+        #[arg(help = "Path to the git repository")]
         path: String,
-        #[arg(long)]
+        #[arg(long, help = "Default target branch for merging (e.g. main, develop)")]
         default_target_branch: Option<String>,
     },
     #[command(about = "List registered repositories")]
     List,
     #[command(about = "Edit a repository config file")]
     Edit {
+        #[arg(help = "Name of the repo to edit (interactive if omitted)")]
         name: Option<String>,
     },
     #[command(about = "Unregister a repository")]
     Remove {
+        #[arg(help = "Name of the repo to remove (interactive if omitted)")]
         name: Option<String>,
     },
 }

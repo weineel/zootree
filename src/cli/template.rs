@@ -15,8 +15,9 @@ pub enum TemplateCommands {
     List,
     #[command(about = "Save a workspace as a template")]
     Save {
+        #[arg(help = "Name for the new template")]
         name: String,
-        #[arg(long)]
+        #[arg(long, help = "Workspace name to save as template")]
         from: String,
     },
 }

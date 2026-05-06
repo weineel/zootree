@@ -403,17 +403,17 @@ fn launch_zellij(
 
 #[derive(Args)]
 pub struct CreateArgs {
-    #[arg(long)]
+    #[arg(long, help = "Workspace title (interactive if omitted)")]
     pub title: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Workspace name (auto-generated if omitted)")]
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Workspace description")]
     pub description: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Comma-separated repos, optionally with branch: repo1:branch1,repo2")]
     pub repos: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Git branch name for worktrees (defaults to <prefix>/<name>)")]
     pub branch: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Template name to use for repo selection")]
     pub template: Option<String>,
 }
 
@@ -425,41 +425,45 @@ pub struct ListArgs {
 
 #[derive(Args)]
 pub struct StartArgs {
+    #[arg(help = "Workspace name to start (interactive if omitted)")]
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Skip launching zellij session after start")]
     pub no_zellij: bool,
 }
 
 #[derive(Args)]
 pub struct OpenArgs {
+    #[arg(help = "Workspace name to open (interactive if omitted)")]
     pub name: Option<String>,
 }
 
 #[derive(Args)]
 pub struct DoneArgs {
+    #[arg(help = "Workspace name to complete (interactive if omitted)")]
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Skip merging branches back to target")]
     pub no_merge: bool,
-    #[arg(long)]
+    #[arg(long, help = "Keep worktrees and workspace directory")]
     pub no_clean: bool,
-    #[arg(long)]
+    #[arg(long, help = "Push target branch to remote after merge")]
     pub push: bool,
-    #[arg(long)]
+    #[arg(long, help = "Delete remote feature branch after merge")]
     pub delete_remote: bool,
-    #[arg(long)]
+    #[arg(long, help = "Merge strategy, available: squash(default), rebase, merge")]
     pub strategy: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Skip hooks and uncommitted-changes check")]
     pub force: bool,
-    #[arg(long)]
+    #[arg(long, help = "Show what would be done without executing")]
     pub dry_run: bool,
 }
 
 #[derive(Args)]
 pub struct CancelArgs {
+    #[arg(help = "Workspace name to cancel (interactive if omitted)")]
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Keep worktrees and workspace directory")]
     pub no_clean: bool,
-    #[arg(long)]
+    #[arg(long, help = "Skip hooks and confirmation prompts")]
     pub force: bool,
 }
 

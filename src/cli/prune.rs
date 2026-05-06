@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[derive(Args)]
 pub struct PruneArgs {
-    #[arg(long)]
+    #[arg(long, help = "Prune all archived workspaces without prompting")]
     pub all: bool,
 }
 
