@@ -34,10 +34,20 @@ impl Default for LogConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ZellijConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalConfig {
-    #[serde(default = "default_zellij_layout")]
-    pub zellij_layout: String,
+    #[serde(default)]
+    pub zellij: ZellijConfig,
     #[serde(default = "default_workspace_root")]
     pub workspace_root: String,
     #[serde(default = "default_branch_prefix")]
@@ -50,14 +60,16 @@ pub struct GlobalConfig {
     pub log: LogConfig,
 }
 
-fn default_zellij_layout() -> String { "default".into() }
 fn default_workspace_root() -> String { "~/zootree-workspaces".into() }
 fn default_branch_prefix() -> String { "zootree".into() }
 
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            zellij_layout: default_zellij_layout(),
+            zellij: ZellijConfig {
+                layout: Some("default".into()),
+                ..Default::default()
+            },
             workspace_root: default_workspace_root(),
             branch_prefix: default_branch_prefix(),
             copy_files: Vec::new(),
