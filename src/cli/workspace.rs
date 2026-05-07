@@ -125,9 +125,10 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
         branch,
         workspace_dir,
         created_at: now.clone(),
-        layout: None,
-        session_mode: "standalone".into(),
-        session_name: None,
+        zellij: ZellijConfig {
+            session_mode: Some("standalone".into()),
+            ..Default::default()
+        },
         repos: repo_entries,
         events: vec![Event {
             action: "created".into(),
@@ -140,11 +141,7 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
 
     let recently = TemplateConfig {
         repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-        zellij: ZellijConfig {
-            layout: workspace.layout.clone(),
-            session_mode: Some(workspace.session_mode.clone()),
-            session_name: None,
-        },
+        zellij: workspace.zellij.clone(),
     };
     config_mgr.save_template("recently", &recently)?;
 
@@ -368,8 +365,9 @@ fn launch_zellij(
 
     let zellij = ZellijOps::new(runner);
 
-    let layout_name = workspace.layout.as_deref()
-        .unwrap_or(&global.zellij_layout);
+    let layout_name = workspace.zellij.layout.as_deref()
+        .or(global.zellij.layout.as_deref())
+        .unwrap_or("default");
 
     let template_content = if layout_name == "default" {
         write_default_layout(&config_mgr.base_dir)
@@ -407,8 +405,8 @@ fn launch_zellij(
     let layout_file = layout_dir.join("recently.kdl");
     std::fs::write(&layout_file, &rendered)?;
 
-    let session_name = match workspace.session_mode.as_str() {
-        "shared" => workspace.session_name.clone()
+    let session_name = match workspace.zellij.session_mode.as_deref() {
+        Some("shared") => workspace.zellij.session_name.clone()
             .ok_or_else(|| anyhow::anyhow!("shared mode requires session_name"))?,
         _ => format!("zootree-{}", workspace.name),
     };
@@ -632,8 +630,8 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
     }
 
     // Kill zellij session
-    let session_name = match workspace.session_mode.as_str() {
-        "shared" => workspace.session_name.clone(),
+    let session_name = match workspace.zellij.session_mode.as_deref() {
+        Some("shared") => workspace.zellij.session_name.clone(),
         _ => Some(format!("zootree-{}", workspace.name)),
     };
     if let Some(sn) = &session_name {
@@ -749,8 +747,8 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     }
 
     // Kill zellij session
-    let session_name = match workspace.session_mode.as_str() {
-        "shared" => workspace.session_name.clone(),
+    let session_name = match workspace.zellij.session_mode.as_deref() {
+        Some("shared") => workspace.zellij.session_name.clone(),
         _ => Some(format!("zootree-{}", workspace.name)),
     };
     if let Some(sn) = &session_name {
