@@ -130,21 +130,15 @@ zootree logs     # 查看日志文件
 ### 全局配置 (~/.config/zootree/config.toml)
 
 ```toml
-default_layout = "default"
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
 
-[hooks]
-post_create = "echo created"
-post_start = "echo started"
-pre_done = "echo cleaning up"
-pre_cancel = "echo canceled"
-pre_remove = "echo removing"
+[zellij]
+layout = "default"
 
-[log]
-max_files = 5
-max_size = "10MB"
+[hooks]
+...
 ```
 
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
