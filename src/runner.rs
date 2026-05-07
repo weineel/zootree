@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 use anyhow::Result;
 
 pub struct CommandSpec {
@@ -11,6 +11,11 @@ pub struct CommandSpec {
 
 pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> Result<Output>;
+
+    /// Run a command that needs direct terminal access (interactive TUI).
+    /// Inherits stdin/stdout/stderr from the parent process. Returns the
+    /// exit status rather than captured output.
+    fn run_interactive(&self, spec: &CommandSpec) -> Result<ExitStatus>;
 }
 
 pub struct RealRunner;
@@ -27,6 +32,19 @@ impl CommandRunner for RealRunner {
         }
         let output = cmd.output()?;
         Ok(output)
+    }
+
+    fn run_interactive(&self, spec: &CommandSpec) -> Result<ExitStatus> {
+        let mut cmd = Command::new(&spec.program);
+        cmd.args(&spec.args);
+        if let Some(cwd) = &spec.cwd {
+            cmd.current_dir(cwd);
+        }
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
+        let status = cmd.status()?;
+        Ok(status)
     }
 }
 
@@ -62,5 +80,16 @@ impl CommandRunner for MockRunner {
         });
         let output = self.responses.borrow_mut().remove(0);
         Ok(output)
+    }
+
+    fn run_interactive(&self, spec: &CommandSpec) -> Result<ExitStatus> {
+        self.calls.borrow_mut().push(CommandSpec {
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+            cwd: spec.cwd.clone(),
+            env: spec.env.clone(),
+        });
+        let output = self.responses.borrow_mut().remove(0);
+        Ok(output.status)
     }
 }

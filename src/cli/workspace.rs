@@ -341,23 +341,40 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
     Ok(())
 }
 
+fn write_default_layout(base_dir: &Path) -> String {
+    let content = LayoutRenderer::default_layout().to_string();
+    let path = base_dir.join("layouts").join("default.kdl");
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let _ = std::fs::write(&path, &content);
+    content
+}
+
 fn launch_zellij(
     config_mgr: &ConfigManager,
     global: &crate::config::global::GlobalConfig,
     workspace: &WorkspaceConfig,
     runner: &RealRunner,
 ) -> Result<()> {
+    if std::env::var("ZELLIJ").is_ok() {
+        anyhow::bail!(
+            "already inside a zellij session (ZELLIJ is set); cannot start a new session. \
+             Use a regular terminal to run 'zootree start'"
+        );
+    }
+
     let zellij = ZellijOps::new(runner);
 
     let layout_name = workspace.layout.as_deref()
-        .unwrap_or(&global.default_layout);
+        .unwrap_or(&global.zellij_layout);
 
-    let template_content = {
+    let template_content = if layout_name == "default" {
+        write_default_layout(&config_mgr.base_dir)
+    } else {
         let layout_path = config_mgr.base_dir.join("layouts").join(format!("{}.kdl", layout_name));
         if layout_path.exists() {
             std::fs::read_to_string(&layout_path)?
         } else {
-            LayoutRenderer::default_layout().to_string()
+            write_default_layout(&config_mgr.base_dir)
         }
     };
 
@@ -381,9 +398,9 @@ fn launch_zellij(
 
     let rendered = LayoutRenderer::render(&template_content, &vars);
 
-    let tmp_dir = std::env::temp_dir().join("zootree");
-    std::fs::create_dir_all(&tmp_dir)?;
-    let layout_file = tmp_dir.join(format!("{}.kdl", workspace.name));
+    let layout_dir = config_mgr.base_dir.join("layouts");
+    std::fs::create_dir_all(&layout_dir)?;
+    let layout_file = layout_dir.join("recently.kdl");
     std::fs::write(&layout_file, &rendered)?;
 
     let session_name = match workspace.session_mode.as_str() {
@@ -612,7 +629,9 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         _ => Some(format!("zootree-{}", workspace.name)),
     };
     if let Some(sn) = &session_name {
-        let _ = zellij.kill_session(sn);
+        if let Err(e) = zellij.kill_session(sn) {
+            tracing::warn!("failed to kill zellij session '{}': {}", sn, e);
+        }
     }
 
     // Archive
@@ -723,7 +742,9 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         _ => Some(format!("zootree-{}", workspace.name)),
     };
     if let Some(sn) = &session_name {
-        let _ = zellij.kill_session(sn);
+        if let Err(e) = zellij.kill_session(sn) {
+            tracing::warn!("failed to kill zellij session '{}': {}", sn, e);
+        }
     }
 
     // Archive

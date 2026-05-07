@@ -6,7 +6,7 @@ use zootree::config::global::HookValue;
 #[test]
 fn test_parse_global_config_full() {
     let toml_str = r#"
-default_layout = "default"
+zellij_layout = "default"
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
@@ -18,7 +18,7 @@ post_create = "echo hello"
 max_files = 5
 "#;
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.default_layout, "default");
+    assert_eq!(config.zellij_layout, "default");
     assert_eq!(config.workspace_root, "~/zootree-workspaces");
     assert_eq!(config.branch_prefix, "zootree");
     assert_eq!(config.copy_files, vec![".env"]);
@@ -30,7 +30,7 @@ max_files = 5
 fn test_parse_global_config_defaults() {
     let toml_str = "";
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.default_layout, "default");
+    assert_eq!(config.zellij_layout, "default");
     assert_eq!(config.branch_prefix, "zootree");
     assert!(config.copy_files.is_empty());
 }
@@ -100,7 +100,7 @@ timestamp = "2026-04-28T10:30:00+08:00"
     assert_eq!(config.name, "calm-river");
     assert_eq!(config.repos.len(), 2);
     assert_eq!(config.repos[0].name, "frontend");
-    assert_eq!(config.repos[0].target_branch, "develop");
+    assert_eq!(config.repos[0].target_branch, Some("develop".into()));
     assert_eq!(config.events.len(), 1);
 }
 
