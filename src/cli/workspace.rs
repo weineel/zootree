@@ -614,7 +614,7 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
             if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, false) {
                 tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
             }
-            if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, false) {
+            if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, true) {
                 tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
             }
         }
