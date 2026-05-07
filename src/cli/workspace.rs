@@ -611,8 +611,12 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
                 }
             }
 
-            git.worktree_remove(&repo_path, &worktree_path, false)?;
-            git.delete_local_branch(&repo_path, &workspace.branch, false)?;
+            if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, false) {
+                tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
+            }
+            if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, false) {
+                tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
+            }
         }
     }
 
@@ -726,9 +730,13 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
             }
 
             if Path::new(&worktree_path).exists() {
-                git.worktree_remove(&repo_path, &worktree_path, args.force)?;
+                if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, args.force) {
+                    tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
+                }
             }
-            git.delete_local_branch(&repo_path, &workspace.branch, true)?;
+            if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, true) {
+                tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
+            }
         }
 
         if Path::new(&ws_dir).exists() {
