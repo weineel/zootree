@@ -138,7 +138,15 @@ copy_files = [".env"]
 layout = "default"
 
 [hooks]
-...
+post_create = "echo created"
+post_start = "echo started"
+pre_done = "echo cleaning up"
+pre_cancel = "echo canceled"
+pre_remove = "echo removing"
+
+[log]
+max_files = 5
+max_size = "10MB"
 ```
 
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
