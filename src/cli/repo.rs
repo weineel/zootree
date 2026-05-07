@@ -59,7 +59,7 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
                 copy_files: Vec::new(),
                 hooks: HooksConfig::default(),
                 lazygit: None,
-                layout: None,
+                zellij: None,
             };
             config_mgr.save_repo_config(&repo_name, &repo_config)?;
             println!("repo '{}' registered at {}", repo_name, abs_path.display());

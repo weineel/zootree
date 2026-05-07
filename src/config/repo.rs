@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use super::global::HooksConfig;
+use super::global::{HooksConfig, ZellijConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LazyGitConfig {
@@ -15,5 +15,6 @@ pub struct RepoConfig {
     #[serde(default)]
     pub hooks: HooksConfig,
     pub lazygit: Option<LazyGitConfig>,
-    pub layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zellij: Option<ZellijConfig>,
 }
