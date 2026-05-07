@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
 use crate::config::ConfigManager;
+use crate::config::global::ZellijConfig;
 use crate::config::template::TemplateConfig;
 use anyhow::Result;
 
@@ -43,8 +44,11 @@ pub fn handle_template_command(cmd: &TemplateCommands) -> Result<()> {
             let (_, workspace) = config_mgr.load_workspace(from)?;
             let tmpl = TemplateConfig {
                 repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-                layout: workspace.layout.clone(),
-                session_mode: Some(workspace.session_mode.clone()),
+                zellij: ZellijConfig {
+                    layout: workspace.layout.clone(),
+                    session_mode: Some(workspace.session_mode.clone()),
+                    session_name: None,
+                },
             };
             config_mgr.save_template(name, &tmpl)?;
             println!("template '{}' saved from workspace '{}'", name, from);

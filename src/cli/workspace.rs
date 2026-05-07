@@ -1,6 +1,7 @@
 use clap::Args;
 use crate::config::ConfigManager;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus, RepoEntry, Event};
+use crate::config::global::ZellijConfig;
 use crate::config::template::TemplateConfig;
 use crate::core::name_gen::NameGenerator;
 use crate::core::git::GitOps;
@@ -139,8 +140,11 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
 
     let recently = TemplateConfig {
         repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-        layout: workspace.layout.clone(),
-        session_mode: Some(workspace.session_mode.clone()),
+        zellij: ZellijConfig {
+            layout: workspace.layout.clone(),
+            session_mode: Some(workspace.session_mode.clone()),
+            session_name: None,
+        },
     };
     config_mgr.save_template("recently", &recently)?;
 
