@@ -131,10 +131,12 @@ zootree logs                         # 查看日志
 ### 全局配置 (~/.config/zootree/config.toml)
 
 ```toml
-default_layout = "default"
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
+
+[zellij]
+layout = "default"
 
 [hooks]
 post_create = "echo created"
