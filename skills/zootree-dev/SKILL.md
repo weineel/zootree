@@ -165,6 +165,7 @@ fn test_something() {
 - **序列化**: 所有配置 struct 都 derive `Serialize + Deserialize + Debug + Clone + PartialEq`
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`
 - **untagged enum**: `HookValue` 使用 `#[serde(untagged)]` 支持三种格式
+- **zellij 分组**: 所有 zellij 相关配置统一在 `ZellijConfig` 中（`src/config/global.rs`），字段 Optional，用 `#[serde(default)]` 嵌入各配置 struct
 - **shellexpand**: 所有用户输入的路径在使用前都要 `shellexpand::tilde()` 展开 `~`
 
 ## 常见开发任务
