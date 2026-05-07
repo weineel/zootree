@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use super::global::ZellijConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -31,16 +32,10 @@ pub struct WorkspaceConfig {
     pub branch: String,
     pub workspace_dir: String,
     pub created_at: String,
-    pub layout: Option<String>,
-    #[serde(default = "default_session_mode")]
-    pub session_mode: String,
-    pub session_name: Option<String>,
+    #[serde(default)]
+    pub zellij: ZellijConfig,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
     #[serde(default)]
     pub events: Vec<Event>,
-}
-
-fn default_session_mode() -> String {
-    "standalone".into()
 }
