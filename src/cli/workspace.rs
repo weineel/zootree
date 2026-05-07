@@ -411,10 +411,12 @@ fn launch_zellij(
         _ => format!("zootree-{}", workspace.name),
     };
 
-    if zellij.session_exists(&session_name)? {
-        zellij.attach_session(&session_name)?;
-    } else {
-        zellij.start_session(&session_name, &layout_file)?;
+    match zellij.start_session(&session_name, &layout_file) {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!("start_session failed ({}), trying attach", e);
+            zellij.attach_session(&session_name)?;
+        }
     }
 
     Ok(())
