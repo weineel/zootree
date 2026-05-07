@@ -131,10 +131,12 @@ zootree logs                         # View logs
 ### Global config (~/.config/zootree/config.toml)
 
 ```toml
-default_layout = "default"
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
+
+[zellij]
+layout = "default"
 
 [hooks]
 post_create = "echo created"
