@@ -472,8 +472,10 @@ pub struct DoneArgs {
     pub delete_remote: bool,
     #[arg(long, help = "Merge strategy, available: squash(default), rebase, merge")]
     pub strategy: Option<String>,
-    #[arg(long, help = "Skip hooks and uncommitted-changes check")]
+    #[arg(long, help = "Continue even if steps fail (errors become warnings)")]
     pub force: bool,
+    #[arg(long, help = "Skip all hooks (pre_done/pre_remove)")]
+    pub skip_hooks: bool,
     #[arg(long, help = "Show what would be done without executing")]
     pub dry_run: bool,
 }
@@ -484,8 +486,10 @@ pub struct CancelArgs {
     pub name: Option<String>,
     #[arg(long, help = "Keep worktrees and workspace directory")]
     pub no_clean: bool,
-    #[arg(long, help = "Skip hooks and confirmation prompts")]
+    #[arg(long, help = "Continue even if steps fail (errors become warnings)")]
     pub force: bool,
+    #[arg(long, help = "Skip all hooks (pre_cancel/pre_remove)")]
+    pub skip_hooks: bool,
 }
 
 fn warn_or_bail(force: bool, err: anyhow::Error, context: &str) -> Result<()> {
