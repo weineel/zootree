@@ -488,6 +488,15 @@ pub struct CancelArgs {
     pub force: bool,
 }
 
+fn warn_or_bail(force: bool, err: anyhow::Error, context: &str) -> Result<()> {
+    if force {
+        tracing::warn!("{}: {:#}", context, err);
+        Ok(())
+    } else {
+        Err(err.context(format!("{} (use --force to proceed anyway)", context)))
+    }
+}
+
 pub fn handle_done(args: &DoneArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     let global = config_mgr.load_global_config()?;
@@ -771,4 +780,25 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 
     println!("workspace '{}' canceled", name);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warn_or_bail_with_force_returns_ok() {
+        let err = anyhow::anyhow!("hook failed");
+        let result = warn_or_bail(true, err, "pre_done hook");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn warn_or_bail_without_force_returns_err_with_hint() {
+        let err = anyhow::anyhow!("hook failed");
+        let result = warn_or_bail(false, err, "pre_done hook");
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("use --force to proceed anyway"), "got: {}", msg);
+    }
 }
