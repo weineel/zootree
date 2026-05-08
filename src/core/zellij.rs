@@ -56,10 +56,8 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
     }
 
     pub fn kill_session(&self, session_name: &str) -> Result<()> {
-        info!("deleting zellij session: {}", session_name);
-        // kill first to stop the running session, then delete to clean up
-        let _ = self.zellij(vec!["kill-session".into(), session_name.into()]);
-        self.zellij(vec!["delete-session".into(), "--force".into(), session_name.into()])?;
+        info!("killing zellij session: {}", session_name);
+        let _ = self.zellij(vec!["delete-session".into(), "--force".into(), session_name.into()]);
         Ok(())
     }
 

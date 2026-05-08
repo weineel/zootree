@@ -631,6 +631,16 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
     }
 
+    // Archive
+    let now = Local::now().to_rfc3339();
+    workspace.events.push(Event {
+        action: "done".into(),
+        timestamp: now,
+        detail: None,
+    });
+    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
+    config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Done)?;
+
     // Kill zellij session
     let session_name = match workspace.zellij.session_mode.as_deref() {
         Some("shared") => workspace.zellij.session_name.clone(),
@@ -641,16 +651,6 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
             tracing::warn!("failed to kill zellij session '{}': {}", sn, e);
         }
     }
-
-    // Archive
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "done".into(),
-        timestamp: now,
-        detail: None,
-    });
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
-    config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Done)?;
 
     println!("workspace '{}' completed", name);
     Ok(())
@@ -748,6 +748,16 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         }
     }
 
+    // Archive
+    let now = Local::now().to_rfc3339();
+    workspace.events.push(Event {
+        action: "canceled".into(),
+        timestamp: now,
+        detail: None,
+    });
+    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
+    config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Canceled)?;
+
     // Kill zellij session
     let session_name = match workspace.zellij.session_mode.as_deref() {
         Some("shared") => workspace.zellij.session_name.clone(),
@@ -758,16 +768,6 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
             tracing::warn!("failed to kill zellij session '{}': {}", sn, e);
         }
     }
-
-    // Archive
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "canceled".into(),
-        timestamp: now,
-        detail: None,
-    });
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
-    config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Canceled)?;
 
     println!("workspace '{}' canceled", name);
     Ok(())
