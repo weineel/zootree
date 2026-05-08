@@ -468,8 +468,6 @@ pub struct DoneArgs {
     pub no_clean: bool,
     #[arg(long, help = "Push target branch to remote after merge")]
     pub push: bool,
-    #[arg(long, help = "Delete remote feature branch after merge")]
-    pub delete_remote: bool,
     #[arg(long, help = "Merge strategy, available: squash(default), rebase, merge")]
     pub strategy: Option<String>,
     #[arg(long, help = "Continue even if steps fail (errors become warnings)")]
@@ -605,11 +603,6 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
             if args.push {
                 git.push(&repo_path, &target_branch)?;
                 println!("  pushed {} ({})", target_branch, repo_entry.name);
-            }
-
-            if args.delete_remote {
-                git.delete_remote_branch(&repo_path, &workspace.branch)?;
-                println!("  deleted remote branch {} ({})", workspace.branch, repo_entry.name);
             }
         }
 

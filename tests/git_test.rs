@@ -161,18 +161,6 @@ fn test_push_command() {
 }
 
 #[test]
-fn test_delete_remote_branch() {
-    let runner = MockRunner::new();
-    runner.push_response(success_output());
-    let git = GitOps::new(&runner);
-
-    git.delete_remote_branch("/home/user/projects/frontend", "zootree/calm-river").unwrap();
-
-    let calls = runner.take_calls();
-    assert_eq!(calls[0].args, vec!["-C", "/home/user/projects/frontend", "push", "origin", "--delete", "zootree/calm-river"]);
-}
-
-#[test]
 fn test_delete_local_branch() {
     let runner = MockRunner::new();
     runner.push_response(success_output());

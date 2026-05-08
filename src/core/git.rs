@@ -107,11 +107,6 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(())
     }
 
-    pub fn delete_remote_branch(&self, repo_path: &str, branch: &str) -> Result<()> {
-        self.git(repo_path, vec!["push", "origin", "--delete", branch])?;
-        Ok(())
-    }
-
     pub fn delete_local_branch(&self, repo_path: &str, branch: &str, force: bool) -> Result<()> {
         let flag = if force { "-D" } else { "-d" };
         self.git(repo_path, vec!["branch", flag, branch])?;
