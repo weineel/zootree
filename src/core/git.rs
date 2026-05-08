@@ -77,10 +77,27 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
                 self.git(repo_path, vec!["merge", branch])?;
             }
             _ => {
-                // 默认使用 squash 方式
-                self.git(repo_path, vec!["merge", "--squash", branch])?;
+            // 默认使用 squash 方式
+            self.git(repo_path, vec!["merge", "--squash", branch])?;
+            // exit 1 表示有 staged 变更，exit 0 表示无变更（已是最新）
+            let has_staged = {
+                let mut args = vec!["-C".to_string(), repo_path.to_string()];
+                args.extend(["diff", "--staged", "--quiet"].iter().map(|s| s.to_string()));
+                let spec = CommandSpec {
+                    program: "git".into(),
+                    args,
+                    cwd: None,
+                    env: HashMap::new(),
+                };
+                let output = self.runner.run(&spec)?;
+                !output.status.success()
+            };
+            if has_staged {
                 self.git(repo_path, vec!["commit", "-m", message])?;
+            } else {
+                tracing::warn!("nothing to merge from '{}' into '{}'", branch, target);
             }
+        }
         }
         Ok(())
     }

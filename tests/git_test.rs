@@ -104,6 +104,11 @@ fn test_merge_squash() {
     let runner = MockRunner::new();
     runner.push_response(success_output()); // checkout
     runner.push_response(success_output()); // merge --squash
+    runner.push_response(Output {           // diff --staged --quiet: exit 1 = has staged changes
+        status: ExitStatus::from_raw(256),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    });
     runner.push_response(success_output()); // commit
     let git = GitOps::new(&runner);
 
@@ -116,9 +121,31 @@ fn test_merge_squash() {
     ).unwrap();
 
     let calls = runner.take_calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 4);
     assert_eq!(calls[1].args, vec!["-C", "/home/user/projects/frontend", "merge", "--squash", "zootree/calm-river"]);
-    assert_eq!(calls[2].args, vec!["-C", "/home/user/projects/frontend", "commit", "-m", "fix: resolve login issue"]);
+    assert_eq!(calls[2].args, vec!["-C", "/home/user/projects/frontend", "diff", "--staged", "--quiet"]);
+    assert_eq!(calls[3].args, vec!["-C", "/home/user/projects/frontend", "commit", "-m", "fix: resolve login issue"]);
+}
+
+#[test]
+fn test_merge_squash_nothing_to_merge() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output()); // checkout
+    runner.push_response(success_output()); // merge --squash
+    runner.push_response(success_output()); // diff --staged --quiet: exit 0 = nothing staged
+    let git = GitOps::new(&runner);
+
+    git.merge(
+        "/home/user/projects/frontend",
+        "zootree/calm-river",
+        "develop",
+        None, // default = squash
+        "fix: resolve login issue",
+    ).unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[2].args, vec!["-C", "/home/user/projects/frontend", "diff", "--staged", "--quiet"]);
 }
 
 #[test]
