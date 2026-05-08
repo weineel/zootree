@@ -719,15 +719,17 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     }
 
     // pre_cancel hook
-    if !args.force {
-        hook_engine.execute_if_set(&global.hooks.pre_cancel, &HookContext {
+    if !args.skip_hooks {
+        if let Err(e) = hook_engine.execute_if_set(&global.hooks.pre_cancel, &HookContext {
             workspace: workspace.name.clone(),
             repo: None,
             branch: workspace.branch.clone(),
             target_branch: None,
             worktree_path: None,
             workspace_dir: ws_dir.clone(),
-        })?;
+        }) {
+            warn_or_bail(args.force, e, "pre_cancel hook failed")?;
+        }
     }
 
     if !args.no_clean {
@@ -740,15 +742,17 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
             let hook = repo_config.hooks.pre_remove.as_ref()
                 .or(global.hooks.pre_remove.as_ref());
             if let Some(h) = hook {
-                if !args.force {
-                    let _ = hook_engine.execute(h, &HookContext {
+                if !args.skip_hooks {
+                    if let Err(e) = hook_engine.execute(h, &HookContext {
                         workspace: workspace.name.clone(),
                         repo: Some(repo_entry.name.clone()),
                         branch: workspace.branch.clone(),
                         target_branch: repo_entry.target_branch.clone(),
                         worktree_path: Some(worktree_path.clone()),
                         workspace_dir: ws_dir.clone(),
-                    });
+                    }) {
+                        warn_or_bail(args.force, e, "pre_remove hook failed")?;
+                    }
                 }
             }
 
@@ -763,7 +767,9 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         }
 
         if Path::new(&ws_dir).exists() {
-            std::fs::remove_dir_all(&ws_dir)?;
+            if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
+                warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
+            }
         }
     }
 
