@@ -1,0 +1,8 @@
+sign-commit = false
+sign-tag = false
+push = true
+publish = true
+registry = "crates-io"
+tag = true
+pre-release-commit-message = "chore: release {{version}}"
+tag-message = "v{{version}}"
