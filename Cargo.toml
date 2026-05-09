@@ -26,6 +26,9 @@ rand = "0.8"
 anyhow = "1"
 shellexpand = "3"
 
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
