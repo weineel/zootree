@@ -81,7 +81,7 @@ impl ConfigManager {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
                 if let Some(name) = entry.path().file_stem() {
-                    if entry.path().extension().map_or(false, |e| e == "toml") {
+                    if entry.path().extension().is_some_and(|e| e == "toml") {
                         names.push(name.to_string_lossy().into_owned());
                     }
                 }
@@ -167,7 +167,7 @@ impl ConfigManager {
             if dir.exists() {
                 for entry in std::fs::read_dir(&dir)? {
                     let entry = entry?;
-                    if entry.path().extension().map_or(false, |e| e == "toml") {
+                    if entry.path().extension().is_some_and(|e| e == "toml") {
                         let content = std::fs::read_to_string(entry.path())?;
                         if let Ok(config) = toml::from_str(&content) {
                             workspaces.push(config);
@@ -215,7 +215,7 @@ impl ConfigManager {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
                 if let Some(name) = entry.path().file_stem() {
-                    if entry.path().extension().map_or(false, |e| e == "toml") {
+                    if entry.path().extension().is_some_and(|e| e == "toml") {
                         names.push(name.to_string_lossy().into_owned());
                     }
                 }

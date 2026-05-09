@@ -670,13 +670,11 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         };
 
         // Check uncommitted changes
-        if git.has_uncommitted_changes(&worktree_path)? {
-            if !args.force {
-                anyhow::bail!(
-                    "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
-                    repo_entry.name, worktree_path
-                );
-            }
+        if git.has_uncommitted_changes(&worktree_path)? && !args.force {
+            anyhow::bail!(
+                "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
+                repo_entry.name, worktree_path
+            );
         }
 
         // Merge
@@ -740,11 +738,9 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
     }
 
     // Remove workspace directory
-    if !args.no_clean {
-        if Path::new(&ws_dir).exists() {
-            if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
-                warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
-            }
+    if !args.no_clean && Path::new(&ws_dir).exists() {
+        if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
+            warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
         }
     }
 
@@ -808,16 +804,17 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     if !args.force {
         for repo_entry in &workspace.repos {
             let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-            if Path::new(&worktree_path).exists() && git.has_uncommitted_changes(&worktree_path)? {
-                if !tui::confirm(
+            if Path::new(&worktree_path).exists()
+                && git.has_uncommitted_changes(&worktree_path)?
+                && !tui::confirm(
                     &format!(
                         "repo '{}' has uncommitted changes. Continue?",
                         repo_entry.name
                     ),
                     false,
-                )? {
-                    anyhow::bail!("canceled by user");
-                }
+                )?
+            {
+                anyhow::bail!("canceled by user");
             }
         }
     }

@@ -18,6 +18,12 @@ const NOUNS: &[&str] = &[
 
 pub struct NameGenerator;
 
+impl Default for NameGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NameGenerator {
     pub fn new() -> Self {
         Self
