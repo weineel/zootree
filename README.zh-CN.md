@@ -15,6 +15,20 @@
 
 ## 安装
 
+### 通过 shell 脚本安装预编译二进制
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/weineel/zootree/releases/download/v0.0.1/zootree-installer.sh | sh
+```
+
+### 通过 Homebrew 安装预编译二进制
+
+```sh
+brew install weineel/tap/zootree
+```
+
+### 从源码安装
+
 ```bash
 cargo install --path .
 ```

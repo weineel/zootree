@@ -15,6 +15,20 @@ A multi-repo workspace management tool. Built on Git Worktree + Zellij + LazyGit
 
 ## Installation
 
+### Install prebuilt binaries via shell script
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/weineel/zootree/releases/download/v0.0.1/zootree-installer.sh | sh
+```
+
+### Install prebuilt binaries via Homebrew
+
+```sh
+brew install weineel/tap/zootree
+```
+
+### Install from source
+
 ```bash
 cargo install --path .
 ```
