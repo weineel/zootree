@@ -1,29 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 如果没有 staged 的 .rs 文件，直接退出
-if git diff --cached --quiet --diff-filter=ACMR -- '*.rs'; then
-    exit 0
-fi
+# 收集 staged 的 .rs 文件（NUL 分隔，兼容特殊字符）
+staged_files=()
+while IFS= read -r -d '' file; do
+    staged_files+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
 
-# 若工作区有未暂存的 .rs 改动，先 stash --keep-index 保护它们
-stashed=0
-if ! git diff --quiet -- '*.rs'; then
-    git stash push --keep-index --quiet --message "pre-commit-fmt"
-    stashed=1
-fi
+[ "${#staged_files[@]}" -eq 0 ] && exit 0
 
-# 无论后续成功与否，最终都尝试恢复 stash；pop 失败也不影响 hook 退出码
-trap '
-if [ "$stashed" = 1 ]; then
-    git stash pop --quiet || echo "pre-commit: stash pop 失败，请手动运行 git stash pop 解决冲突" >&2
-fi
-' EXIT
+# 临时目录存放格式化中间产物；rustfmt 失败时 set -e 中止，index 未动
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
 
-# 只对 staged 的 .rs 文件跑 rustfmt
-git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-    | xargs -0 rustfmt --edition 2021
+update_modes=()
+update_hashes=()
+update_paths=()
+sync_paths=()
+sync_tmpfiles=()
 
-# 把格式化结果加回本次提交
-git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-    | xargs -0 git add --
+# 第一阶段：从 index 取 blob → rustfmt → 写新 object，收集待应用的变更
+for ((i = 0; i < ${#staged_files[@]}; i++)); do
+    file="${staged_files[$i]}"
+    entry=$(git ls-files -s -- "$file")
+    [ -z "$entry" ] && continue
+
+    mode=$(awk '{print $1}' <<< "$entry")
+    old_hash=$(awk '{print $2}' <<< "$entry")
+
+    tmpfile="$tmpdir/$i.rs"
+    git cat-file blob "$old_hash" > "$tmpfile"
+    rustfmt --edition 2021 "$tmpfile"
+
+    new_hash=$(git hash-object -w -- "$tmpfile")
+    [ "$new_hash" = "$old_hash" ] && continue
+
+    update_modes+=("$mode")
+    update_hashes+=("$new_hash")
+    update_paths+=("$file")
+
+    # 工作区与 index 一致（无 unstaged 改动）时，格式化结果也同步到工作区
+    if git diff --quiet -- "$file"; then
+        sync_paths+=("$file")
+        sync_tmpfiles+=("$tmpfile")
+    fi
+done
+
+# 第二阶段：批量更新 index（所有文件都已通过 rustfmt，原子性更好）
+for ((i = 0; i < ${#update_paths[@]}; i++)); do
+    git update-index --cacheinfo \
+        "${update_modes[$i]}" "${update_hashes[$i]}" "${update_paths[$i]}"
+done
+
+# 第三阶段：同步工作区（仅对原本无 unstaged 改动的文件）
+for ((i = 0; i < ${#sync_paths[@]}; i++)); do
+    cp -- "${sync_tmpfiles[$i]}" "${sync_paths[$i]}"
+done
