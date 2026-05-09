@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 收集 staged 的 .rs 文件（-z 以 NUL 分隔，兼容特殊文件名）
+staged=$(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
+[ -z "$staged" ] && exit 0
+
+# 若工作区有未暂存的 .rs 改动，先 stash --keep-index 保护它们
+stashed=0
+if ! git diff --quiet -- '*.rs'; then
+    git stash push --keep-index --quiet --message "pre-commit-fmt"
+    stashed=1
+fi
+
+# 无论后续成功与否，最终都尝试恢复 stash
+trap '[ "$stashed" = 1 ] && git stash pop --quiet' EXIT
+
+# 只对 staged 文件跑 rustfmt
+printf '%s' "$staged" | xargs -0 rustfmt --edition 2021
+
+# 把格式化结果加回本次提交
+printf '%s' "$staged" | xargs -0 git add --
