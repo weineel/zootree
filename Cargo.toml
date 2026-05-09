@@ -5,6 +5,7 @@ edition = "2021"
 description = "A multi-repo workspace management tool with worktree, zellij, and lazygit integration"
 license = "MIT"
 repository = "https://github.com/weineel/zootree"
+homepage = "https://github.com/weineel/zootree"
 readme = "README.md"
 keywords = ["workspace", "worktree", "zellij", "multi-repo"]
 categories = ["command-line-utilities", "development-tools"]
@@ -24,3 +25,8 @@ chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 anyhow = "1"
 shellexpand = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
