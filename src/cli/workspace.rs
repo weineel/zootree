@@ -673,7 +673,8 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         if git.has_uncommitted_changes(&worktree_path)? && !args.force {
             anyhow::bail!(
                 "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
-                repo_entry.name, worktree_path
+                repo_entry.name,
+                worktree_path
             );
         }
 
