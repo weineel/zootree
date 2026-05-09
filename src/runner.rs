@@ -1,6 +1,6 @@
+use anyhow::Result;
 use std::collections::HashMap;
 use std::process::{Command, ExitStatus, Output};
-use anyhow::Result;
 
 pub struct CommandSpec {
     pub program: String,

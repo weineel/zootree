@@ -1,7 +1,7 @@
-use zootree::core::zellij::ZellijOps;
-use zootree::runner::MockRunner;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
+use zootree::core::zellij::ZellijOps;
+use zootree::runner::MockRunner;
 
 fn success_output() -> Output {
     Output {

@@ -1,6 +1,6 @@
 use crate::config::global::HookValue;
 use crate::runner::{CommandRunner, CommandSpec};
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::collections::HashMap;
 
 pub struct HookContext {
@@ -44,10 +44,15 @@ impl<'a, R: CommandRunner> HookEngine<'a, R> {
         let (program, args) = match hook {
             HookValue::Simple(cmd) => ("sh".to_string(), vec!["-c".to_string(), cmd.clone()]),
             HookValue::File { file } => ("sh".to_string(), vec![file.clone()]),
-            HookValue::Inline { inline } => ("sh".to_string(), vec!["-c".to_string(), inline.clone()]),
+            HookValue::Inline { inline } => {
+                ("sh".to_string(), vec!["-c".to_string(), inline.clone()])
+            }
         };
 
-        let cwd = ctx.worktree_path.clone().or_else(|| Some(ctx.workspace_dir.clone()));
+        let cwd = ctx
+            .worktree_path
+            .clone()
+            .or_else(|| Some(ctx.workspace_dir.clone()));
 
         let spec = CommandSpec {
             program,

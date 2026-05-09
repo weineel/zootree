@@ -1,22 +1,19 @@
 use rand::seq::SliceRandom;
 
 const ADJECTIVES: &[&str] = &[
-    "bold", "brave", "calm", "cool", "dark", "deep", "fair", "fast",
-    "free", "glad", "gold", "good", "keen", "kind", "late", "lean",
-    "live", "long", "loud", "mild", "neat", "nice", "open", "pale",
-    "pure", "rare", "rich", "safe", "slim", "soft", "sure", "tall",
-    "thin", "true", "warm", "wide", "wild", "wise", "young", "keen",
+    "bold", "brave", "calm", "cool", "dark", "deep", "fair", "fast", "free", "glad", "gold",
+    "good", "keen", "kind", "late", "lean", "live", "long", "loud", "mild", "neat", "nice", "open",
+    "pale", "pure", "rare", "rich", "safe", "slim", "soft", "sure", "tall", "thin", "true", "warm",
+    "wide", "wild", "wise", "young", "keen",
 ];
 
 const NOUNS: &[&str] = &[
-    "arch", "bark", "beam", "bird", "bolt", "cave", "clay", "cove",
-    "dawn", "deer", "dove", "dune", "dust", "fern", "fire", "fish",
-    "ford", "fox", "gate", "glen", "glow", "hawk", "hill", "jade",
-    "lake", "leaf", "lion", "lynx", "mist", "moon", "moss", "oak",
-    "owl", "palm", "peak", "pine", "pond", "rain", "reed", "reef",
-    "ridge", "river", "rock", "rose", "sage", "sand", "seal", "snow",
-    "star", "stone", "swan", "tide", "tree", "vale", "vine", "wave",
-    "wind", "wolf", "wood", "wren",
+    "arch", "bark", "beam", "bird", "bolt", "cave", "clay", "cove", "dawn", "deer", "dove", "dune",
+    "dust", "fern", "fire", "fish", "ford", "fox", "gate", "glen", "glow", "hawk", "hill", "jade",
+    "lake", "leaf", "lion", "lynx", "mist", "moon", "moss", "oak", "owl", "palm", "peak", "pine",
+    "pond", "rain", "reed", "reef", "ridge", "river", "rock", "rose", "sage", "sand", "seal",
+    "snow", "star", "stone", "swan", "tide", "tree", "vale", "vine", "wave", "wind", "wolf",
+    "wood", "wren",
 ];
 
 pub struct NameGenerator;

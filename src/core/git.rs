@@ -1,5 +1,5 @@
 use crate::runner::{CommandRunner, CommandSpec};
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::collections::HashMap;
 
 pub struct GitOps<'a, R: CommandRunner> {
@@ -30,7 +30,11 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
                 stderr.trim().to_string()
             };
             let cmd = format!("git {}", full_args.join(" "));
-            bail!("git command failed:\n  command: {}\n  error: {}", cmd, err_output);
+            bail!(
+                "git command failed:\n  command: {}\n  error: {}",
+                cmd,
+                err_output
+            );
         }
         Ok(output)
     }
@@ -44,7 +48,13 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
     pub fn branch_exists(&self, repo_path: &str, branch: &str) -> Result<bool> {
         let spec = CommandSpec {
             program: "git".into(),
-            args: vec!["-C".into(), repo_path.into(), "rev-parse".into(), "--verify".into(), format!("refs/heads/{}", branch)],
+            args: vec![
+                "-C".into(),
+                repo_path.into(),
+                "rev-parse".into(),
+                "--verify".into(),
+                format!("refs/heads/{}", branch),
+            ],
             cwd: None,
             env: HashMap::new(),
         };
@@ -52,8 +62,17 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(output.status.success())
     }
 
-    pub fn worktree_add(&self, repo_path: &str, branch: &str, worktree_path: &str, base: &str) -> Result<()> {
-        self.git(repo_path, vec!["worktree", "add", "-b", branch, worktree_path, base])?;
+    pub fn worktree_add(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        worktree_path: &str,
+        base: &str,
+    ) -> Result<()> {
+        self.git(
+            repo_path,
+            vec!["worktree", "add", "-b", branch, worktree_path, base],
+        )?;
         Ok(())
     }
 
@@ -67,7 +86,14 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(())
     }
 
-    pub fn merge(&self, repo_path: &str, branch: &str, target: &str, strategy: Option<&str>, message: &str) -> Result<()> {
+    pub fn merge(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        target: &str,
+        strategy: Option<&str>,
+        message: &str,
+    ) -> Result<()> {
         self.git(repo_path, vec!["checkout", target])?;
         match strategy {
             Some("rebase") => {
@@ -77,27 +103,31 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
                 self.git(repo_path, vec!["merge", branch])?;
             }
             _ => {
-            // 默认使用 squash 方式
-            self.git(repo_path, vec!["merge", "--squash", branch])?;
-            // exit 1 表示有 staged 变更，exit 0 表示无变更（已是最新）
-            let has_staged = {
-                let mut args = vec!["-C".to_string(), repo_path.to_string()];
-                args.extend(["diff", "--staged", "--quiet"].iter().map(|s| s.to_string()));
-                let spec = CommandSpec {
-                    program: "git".into(),
-                    args,
-                    cwd: None,
-                    env: HashMap::new(),
+                // 默认使用 squash 方式
+                self.git(repo_path, vec!["merge", "--squash", branch])?;
+                // exit 1 表示有 staged 变更，exit 0 表示无变更（已是最新）
+                let has_staged = {
+                    let mut args = vec!["-C".to_string(), repo_path.to_string()];
+                    args.extend(
+                        ["diff", "--staged", "--quiet"]
+                            .iter()
+                            .map(|s| s.to_string()),
+                    );
+                    let spec = CommandSpec {
+                        program: "git".into(),
+                        args,
+                        cwd: None,
+                        env: HashMap::new(),
+                    };
+                    let output = self.runner.run(&spec)?;
+                    !output.status.success()
                 };
-                let output = self.runner.run(&spec)?;
-                !output.status.success()
-            };
-            if has_staged {
-                self.git(repo_path, vec!["commit", "-m", message])?;
-            } else {
-                tracing::warn!("nothing to merge from '{}' into '{}'", branch, target);
+                if has_staged {
+                    self.git(repo_path, vec!["commit", "-m", message])?;
+                } else {
+                    tracing::warn!("nothing to merge from '{}' into '{}'", branch, target);
+                }
             }
-        }
         }
         Ok(())
     }
@@ -116,7 +146,12 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
     pub fn has_uncommitted_changes(&self, worktree_path: &str) -> Result<bool> {
         let spec = CommandSpec {
             program: "git".into(),
-            args: vec!["-C".into(), worktree_path.into(), "status".into(), "--porcelain".into()],
+            args: vec![
+                "-C".into(),
+                worktree_path.into(),
+                "status".into(),
+                "--porcelain".into(),
+            ],
             cwd: None,
             env: HashMap::new(),
         };

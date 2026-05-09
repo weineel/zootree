@@ -70,8 +70,12 @@ pub struct GlobalConfig {
     pub log: LogConfig,
 }
 
-fn default_workspace_root() -> String { "~/zootree-workspaces".into() }
-fn default_branch_prefix() -> String { "zootree".into() }
+fn default_workspace_root() -> String {
+    "~/zootree-workspaces".into()
+}
+fn default_branch_prefix() -> String {
+    "zootree".into()
+}
 
 impl Default for GlobalConfig {
     fn default() -> Self {

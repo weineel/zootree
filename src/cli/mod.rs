@@ -1,7 +1,7 @@
-pub mod repo;
-pub mod workspace;
-pub mod template;
 pub mod prune;
+pub mod repo;
+pub mod template;
+pub mod workspace;
 
 use clap::{Parser, Subcommand};
 

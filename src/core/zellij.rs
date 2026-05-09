@@ -46,7 +46,8 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
         self.zellij_interactive(vec![
             "--new-session-with-layout".into(),
             layout_path.to_string_lossy().into(),
-            "--session".into(), session_name.into(),
+            "--session".into(),
+            session_name.into(),
         ])
     }
 
@@ -57,23 +58,33 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
 
     pub fn kill_session(&self, session_name: &str) -> Result<()> {
         info!("killing zellij session: {}", session_name);
-        let _ = self.zellij(vec!["delete-session".into(), "--force".into(), session_name.into()]);
+        let _ = self.zellij(vec![
+            "delete-session".into(),
+            "--force".into(),
+            session_name.into(),
+        ]);
         Ok(())
     }
 
     pub fn session_exists(&self, session_name: &str) -> Result<bool> {
         let output = self.zellij(vec!["list-sessions".into()])?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.lines().any(|line| line.trim().starts_with(session_name)))
+        Ok(stdout
+            .lines()
+            .any(|line| line.trim().starts_with(session_name)))
     }
 
     pub fn add_tab(&self, session_name: &str, layout_path: &Path, tab_name: &str) -> Result<()> {
         info!("adding tab '{}' to session '{}'", tab_name, session_name);
         self.zellij(vec![
-            "--session".into(), session_name.into(),
-            "action".into(), "new-tab".into(),
-            "--layout".into(), layout_path.to_string_lossy().into(),
-            "--name".into(), tab_name.into(),
+            "--session".into(),
+            session_name.into(),
+            "action".into(),
+            "new-tab".into(),
+            "--layout".into(),
+            layout_path.to_string_lossy().into(),
+            "--name".into(),
+            tab_name.into(),
         ])?;
         Ok(())
     }

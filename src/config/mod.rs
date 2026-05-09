@@ -1,10 +1,10 @@
 pub mod global;
 pub mod repo;
-pub mod workspace;
 pub mod template;
+pub mod workspace;
 
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct ConfigManager {
     pub base_dir: PathBuf,
@@ -25,9 +25,13 @@ impl ConfigManager {
 
     pub fn ensure_dirs(&self) -> Result<()> {
         let dirs = [
-            "repos", "layouts", "templates",
-            "workspaces/pending", "workspaces/in_progress",
-            "workspaces/archived/done", "workspaces/archived/canceled",
+            "repos",
+            "layouts",
+            "templates",
+            "workspaces/pending",
+            "workspaces/in_progress",
+            "workspaces/archived/done",
+            "workspaces/archived/canceled",
             "logs",
         ];
         for d in dirs {
@@ -98,11 +102,17 @@ impl ConfigManager {
             workspace::WorkspaceStatus::Pending => self.base_dir.join("workspaces/pending"),
             workspace::WorkspaceStatus::InProgress => self.base_dir.join("workspaces/in_progress"),
             workspace::WorkspaceStatus::Done => self.base_dir.join("workspaces/archived/done"),
-            workspace::WorkspaceStatus::Canceled => self.base_dir.join("workspaces/archived/canceled"),
+            workspace::WorkspaceStatus::Canceled => {
+                self.base_dir.join("workspaces/archived/canceled")
+            }
         }
     }
 
-    pub fn save_workspace(&self, status: &workspace::WorkspaceStatus, config: &workspace::WorkspaceConfig) -> Result<()> {
+    pub fn save_workspace(
+        &self,
+        status: &workspace::WorkspaceStatus,
+        config: &workspace::WorkspaceConfig,
+    ) -> Result<()> {
         let dir = self.workspace_status_dir(status);
         let path = dir.join(format!("{}.toml", config.name));
         let content = toml::to_string_pretty(config)?;
@@ -110,10 +120,15 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub fn load_workspace(&self, name: &str) -> Result<(workspace::WorkspaceStatus, workspace::WorkspaceConfig)> {
+    pub fn load_workspace(
+        &self,
+        name: &str,
+    ) -> Result<(workspace::WorkspaceStatus, workspace::WorkspaceConfig)> {
         use workspace::WorkspaceStatus::*;
         for status in [Pending, InProgress, Done, Canceled] {
-            let path = self.workspace_status_dir(&status).join(format!("{}.toml", name));
+            let path = self
+                .workspace_status_dir(&status)
+                .join(format!("{}.toml", name));
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
                 let config: workspace::WorkspaceConfig = toml::from_str(&content)?;
@@ -123,14 +138,24 @@ impl ConfigManager {
         anyhow::bail!("workspace '{}' not found", name)
     }
 
-    pub fn move_workspace(&self, name: &str, from: &workspace::WorkspaceStatus, to: &workspace::WorkspaceStatus) -> Result<()> {
-        let from_path = self.workspace_status_dir(from).join(format!("{}.toml", name));
+    pub fn move_workspace(
+        &self,
+        name: &str,
+        from: &workspace::WorkspaceStatus,
+        to: &workspace::WorkspaceStatus,
+    ) -> Result<()> {
+        let from_path = self
+            .workspace_status_dir(from)
+            .join(format!("{}.toml", name));
         let to_path = self.workspace_status_dir(to).join(format!("{}.toml", name));
         std::fs::rename(from_path, to_path)?;
         Ok(())
     }
 
-    pub fn list_workspaces(&self, status: Option<&[workspace::WorkspaceStatus]>) -> Result<Vec<workspace::WorkspaceConfig>> {
+    pub fn list_workspaces(
+        &self,
+        status: Option<&[workspace::WorkspaceStatus]>,
+    ) -> Result<Vec<workspace::WorkspaceConfig>> {
         use workspace::WorkspaceStatus::*;
         let statuses = match status {
             Some(s) => s.to_vec(),
@@ -154,8 +179,14 @@ impl ConfigManager {
         Ok(workspaces)
     }
 
-    pub fn delete_workspace_config(&self, name: &str, status: &workspace::WorkspaceStatus) -> Result<()> {
-        let path = self.workspace_status_dir(status).join(format!("{}.toml", name));
+    pub fn delete_workspace_config(
+        &self,
+        name: &str,
+        status: &workspace::WorkspaceStatus,
+    ) -> Result<()> {
+        let path = self
+            .workspace_status_dir(status)
+            .join(format!("{}.toml", name));
         std::fs::remove_file(path)?;
         Ok(())
     }

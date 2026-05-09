@@ -1,7 +1,7 @@
-use clap::{Args, Subcommand};
-use crate::config::ConfigManager;
 use crate::config::template::TemplateConfig;
+use crate::config::ConfigManager;
 use anyhow::Result;
+use clap::{Args, Subcommand};
 
 #[derive(Args)]
 pub struct TemplateArgs {

@@ -1,8 +1,8 @@
-use clap::Args;
-use crate::config::ConfigManager;
 use crate::config::workspace::WorkspaceStatus;
+use crate::config::ConfigManager;
 use crate::tui;
 use anyhow::Result;
+use clap::Args;
 use std::path::Path;
 
 #[derive(Args)]
@@ -30,7 +30,8 @@ pub fn handle_prune(args: &PruneArgs) -> Result<()> {
     let to_prune = if args.all {
         archived
     } else {
-        let names: Vec<String> = archived.iter()
+        let names: Vec<String> = archived
+            .iter()
             .map(|(s, w)| format!("{} ({:?})", w.name, s))
             .collect();
         let selected = tui::select_multi("Select workspaces to prune", &names)?;

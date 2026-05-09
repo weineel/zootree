@@ -1,8 +1,8 @@
-use zootree::core::hook::{HookEngine, HookContext};
-use zootree::config::global::HookValue;
-use zootree::runner::MockRunner;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
+use zootree::config::global::HookValue;
+use zootree::core::hook::{HookContext, HookEngine};
+use zootree::runner::MockRunner;
 
 fn success_output() -> Output {
     Output {
@@ -36,10 +36,22 @@ fn test_simple_hook_command() {
     assert_eq!(calls[0].args, vec!["-c", "npm install"]);
     assert_eq!(calls[0].env.get("ZOOTREE_WORKSPACE").unwrap(), "calm-river");
     assert_eq!(calls[0].env.get("ZOOTREE_REPO").unwrap(), "frontend");
-    assert_eq!(calls[0].env.get("ZOOTREE_BRANCH").unwrap(), "zootree/calm-river");
-    assert_eq!(calls[0].env.get("ZOOTREE_TARGET_BRANCH").unwrap(), "develop");
-    assert_eq!(calls[0].env.get("ZOOTREE_WORKTREE_PATH").unwrap(), "/home/user/ws/calm-river/frontend");
-    assert_eq!(calls[0].env.get("ZOOTREE_WORKSPACE_DIR").unwrap(), "/home/user/ws/calm-river");
+    assert_eq!(
+        calls[0].env.get("ZOOTREE_BRANCH").unwrap(),
+        "zootree/calm-river"
+    );
+    assert_eq!(
+        calls[0].env.get("ZOOTREE_TARGET_BRANCH").unwrap(),
+        "develop"
+    );
+    assert_eq!(
+        calls[0].env.get("ZOOTREE_WORKTREE_PATH").unwrap(),
+        "/home/user/ws/calm-river/frontend"
+    );
+    assert_eq!(
+        calls[0].env.get("ZOOTREE_WORKSPACE_DIR").unwrap(),
+        "/home/user/ws/calm-river"
+    );
 }
 
 #[test]
@@ -57,12 +69,17 @@ fn test_file_hook_command() {
         workspace_dir: "/home/user/ws/calm-river".into(),
     };
 
-    let hook = HookValue::File { file: "/home/user/.config/zootree/hooks/cleanup.sh".into() };
+    let hook = HookValue::File {
+        file: "/home/user/.config/zootree/hooks/cleanup.sh".into(),
+    };
     engine.execute(&hook, &ctx).unwrap();
 
     let calls = runner.take_calls();
     assert_eq!(calls[0].program, "sh");
-    assert_eq!(calls[0].args, vec!["/home/user/.config/zootree/hooks/cleanup.sh"]);
+    assert_eq!(
+        calls[0].args,
+        vec!["/home/user/.config/zootree/hooks/cleanup.sh"]
+    );
 }
 
 #[test]
@@ -81,7 +98,9 @@ fn test_inline_hook_command() {
     };
 
     let script = "cd $ZOOTREE_WORKTREE_PATH\nnpm install\nnpm run db:migrate";
-    let hook = HookValue::Inline { inline: script.into() };
+    let hook = HookValue::Inline {
+        inline: script.into(),
+    };
     engine.execute(&hook, &ctx).unwrap();
 
     let calls = runner.take_calls();

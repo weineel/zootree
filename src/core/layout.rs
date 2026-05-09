@@ -65,12 +65,7 @@ impl LayoutRenderer {
             expanded.push_str(&Self::replace_vars(tab_block, vars));
         }
 
-        format!(
-            "{}\n\n{}{}",
-            before.trim_end_matches('\n'),
-            expanded,
-            after
-        )
+        format!("{}\n\n{}{}", before.trim_end_matches('\n'), expanded, after)
     }
 
     fn extract_tab_block(s: &str) -> &str {

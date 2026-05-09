@@ -1,7 +1,7 @@
 use zootree::cli::workspace::parse_repos_arg;
 use zootree::config::global::GlobalConfig;
-use zootree::config::repo::RepoConfig;
 use zootree::config::global::HookValue;
+use zootree::config::repo::RepoConfig;
 
 #[test]
 fn test_parse_global_config_full() {
@@ -24,7 +24,12 @@ max_files = 5
     assert_eq!(config.workspace_root, "~/zootree-workspaces");
     assert_eq!(config.branch_prefix, "zootree");
     assert_eq!(config.copy_files, vec![".env"]);
-    assert_eq!(config.hooks.post_create, Some(zootree::config::global::HookValue::Simple("echo hello".into())));
+    assert_eq!(
+        config.hooks.post_create,
+        Some(zootree::config::global::HookValue::Simple(
+            "echo hello".into()
+        ))
+    );
     assert_eq!(config.log.max_files, Some(5));
 }
 
@@ -56,10 +61,24 @@ config = "~/projects/frontend/.lazygit.yml"
     let config: RepoConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.path, "~/projects/frontend");
     assert_eq!(config.default_target_branch, Some("develop".into()));
-    assert_eq!(config.copy_files, vec![".env.local", ".vscode/settings.json"]);
-    assert_eq!(config.hooks.post_create, Some(HookValue::Simple("npm install".into())));
-    assert_eq!(config.hooks.pre_remove, Some(HookValue::File { file: "~/.config/zootree/hooks/cleanup.sh".into() }));
-    assert_eq!(config.lazygit.as_ref().unwrap().config, "~/projects/frontend/.lazygit.yml");
+    assert_eq!(
+        config.copy_files,
+        vec![".env.local", ".vscode/settings.json"]
+    );
+    assert_eq!(
+        config.hooks.post_create,
+        Some(HookValue::Simple("npm install".into()))
+    );
+    assert_eq!(
+        config.hooks.pre_remove,
+        Some(HookValue::File {
+            file: "~/.config/zootree/hooks/cleanup.sh".into()
+        })
+    );
+    assert_eq!(
+        config.lazygit.as_ref().unwrap().config,
+        "~/projects/frontend/.lazygit.yml"
+    );
 }
 
 #[test]
@@ -124,11 +143,14 @@ session_mode = "standalone"
 #[test]
 fn test_parse_repos_arg() {
     let result = parse_repos_arg("frontend:develop,backend,shared-lib:main");
-    assert_eq!(result, vec![
-        ("frontend".into(), Some("develop".into())),
-        ("backend".into(), None),
-        ("shared-lib".into(), Some("main".into())),
-    ]);
+    assert_eq!(
+        result,
+        vec![
+            ("frontend".into(), Some("develop".into())),
+            ("backend".into(), None),
+            ("shared-lib".into(), Some("main".into())),
+        ]
+    );
 }
 
 #[test]

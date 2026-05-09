@@ -1,9 +1,9 @@
-use clap::{Args, Subcommand};
-use crate::config::ConfigManager;
-use crate::config::repo::RepoConfig;
 use crate::config::global::HooksConfig;
+use crate::config::repo::RepoConfig;
+use crate::config::ConfigManager;
 use crate::tui;
 use anyhow::Result;
+use clap::{Args, Subcommand};
 
 #[derive(Args)]
 pub struct RepoArgs {
@@ -41,7 +41,11 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
     config_mgr.ensure_dirs()?;
 
     match cmd {
-        RepoCommands::Add { name, path, default_target_branch } => {
+        RepoCommands::Add {
+            name,
+            path,
+            default_target_branch,
+        } => {
             let expanded = shellexpand::tilde(path).into_owned();
             let abs_path = std::fs::canonicalize(&expanded)
                 .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
