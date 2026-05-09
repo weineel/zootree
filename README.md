@@ -230,3 +230,15 @@ Available variables:
 - Git
 - Zellij
 - LazyGit (optional)
+
+## Contributing
+
+首次克隆本仓库后，执行一次 `cargo check --tests` 以激活 pre-commit hook：
+
+```bash
+cargo check --tests
+```
+
+cargo-husky 会把 `.cargo-husky/hooks/pre-commit` 安装到 `.git/hooks/`。此后 `git commit` 会自动对已暂存的 `.rs` 文件运行 `rustfmt` 并把格式化结果纳入本次提交——CI 的 `cargo fmt --check` 通常就不会再被格式问题绊住。
+
+若需要临时跳过 hook（例如紧急修复），可用 `git commit --no-verify`。
