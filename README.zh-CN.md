@@ -222,7 +222,7 @@ layout {
 -v, --verbose    # 详细输出
 -q, --quiet      # 静默输出
 -h, --help       # 帮助
---version        # 版本
+-V, --version    # 版本
 ```
 
 ## 依赖

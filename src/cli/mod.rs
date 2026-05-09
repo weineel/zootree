@@ -6,7 +6,11 @@ pub mod workspace;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "zootree", about = "Multi-repo collaborative workspace manager")]
+#[command(
+    name = "zootree",
+    about = "Multi-repo collaborative workspace manager",
+    version,
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

@@ -222,7 +222,7 @@ Available variables:
 -v, --verbose    # Verbose output
 -q, --quiet      # Quiet output
 -h, --help       # Help
---version        # Version
+-V, --version    # Version
 ```
 
 ## Dependencies
