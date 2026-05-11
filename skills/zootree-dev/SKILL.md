@@ -156,6 +156,7 @@ fn test_something() {
 | `anyhow` (1) | 错误处理 |
 | `rand` (0.8) | 名称随机生成 |
 | `chrono` (0.4, serde) | 时间戳 |
+| `cargo-husky` (1, dev, `default-features = false`, `user-hooks`) | 安装 `.cargo-husky/hooks/` 下的 git hook 到 `.git/hooks/`，在 `cargo check --tests` 首次构建时生效 |
 
 ## 代码约定
 
