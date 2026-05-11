@@ -1,7 +1,9 @@
 use crate::config::template::TemplateConfig;
 use crate::config::ConfigManager;
+use crate::core::completers::{complete_workspace, WorkspaceFilter};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use clap_complete::ArgValueCompleter;
 
 #[derive(Args)]
 pub struct TemplateArgs {
@@ -17,7 +19,11 @@ pub enum TemplateCommands {
     Save {
         #[arg(help = "Name for the new template")]
         name: String,
-        #[arg(long, help = "Workspace name to save as template")]
+        #[arg(
+            long,
+            help = "Workspace name to save as template",
+            add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Any))
+        )]
         from: String,
     },
 }

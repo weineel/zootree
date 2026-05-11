@@ -2,6 +2,9 @@ use crate::config::global::ZellijConfig;
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
+use crate::core::completers::{
+    complete_repos_list, complete_template, complete_workspace, WorkspaceFilter,
+};
 use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
@@ -13,7 +16,26 @@ use crate::tui;
 use anyhow::Result;
 use chrono::Local;
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use std::path::Path;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum MergeStrategy {
+    Squash,
+    Rebase,
+    Merge,
+}
+
+impl MergeStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeStrategy::Squash => "squash",
+            MergeStrategy::Rebase => "rebase",
+            MergeStrategy::Merge => "merge",
+        }
+    }
+}
 
 pub fn parse_repos_arg(repos_str: &str) -> Vec<(String, Option<String>)> {
     repos_str
@@ -310,10 +332,7 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     let status_filter: Vec<WorkspaceStatus> = if args.status.is_empty() {
         vec![WorkspaceStatus::Pending, WorkspaceStatus::InProgress]
     } else {
-        args.status
-            .iter()
-            .map(|s| parse_status(s))
-            .collect::<Result<Vec<_>>>()?
+        args.status.clone()
     };
 
     let workspaces = config_mgr.list_workspaces(Some(status_filter.as_slice()))?;
@@ -346,19 +365,6 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn parse_status(s: &str) -> Result<WorkspaceStatus> {
-    match s {
-        "pending" => Ok(WorkspaceStatus::Pending),
-        "in_progress" => Ok(WorkspaceStatus::InProgress),
-        "done" => Ok(WorkspaceStatus::Done),
-        "canceled" => Ok(WorkspaceStatus::Canceled),
-        _ => anyhow::bail!(
-            "invalid status '{}', available: pending, in_progress, done, canceled",
-            s
-        ),
-    }
 }
 
 fn format_status(status: &WorkspaceStatus) -> &'static str {
@@ -497,7 +503,8 @@ pub struct CreateArgs {
     pub description: Option<String>,
     #[arg(
         long,
-        help = "Comma-separated repos, optionally with branch: repo1:branch1,repo2"
+        help = "Comma-separated repos, optionally with branch: repo1:branch1,repo2",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_repos_list(c))
     )]
     pub repos: Option<String>,
     #[arg(
@@ -505,7 +512,11 @@ pub struct CreateArgs {
         help = "Git branch name for worktrees (defaults to <prefix>/<name>)"
     )]
     pub branch: Option<String>,
-    #[arg(long, help = "Template name to use for repo selection")]
+    #[arg(
+        long,
+        help = "Template name to use for repo selection",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_template(c))
+    )]
     pub template: Option<String>,
 }
 
@@ -513,14 +524,18 @@ pub struct CreateArgs {
 pub struct ListArgs {
     #[arg(
         long,
-        help = "Filter by status [available: pending, in_progress, done, canceled]"
+        value_enum,
+        help = "Filter by status (repeatable: pending, in_progress, done, canceled)"
     )]
-    pub status: Vec<String>,
+    pub status: Vec<WorkspaceStatus>,
 }
 
 #[derive(Args)]
 pub struct StartArgs {
-    #[arg(help = "Workspace name to start (interactive if omitted)")]
+    #[arg(
+        help = "Workspace name to start (interactive if omitted)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Pending))
+    )]
     pub name: Option<String>,
     #[arg(long, help = "Skip launching zellij session after start")]
     pub no_zellij: bool,
@@ -528,13 +543,19 @@ pub struct StartArgs {
 
 #[derive(Args)]
 pub struct OpenArgs {
-    #[arg(help = "Workspace name to open (interactive if omitted)")]
+    #[arg(
+        help = "Workspace name to open (interactive if omitted)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::InProgress))
+    )]
     pub name: Option<String>,
 }
 
 #[derive(Args)]
 pub struct DoneArgs {
-    #[arg(help = "Workspace name to complete (interactive if omitted)")]
+    #[arg(
+        help = "Workspace name to complete (interactive if omitted)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::InProgress))
+    )]
     pub name: Option<String>,
     #[arg(long, help = "Skip merging branches back to target")]
     pub no_merge: bool,
@@ -542,11 +563,8 @@ pub struct DoneArgs {
     pub no_clean: bool,
     #[arg(long, help = "Push target branch to remote after merge")]
     pub push: bool,
-    #[arg(
-        long,
-        help = "Merge strategy, available: squash(default), rebase, merge"
-    )]
-    pub strategy: Option<String>,
+    #[arg(long, value_enum, help = "Merge strategy (default: squash)")]
+    pub strategy: Option<MergeStrategy>,
     #[arg(long, help = "Continue even if steps fail (errors become warnings)")]
     pub force: bool,
     #[arg(long, help = "Skip all hooks (pre_done/pre_remove)")]
@@ -557,7 +575,10 @@ pub struct DoneArgs {
 
 #[derive(Args)]
 pub struct CancelArgs {
-    #[arg(help = "Workspace name to cancel (interactive if omitted)")]
+    #[arg(
+        help = "Workspace name to cancel (interactive if omitted)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Active))
+    )]
     pub name: Option<String>,
     #[arg(long, help = "Keep worktrees and workspace directory")]
     pub no_clean: bool,
@@ -680,7 +701,7 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
 
         // Merge
         if !args.no_merge {
-            let strategy = args.strategy.as_deref();
+            let strategy = args.strategy.map(MergeStrategy::as_str);
             let message = if workspace.description.is_empty() {
                 workspace.title.clone()
             } else {

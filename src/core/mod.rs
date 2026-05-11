@@ -1,3 +1,4 @@
+pub mod completers;
 pub mod copy_files;
 pub mod git;
 pub mod hook;

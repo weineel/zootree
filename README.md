@@ -33,6 +33,55 @@ brew install weineel/tap/zootree
 cargo install --path .
 ```
 
+## Shell Completions
+
+zootree supports completion for subcommands, flags, and dynamic values
+(workspace names, repo names, template names) on bash, zsh, fish,
+PowerShell, and elvish.
+
+### Install
+
+Append one line to your shell's rc file. The script is regenerated on every
+shell start, so it stays in sync with the installed `zootree` binary — no
+manual refresh after upgrades.
+
+| Shell | Add to | Line |
+|-------|--------|------|
+| bash  | `~/.bashrc` | `eval "$(zootree completions bash)"` |
+| zsh   | `~/.zshrc` (after `compinit`) | `eval "$(zootree completions zsh)"` |
+| fish  | `~/.config/fish/config.fish` | `zootree completions fish \| source` |
+| PowerShell | `$PROFILE` | `zootree completions powershell \| Out-String \| Invoke-Expression` |
+| elvish | `~/.config/elvish/rc.elv` | `eval (zootree completions elvish \| slurp)` |
+
+Restart your shell (or `source` the rc file) to activate.
+
+### What gets completed
+
+- All subcommands and flags
+- `zootree start <TAB>` — pending workspaces
+- `zootree open <TAB>` / `zootree done <TAB>` — in-progress workspaces
+- `zootree cancel <TAB>` — pending or in-progress workspaces
+- `zootree repo edit <TAB>` / `zootree repo remove <TAB>` — registered repos
+- `zootree template save --from <TAB>` — any workspace
+- `zootree create --template <TAB>` — saved templates
+- `zootree create --repos <TAB>` — registered repos (comma-separated)
+- `zootree list --status <TAB>` — workspace status values (pending, in-progress, done, canceled)
+- `zootree done --strategy <TAB>` — merge strategy values (squash, rebase, merge)
+
+zsh and fish additionally show a brief description (workspace title + status,
+repo path, or template repos) next to each candidate.
+
+### Troubleshooting
+
+If completions don't activate after install, verify the dynamic interceptor:
+
+```bash
+COMPLETE=zsh zootree -- zootree start ''
+```
+
+This should output candidates one per line. If empty, ensure you have
+workspaces with the expected status (`zootree list`).
+
 ## Quick Start
 
 ### 1. Initialize config directory
@@ -109,7 +158,7 @@ zootree start [name]                 # Start a workspace
   --no-zellij                        # Don't launch Zellij
 
 zootree list                         # List workspaces
-  --status pending|in_progress|done|canceled
+  --status pending|in-progress|done|canceled
 
 zootree open [name]                  # Open an existing workspace
 

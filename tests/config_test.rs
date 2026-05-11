@@ -158,3 +158,26 @@ fn test_parse_repos_arg_single() {
     let result = parse_repos_arg("frontend:develop");
     assert_eq!(result, vec![("frontend".into(), Some("develop".into()))]);
 }
+
+#[test]
+fn workspace_status_value_enum_parses_kebab_case() {
+    use clap::ValueEnum;
+    use zootree::config::workspace::WorkspaceStatus;
+
+    assert_eq!(
+        WorkspaceStatus::from_str("pending", false).unwrap(),
+        WorkspaceStatus::Pending
+    );
+    assert_eq!(
+        WorkspaceStatus::from_str("in-progress", false).unwrap(),
+        WorkspaceStatus::InProgress
+    );
+    assert_eq!(
+        WorkspaceStatus::from_str("done", false).unwrap(),
+        WorkspaceStatus::Done
+    );
+    assert_eq!(
+        WorkspaceStatus::from_str("canceled", false).unwrap(),
+        WorkspaceStatus::Canceled
+    );
+}

@@ -19,7 +19,8 @@ src/
 │   ├── repo.rs      # repo add/list/edit/remove
 │   ├── workspace.rs # create/start/list/open/done/cancel
 │   ├── template.rs  # template list/show/delete
-│   └── prune.rs     # prune 清理
+│   ├── prune.rs     # prune 清理
+│   └── completions.rs # 生成 shell 补全脚本 (completions 子命令)
 ├── config/          # 配置管理
 │   ├── mod.rs       # ConfigManager: 配置读写中枢
 │   ├── global.rs    # GlobalConfig + HooksConfig + HookValue
@@ -33,7 +34,8 @@ src/
 │   ├── layout.rs    # LayoutRenderer: KDL 模板变量替换
 │   ├── zellij.rs    # ZellijOps: session 管理
 │   ├── copy_files.rs # 文件复制逻辑
-│   └── name_gen.rs  # 工作空间名称生成器
+│   ├── name_gen.rs  # 工作空间名称生成器
+│   └── completers.rs # 动态补全候选生成器 (workspace/repo/template)
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
@@ -74,6 +76,7 @@ pub struct MockRunner {     // 测试用
 match cli.command {
     Commands::Repo(args) => zootree::cli::repo::handle_repo_command(&args.command)?,
     Commands::Create(args) => zootree::cli::workspace::handle_create(&args)?,
+    Commands::Completions(args) => zootree::cli::completions::handle_completions(&args)?,
     // ...
 }
 ```
@@ -147,6 +150,7 @@ fn test_something() {
 | Crate | 用途 |
 |-------|------|
 | `clap` (4, derive) | CLI 参数解析 |
+| `clap_complete` (4, unstable-dynamic) | Shell 补全脚本生成 + 动态补全引擎 |
 | `dialoguer` (0.11) | 交互式 TUI (Input, Select, MultiSelect, Confirm) |
 | `toml` (0.8) | 配置文件序列化 |
 | `serde` (1, derive) | 序列化框架 |
@@ -182,6 +186,13 @@ fn test_something() {
 1. 在 `src/config/global.rs` 的 `HooksConfig` 中添加 `pub <hook_name>: Option<HookValue>`
 2. 在对应功能点调用 `hook_engine.execute_if_set(&config.hooks.<hook_name>, &ctx)`
 3. 构造 `HookContext` 时填充相关字段
+
+### 给新命令添加动态补全
+
+1. 确认候选数据来源（workspace/repo/template）；如需新增类别，在 `src/core/completers.rs` 中新增 `complete_<thing>_with(mgr, current)` 和 `complete_<thing>(current)`，遵循「失败返回 vec![]」原则
+2. 在对应 `Args` 字段加 `add = ArgValueCompleter::new(|c: &OsStr| complete_<thing>(c))`
+3. 在 `tests/completions_test.rs` 添加：基本列表、前缀过滤、描述包含正确字段三个测试
+4. 静态值（如固定枚举）改为 `clap::ValueEnum`，clap 自动补全
 
 ## Skill 自我迭代
 

@@ -1,3 +1,4 @@
+pub mod completions;
 pub mod prune;
 pub mod repo;
 pub mod template;
@@ -44,4 +45,6 @@ pub enum Commands {
     Prune(prune::PruneArgs),
     #[command(about = "Show log file location")]
     Logs,
+    #[command(about = "Generate shell completion script")]
+    Completions(completions::CompletionsArgs),
 }

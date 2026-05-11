@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use zootree::cli::{Cli, Commands};
@@ -43,6 +44,11 @@ fn init_tracing(
 }
 
 fn main() {
+    // Dynamic completion interceptor: if the COMPLETE env var is set, this
+    // resolves the candidates and exits before any other side effects (no tracing,
+    // no log files). Must run before Cli::parse().
+    CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
 
     let _guard = match init_tracing(cli.verbose, cli.quiet) {
@@ -103,6 +109,9 @@ fn run(command: Commands) -> Result<()> {
             } else {
                 println!("no log file found at {}", config_dir.display());
             }
+        }
+        Commands::Completions(args) => {
+            zootree::cli::completions::handle_completions(&args)?;
         }
     }
 

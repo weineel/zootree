@@ -1,9 +1,11 @@
 use crate::config::global::HooksConfig;
 use crate::config::repo::RepoConfig;
 use crate::config::ConfigManager;
+use crate::core::completers::complete_repo;
 use crate::tui;
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use clap_complete::ArgValueCompleter;
 
 #[derive(Args)]
 pub struct RepoArgs {
@@ -26,12 +28,18 @@ pub enum RepoCommands {
     List,
     #[command(about = "Edit a repository config file")]
     Edit {
-        #[arg(help = "Name of the repo to edit (interactive if omitted)")]
+        #[arg(
+            help = "Name of the repo to edit (interactive if omitted)",
+            add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_repo(c))
+        )]
         name: Option<String>,
     },
     #[command(about = "Unregister a repository")]
     Remove {
-        #[arg(help = "Name of the repo to remove (interactive if omitted)")]
+        #[arg(
+            help = "Name of the repo to remove (interactive if omitted)",
+            add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_repo(c))
+        )]
         name: Option<String>,
     },
 }

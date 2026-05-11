@@ -33,6 +33,52 @@ brew install weineel/tap/zootree
 cargo install --path .
 ```
 
+## Shell 补全
+
+zootree 支持 5 种 shell 的补全：bash、zsh、fish、PowerShell、elvish，
+覆盖子命令、flag 名以及动态值（workspace 名、repo 名、template 名）。
+
+### 安装
+
+在 shell 的 rc 文件里加一行。脚本会在每次 shell 启动时重新生成，
+始终与已安装的 `zootree` 版本同步 —— 升级后无需手动刷新。
+
+| Shell | 加到哪 | 加什么 |
+|-------|-------|--------|
+| bash  | `~/.bashrc` | `eval "$(zootree completions bash)"` |
+| zsh   | `~/.zshrc`（`compinit` 之后）| `eval "$(zootree completions zsh)"` |
+| fish  | `~/.config/fish/config.fish` | `zootree completions fish \| source` |
+| PowerShell | `$PROFILE` | `zootree completions powershell \| Out-String \| Invoke-Expression` |
+| elvish | `~/.config/elvish/rc.elv` | `eval (zootree completions elvish \| slurp)` |
+
+重启 shell 或 source rc 文件即可生效。
+
+### 补全范围
+
+- 所有子命令和 flag
+- `zootree start <TAB>` — pending 状态的 workspace
+- `zootree open <TAB>` / `zootree done <TAB>` — in-progress 状态的 workspace
+- `zootree cancel <TAB>` — pending 或 in-progress 状态的 workspace
+- `zootree repo edit <TAB>` / `zootree repo remove <TAB>` — 已注册的 repo
+- `zootree template save --from <TAB>` — 任意 workspace
+- `zootree create --template <TAB>` — 已保存的 template
+- `zootree create --repos <TAB>` — 已注册的 repo（逗号分隔列表）
+- `zootree list --status <TAB>` — workspace 状态值（pending、in-progress、done、canceled）
+- `zootree done --strategy <TAB>` — 合并策略值（squash、rebase、merge）
+
+zsh 与 fish 还会在候选项旁显示简短描述（workspace 标题 + 状态、
+repo 路径、或 template 涵盖的 repo 列表）。
+
+### 故障排查
+
+补全无响应时，可直接验证动态拦截器：
+
+```bash
+COMPLETE=zsh zootree -- zootree start ''
+```
+
+应当每行输出一个候选项。若为空，确认是否有匹配状态的 workspace（`zootree list`）。
+
 ## 快速开始
 
 ### 1. 初始化配置目录
@@ -109,7 +155,7 @@ zootree start [name]                 # 启动工作空间
   --no-zellij                        # 不启动 Zellij
 
 zootree list                         # 列出工作空间
-  --status pending|in_progress|done|canceled
+  --status pending|in-progress|done|canceled
 
 zootree open [name]                  # 打开已有工作空间
 
