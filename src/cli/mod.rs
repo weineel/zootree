@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "zootree",
     about = "Multi-repo collaborative workspace manager",
-    version,
+    version
 )]
 pub struct Cli {
     #[command(subcommand)]
