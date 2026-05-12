@@ -102,7 +102,7 @@ layout {
         }
         pane split_direction="vertical" {
             pane command="zootree" {
-                args "list" "--status" "in_progress"
+                args "info" "$workspace_name" "--watch"
             }
             pane cwd="$workspace_dir"
         }

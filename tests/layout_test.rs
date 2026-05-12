@@ -92,3 +92,37 @@ fn test_repeat_per_repo() {
     assert!(!result.contains("@repeat-per-repo"));
     assert!(!result.contains("$repo_name"));
 }
+
+#[test]
+fn default_layout_overview_uses_info_watch() {
+    let template = LayoutRenderer::default_layout();
+    assert!(
+        template.contains(r#""info" "$workspace_name" "--watch""#),
+        "default layout should use `zootree info <name> --watch` in overview\n---\n{}",
+        template
+    );
+    assert!(
+        !template.contains(r#""list" "--status" "in_progress""#),
+        "default layout should no longer spawn list in overview\n---\n{}",
+        template
+    );
+}
+
+#[test]
+fn default_layout_info_args_expanded_on_render() {
+    let template = LayoutRenderer::default_layout();
+    let vars = vec![LayoutVar {
+        repo_name: "frontend".into(),
+        worktree_path: "/ws/calm-river/frontend".into(),
+        branch: "zootree/calm-river".into(),
+        workspace_name: "calm-river".into(),
+        workspace_dir: "/ws/calm-river".into(),
+        lazygit_config: "".into(),
+    }];
+    let rendered = LayoutRenderer::render(template, &vars);
+    assert!(
+        rendered.contains(r#""info" "calm-river" "--watch""#),
+        "expected $workspace_name to expand\n---\n{}",
+        rendered
+    );
+}
