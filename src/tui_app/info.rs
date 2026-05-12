@@ -80,7 +80,7 @@ pub fn last_n<T>(items: &[T], n: usize) -> &[T] {
     }
 }
 
-pub(crate) fn status_label(s: &WorkspaceStatus) -> &'static str {
+pub fn status_label(s: &WorkspaceStatus) -> &'static str {
     match s {
         WorkspaceStatus::Pending => "pending",
         WorkspaceStatus::InProgress => "in_progress",

@@ -73,10 +73,6 @@ fn main_loop<B: ratatui::backend::Backend, A: App>(
     loop {
         terminal.draw(|f| app.render(f))?;
 
-        if app.should_quit() {
-            return Ok(());
-        }
-
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or(Duration::ZERO);
@@ -94,6 +90,10 @@ fn main_loop<B: ratatui::backend::Backend, A: App>(
                 app.on_event(Event::Tick)?;
             }
             last_tick = Instant::now();
+        }
+
+        if app.should_quit() {
+            return Ok(());
         }
     }
 }
