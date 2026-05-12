@@ -52,8 +52,17 @@ pub fn handle_info(args: &InfoArgs) -> Result<()> {
     let (status, workspace) = config_mgr.load_workspace(&name)?;
 
     if args.watch {
-        // Filled in by Task 8.
-        anyhow::bail!("--watch not implemented yet");
+        // `workspace` / `status` above were just a reachability check; the TUI
+        // reloads on its own via the consumed config_mgr.
+        let _ = (status, workspace);
+        let app = crate::tui_app::info::InfoApp::new(
+            name,
+            config_mgr,
+            true,
+            std::time::Duration::from_secs(args.interval),
+        );
+        crate::tui_app::run_app(app)?;
+        return Ok(());
     }
 
     print!("{}", render_once(&status, &workspace));
