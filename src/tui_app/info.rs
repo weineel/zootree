@@ -96,8 +96,23 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table};
 use ratatui::Frame;
 
 impl crate::tui_app::App for InfoApp {
-    fn on_event(&mut self, _event: crate::tui_app::Event) -> anyhow::Result<()> {
-        // Filled in by Task 6.
+    fn on_event(&mut self, event: crate::tui_app::Event) -> anyhow::Result<()> {
+        use crate::tui_app::Event as E;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        match event {
+            E::Key(k) => {
+                let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                match k.code {
+                    KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+                    KeyCode::Char('c') if ctrl => self.quit = true,
+                    KeyCode::Char('r') => self.reload(),
+                    _ => {}
+                }
+            }
+            E::Tick => self.reload(),
+            E::Resize(_, _) => {}
+        }
         Ok(())
     }
 
@@ -464,5 +479,110 @@ mod tests {
         let out = render_to_string(&mut app, 100, 20);
         assert!(out.contains("frontend"), "missing repo name:\n{}", out);
         assert!(out.contains("main"), "missing target branch:\n{}", out);
+    }
+
+    fn make_in_progress_app(tmp: &tempfile::TempDir, name: &str) -> InfoApp {
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace(name);
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        InfoApp::new(name.into(), mgr2, true, Duration::from_secs(5))
+    }
+
+    #[test]
+    fn key_q_sets_quit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = make_in_progress_app(&tmp, "demo");
+        let ev = crate::tui_app::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        <InfoApp as crate::tui_app::App>::on_event(&mut app, ev).unwrap();
+        assert!(<InfoApp as crate::tui_app::App>::should_quit(&app));
+    }
+
+    #[test]
+    fn key_esc_sets_quit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = make_in_progress_app(&tmp, "demo");
+        let ev = crate::tui_app::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        <InfoApp as crate::tui_app::App>::on_event(&mut app, ev).unwrap();
+        assert!(<InfoApp as crate::tui_app::App>::should_quit(&app));
+    }
+
+    #[test]
+    fn key_ctrl_c_sets_quit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = make_in_progress_app(&tmp, "demo");
+        let ev = crate::tui_app::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        <InfoApp as crate::tui_app::App>::on_event(&mut app, ev).unwrap();
+        assert!(<InfoApp as crate::tui_app::App>::should_quit(&app));
+    }
+
+    #[test]
+    fn key_r_triggers_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = make_in_progress_app(&tmp, "demo");
+        let first_loaded = app.state.as_ref().unwrap().loaded_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let ev = crate::tui_app::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        <InfoApp as crate::tui_app::App>::on_event(&mut app, ev).unwrap();
+        let second_loaded = app.state.as_ref().unwrap().loaded_at;
+        assert!(second_loaded > first_loaded);
+    }
+
+    #[test]
+    fn tick_triggers_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = make_in_progress_app(&tmp, "demo");
+        let first_loaded = app.state.as_ref().unwrap().loaded_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        <InfoApp as crate::tui_app::App>::on_event(&mut app, crate::tui_app::Event::Tick).unwrap();
+        let second_loaded = app.state.as_ref().unwrap().loaded_at;
+        assert!(second_loaded > first_loaded);
+    }
+
+    #[test]
+    fn resize_does_not_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = make_in_progress_app(&tmp, "demo");
+        <InfoApp as crate::tui_app::App>::on_event(
+            &mut app,
+            crate::tui_app::Event::Resize(120, 40),
+        )
+        .unwrap();
+        assert!(!<InfoApp as crate::tui_app::App>::should_quit(&app));
+    }
+
+    #[test]
+    fn tick_interval_reflects_watch_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace("demo");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mgr_watch = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let watching = InfoApp::new("demo".into(), mgr_watch, true, Duration::from_secs(7));
+        assert_eq!(
+            <InfoApp as crate::tui_app::App>::tick_interval(&watching),
+            Some(Duration::from_secs(7))
+        );
+
+        let mgr_once = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let once = InfoApp::new("demo".into(), mgr_once, false, Duration::from_secs(5));
+        assert_eq!(<InfoApp as crate::tui_app::App>::tick_interval(&once), None);
     }
 }
