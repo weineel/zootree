@@ -89,6 +89,219 @@ pub(crate) fn status_label(s: &WorkspaceStatus) -> &'static str {
     }
 }
 
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table};
+use ratatui::Frame;
+
+impl crate::tui_app::App for InfoApp {
+    fn on_event(&mut self, _event: crate::tui_app::Event) -> anyhow::Result<()> {
+        // Filled in by Task 6.
+        Ok(())
+    }
+
+    fn render(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // title bar
+            Constraint::Min(3),    // body
+            Constraint::Length(1), // status line
+        ])
+        .split(area);
+
+        self.render_title(frame, chunks[0]);
+        self.render_body(frame, chunks[1]);
+        self.render_status_line(frame, chunks[2]);
+    }
+
+    fn should_quit(&self) -> bool {
+        self.quit
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        if self.watch {
+            Some(self.interval)
+        } else {
+            None
+        }
+    }
+}
+
+impl InfoApp {
+    fn render_title(&self, frame: &mut Frame, area: Rect) {
+        let (title_text, color) = match &self.state {
+            Some(s) => (
+                format!(
+                    "zootree info — {}  [{}]",
+                    self.name,
+                    status_label(&s.status)
+                ),
+                status_color(&s.status),
+            ),
+            None => (
+                format!("zootree info — {}  [?]", self.name),
+                Color::DarkGray,
+            ),
+        };
+        let para = Paragraph::new(Span::styled(title_text, Style::default().fg(color)));
+        frame.render_widget(para, area);
+    }
+
+    fn render_body(&self, frame: &mut Frame, area: Rect) {
+        let Some(state) = &self.state else {
+            let msg = self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "loading...".into());
+            let para = Paragraph::new(msg).block(Block::default().borders(Borders::ALL));
+            frame.render_widget(para, area);
+            return;
+        };
+
+        let ws = &state.workspace;
+
+        // Compute meta block height: 4 fixed lines (Title/Branch/Dir/Created),
+        // plus description block if non-empty (blank line + "Description:" + N lines).
+        let desc_height = if ws.description.is_empty() {
+            0
+        } else {
+            2 + ws.description.lines().count() as u16
+        };
+        let meta_height = 4 + desc_height;
+
+        // Repos block: top border + header + rows (or 1 "(none)" row).
+        let repos_rows = ws.repos.len().max(1) as u16;
+        let repos_height = 2 + repos_rows;
+
+        let chunks = Layout::vertical([
+            Constraint::Length(meta_height),
+            Constraint::Length(repos_height),
+            Constraint::Min(1),
+        ])
+        .split(area);
+
+        // Meta
+        let mut lines: Vec<Line> = Vec::new();
+        let created_str = format_rfc3339_to_minute(&ws.created_at);
+        lines.push(meta_line("Title:", &ws.title));
+        lines.push(meta_line("Branch:", &ws.branch));
+        lines.push(meta_line("Dir:", &ws.workspace_dir));
+        lines.push(meta_line("Created:", &created_str));
+        if !ws.description.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("  Description:"));
+            for l in ws.description.lines() {
+                lines.push(Line::from(format!("    {}", l)));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), chunks[0]);
+
+        // Repos
+        let rows: Vec<Row> = if ws.repos.is_empty() {
+            vec![Row::new(vec![
+                "(none)".to_string(),
+                "".to_string(),
+                "".to_string(),
+            ])]
+        } else {
+            ws.repos
+                .iter()
+                .map(|r| {
+                    let target = r.target_branch.as_deref().unwrap_or("*");
+                    let worktree = format!("{}/{}", ws.workspace_dir, r.name);
+                    Row::new(vec![r.name.clone(), target.to_string(), worktree])
+                })
+                .collect()
+        };
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(15),
+                Constraint::Length(15),
+                Constraint::Min(20),
+            ],
+        )
+        .header(
+            Row::new(vec!["NAME", "TARGET", "WORKTREE"])
+                .style(Style::default().fg(Color::DarkGray)),
+        )
+        .block(Block::default().borders(Borders::TOP).title(" Repos "));
+        frame.render_widget(table, chunks[1]);
+
+        // Events
+        let recent = last_n(&ws.events, 5);
+        let items: Vec<ListItem> = recent
+            .iter()
+            .map(|e| {
+                let ts = format_rfc3339_to_minute(&e.timestamp);
+                let mut text = format!("{}  {}", ts, e.action);
+                if let Some(d) = &e.detail {
+                    text.push_str(&format!("  ({})", d));
+                }
+                ListItem::new(text)
+            })
+            .collect();
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .title(" Recent events "),
+        );
+        frame.render_widget(list, chunks[2]);
+    }
+
+    fn render_status_line(&self, frame: &mut Frame, area: Rect) {
+        let left = "[q] quit   [r] reload".to_string();
+        let right = if let Some(state) = &self.state {
+            let mode = if self.watch {
+                format!("watching ({}s)", self.interval.as_secs())
+            } else {
+                "once".to_string()
+            };
+            format!(
+                "{}   updated {}",
+                mode,
+                format_time_of_day(&state.loaded_at)
+            )
+        } else {
+            "loading".to_string()
+        };
+
+        let width = area.width as usize;
+        let combined = if left.len() + right.len() + 2 <= width {
+            let pad = width - left.len() - right.len();
+            format!("{}{}{}", left, " ".repeat(pad), right)
+        } else {
+            format!("{}  {}", left, right)
+        };
+
+        frame.render_widget(
+            Paragraph::new(combined).style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+    }
+}
+
+fn meta_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {:<10}", label),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn status_color(s: &WorkspaceStatus) -> Color {
+    match s {
+        WorkspaceStatus::Pending => Color::DarkGray,
+        WorkspaceStatus::InProgress => Color::Green,
+        WorkspaceStatus::Done => Color::Blue,
+        WorkspaceStatus::Canceled => Color::Red,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +391,78 @@ mod tests {
         assert!(app.state.is_none());
         assert!(app.last_error.is_some());
         assert!(app.last_error.as_deref().unwrap().contains("ghost"));
+    }
+
+    fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn render_to_string(app: &mut InfoApp, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| <InfoApp as crate::tui_app::App>::render(app, f))
+            .unwrap();
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn render_shows_name_status_and_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace("demo");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 80, 20);
+        assert!(out.contains("demo"), "missing name:\n{}", out);
+        assert!(out.contains("in_progress"), "missing status:\n{}", out);
+        assert!(out.contains("Demo title"), "missing title:\n{}", out);
+        assert!(out.contains("zootree/demo"), "missing branch:\n{}", out);
+    }
+
+    #[test]
+    fn render_shows_last_error_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let mut app = InfoApp::new("ghost".into(), mgr, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 80, 10);
+        assert!(out.contains("ghost"), "error should mention name:\n{}", out);
+    }
+
+    #[test]
+    fn render_shows_repos_row() {
+        use crate::config::workspace::RepoEntry;
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let mut ws = sample_workspace("demo");
+        ws.repos = vec![RepoEntry {
+            name: "frontend".into(),
+            target_branch: Some("main".into()),
+        }];
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+        let out = render_to_string(&mut app, 100, 20);
+        assert!(out.contains("frontend"), "missing repo name:\n{}", out);
+        assert!(out.contains("main"), "missing target branch:\n{}", out);
     }
 }
