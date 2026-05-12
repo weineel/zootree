@@ -1,4 +1,5 @@
 pub mod completions;
+pub mod info;
 pub mod prune;
 pub mod repo;
 pub mod template;
@@ -35,6 +36,8 @@ pub enum Commands {
     Start(workspace::StartArgs),
     #[command(about = "Open an in-progress workspace in zellij")]
     Open(workspace::OpenArgs),
+    #[command(about = "Show detailed info about a workspace")]
+    Info(info::InfoArgs),
     #[command(about = "Complete a workspace (merge, clean up worktrees)")]
     Done(workspace::DoneArgs),
     #[command(about = "Cancel a workspace (discard worktrees without merging)")]

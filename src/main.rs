@@ -82,6 +82,9 @@ fn run(command: Commands) -> Result<()> {
         Commands::Open(args) => {
             zootree::cli::workspace::handle_open(&args)?;
         }
+        Commands::Info(args) => {
+            zootree::cli::info::handle_info(&args)?;
+        }
         Commands::Done(args) => {
             zootree::cli::workspace::handle_done(&args)?;
         }
