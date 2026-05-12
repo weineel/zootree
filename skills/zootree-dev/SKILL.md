@@ -20,7 +20,8 @@ src/
 │   ├── workspace.rs # create/start/list/open/done/cancel
 │   ├── template.rs  # template list/show/delete
 │   ├── prune.rs     # prune 清理
-│   └── completions.rs # 生成 shell 补全脚本 (completions 子命令)
+│   ├── completions.rs # 生成 shell 补全脚本 (completions 子命令)
+│   └── info.rs      # info [name] [--watch]
 ├── config/          # 配置管理
 │   ├── mod.rs       # ConfigManager: 配置读写中枢
 │   ├── global.rs    # GlobalConfig + HooksConfig + HookValue
@@ -36,6 +37,9 @@ src/
 │   ├── copy_files.rs # 文件复制逻辑
 │   ├── name_gen.rs  # 工作空间名称生成器
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template)
+├── tui_app/         # TUI 应用框架（ratatui + crossterm）
+│   ├── mod.rs       # Event / App trait / run_app 事件循环
+│   └── info.rs      # InfoApp + 格式化辅助函数
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
@@ -76,6 +80,7 @@ pub struct MockRunner {     // 测试用
 match cli.command {
     Commands::Repo(args) => zootree::cli::repo::handle_repo_command(&args.command)?,
     Commands::Create(args) => zootree::cli::workspace::handle_create(&args)?,
+    Commands::Info(args) => zootree::cli::info::handle_info(&args)?,
     Commands::Completions(args) => zootree::cli::completions::handle_completions(&args)?,
     // ...
 }
@@ -161,6 +166,8 @@ fn test_something() {
 | `rand` (0.8) | 名称随机生成 |
 | `chrono` (0.4, serde) | 时间戳 |
 | `cargo-husky` (1, dev, `default-features = false`, `user-hooks`) | 安装 `.cargo-husky/hooks/` 下的 git hook 到 `.git/hooks/`，在 `cargo check --tests` 首次构建时生效 |
+| `ratatui` (0.29) | TUI 框架，`src/tui_app/` 的渲染内核 |
+| `crossterm` (0.28) | 终端后端：raw mode、事件读取、alternate screen |
 
 ## 代码约定
 
@@ -193,6 +200,13 @@ fn test_something() {
 2. 在对应 `Args` 字段加 `add = ArgValueCompleter::new(|c: &OsStr| complete_<thing>(c))`
 3. 在 `tests/completions_test.rs` 添加：基本列表、前缀过滤、描述包含正确字段三个测试
 4. 静态值（如固定枚举）改为 `clap::ValueEnum`，clap 自动补全
+
+### 添加新的 TUI 视图
+
+1. 在 `src/tui_app/` 下新建模块 `<name>.rs` 并在 `src/tui_app/mod.rs` 加 `pub mod <name>;`
+2. 实现 `App` trait：`on_event` / `render` / `should_quit`，需要定时刷新则覆写 `tick_interval`
+3. 入口调用 `tui_app::run_app(app)`；渲染测试用 `ratatui::backend::TestBackend` + `Terminal::draw`
+4. 事件处理测试直接调 `<App>::on_event` 并断言状态变化，不必进真实终端
 
 ## Skill 自我迭代
 
