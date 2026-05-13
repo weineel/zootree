@@ -3,7 +3,8 @@ use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{
-    complete_repos_list, complete_template, complete_workspace, WorkspaceFilter,
+    complete_agent_cli_alias, complete_repos_list, complete_template, complete_workspace,
+    WorkspaceFilter,
 };
 use crate::core::copy_files;
 use crate::core::git::GitOps;
@@ -320,7 +321,13 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     println!("workspace '{}' started", name);
 
     if !args.no_zellij {
-        launch_zellij(&config_mgr, &global, &workspace, &runner, args.run_agent)?;
+        launch_zellij(
+            &config_mgr,
+            &global,
+            &workspace,
+            &runner,
+            args.run_agent.clone(),
+        )?;
     }
 
     Ok(())
@@ -402,7 +409,7 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
         anyhow::bail!("workspace '{}' is not in_progress", name);
     }
 
-    launch_zellij(&config_mgr, &global, &workspace, &runner, false)?;
+    launch_zellij(&config_mgr, &global, &workspace, &runner, None)?;
     Ok(())
 }
 
@@ -419,7 +426,7 @@ fn launch_zellij(
     global: &crate::config::global::GlobalConfig,
     workspace: &WorkspaceConfig,
     runner: &RealRunner,
-    run_agent: bool,
+    run_agent: Option<Option<String>>,
 ) -> Result<()> {
     if std::env::var("ZELLIJ").is_ok() {
         anyhow::bail!(
@@ -453,21 +460,33 @@ fn launch_zellij(
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
 
-    let (overview_kdl, repo_kdl_for_first) = if run_agent {
-        let agent_cli_tpl = global.agent_cli.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
-            )
-        })?;
-        let prompt = crate::core::layout::build_prompt(workspace);
-        let kdl = crate::core::layout::build_agent_cli_kdl(agent_cli_tpl, &prompt)?;
-        if workspace.repos.len() == 1 {
-            (String::new(), kdl)
-        } else {
-            (kdl, String::new())
+    let agent_cli_tpl: Option<String> = match run_agent.as_ref() {
+        None => None,
+        Some(value) => {
+            let raw: String = match value.as_deref() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => global.agent_cli.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
+                    )
+                })?,
+            };
+            let resolved = crate::core::layout::resolve_agent_cli(&raw, &global.agent_cli_alias);
+            Some(resolved.to_string())
         }
-    } else {
-        (String::new(), String::new())
+    };
+
+    let (overview_kdl, repo_kdl_for_first) = match agent_cli_tpl.as_deref() {
+        None => (String::new(), String::new()),
+        Some(tpl) => {
+            let prompt = crate::core::layout::build_prompt(workspace);
+            let kdl = crate::core::layout::build_agent_cli_kdl(tpl, &prompt)?;
+            if workspace.repos.len() == 1 {
+                (String::new(), kdl)
+            } else {
+                (kdl, String::new())
+            }
+        }
     };
 
     let mut vars = Vec::new();
@@ -495,7 +514,7 @@ fn launch_zellij(
 
     let rendered = LayoutRenderer::render(&template_content, &vars);
 
-    if run_agent
+    if run_agent.is_some()
         && !template_content.contains("$overview_agent_cli")
         && !template_content.contains("$repo_agent_cli")
     {
@@ -576,8 +595,15 @@ pub struct StartArgs {
     pub name: Option<String>,
     #[arg(long, help = "Skip launching zellij session after start")]
     pub no_zellij: bool,
-    #[arg(long, help = "Launch configured agent_cli in the designated pane")]
-    pub run_agent: bool,
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_name = "ALIAS_OR_CMD",
+        help = "Launch agent_cli in the designated pane (alias name or literal command)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_agent_cli_alias(c)),
+    )]
+    pub run_agent: Option<Option<String>>,
 }
 
 #[derive(Args)]

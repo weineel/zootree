@@ -156,7 +156,7 @@ zootree create [options]             # Create a workspace
 
 zootree start [name]                 # Start a workspace
   --no-zellij                        # Don't launch Zellij
-  --run-agent                        # Launch configured agent_cli in the designated pane
+  --run-agent [alias|command]        # Launch agent_cli (alias name or literal command) in the designated pane
 
 zootree list                         # List workspaces
   --status pending|in-progress|done|canceled
@@ -283,6 +283,39 @@ agent_cli = "codex $prompt"
 ```
 
 `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`. Without `--run-agent`, the placeholder panes fall back to a regular shell.
+
+### agent_cli and aliases
+
+`agent_cli` accepts either a literal command template or the name of an entry in
+`agent_cli_alias`. `--run-agent` defaults to this field; you can also pass an alias
+name or a literal command directly.
+
+```toml
+agent_cli = "claude"   # references alias "claude"
+
+[agent_cli_alias]
+claude = "claude --dangerously-skip-permissions -- $prompt"
+claude-safe = "claude -- $prompt"
+gemini = "gemini chat -- $prompt"
+codex = "codex --skip-confirm -- $prompt"
+```
+
+Usage:
+
+```bash
+zootree start ws                              # no agent
+zootree start ws --run-agent                  # use agent_cli ("claude" here)
+zootree start ws --run-agent claude-safe      # switch to alias claude-safe
+zootree start ws --run-agent="codex --skip -- $prompt"  # literal command
+```
+
+- Alias lookup is single-level: a value not present in `agent_cli_alias` is used as
+  a literal command (no warning).
+- Shell completion (`--run-agent <TAB>`) lists all alias names; the one matching the
+  `agent_cli` string value is annotated `(default)` in its help text.
+- Place `--run-agent` after the workspace name. `zootree start --run-agent ws` would
+  treat `ws` as the alias value and leave the positional name empty (interactive picker).
+
 
 ## Options
 

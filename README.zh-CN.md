@@ -153,7 +153,7 @@ zootree create [options]             # 创建工作空间
 
 zootree start [name]                 # 启动工作空间
   --no-zellij                        # 不启动 Zellij
-  --run-agent                        # 在指定 pane 中执行配置的 agent_cli
+  --run-agent [alias|command]        # 在指定 pane 中执行 agent_cli（alias 名或字面量命令）
 
 zootree list                         # 列出工作空间
   --status pending|in-progress|done|canceled
@@ -280,6 +280,37 @@ agent_cli = "codex $prompt"
 ```
 
 `$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。不加 `--run-agent` 时，占位 pane 会回退为普通 shell。
+
+### agent_cli 与别名
+
+`agent_cli` 既可以是字面量命令模板，也可以是 `agent_cli_alias` 中已注册的别名。`--run-agent`
+默认使用该字段；也可显式传入别名或字面量。
+
+```toml
+agent_cli = "claude"   # 引用 alias "claude"
+
+[agent_cli_alias]
+claude = "claude --dangerously-skip-permissions -- $prompt"
+claude-safe = "claude -- $prompt"
+gemini = "gemini chat -- $prompt"
+codex = "codex --skip-confirm -- $prompt"
+```
+
+启动用法：
+
+```bash
+zootree start ws                              # 不启动 agent
+zootree start ws --run-agent                  # 用 agent_cli 默认（这里是 "claude"）
+zootree start ws --run-agent claude-safe      # 切换到 alias claude-safe
+zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
+```
+
+- 别名解析为一层：`agent_cli_alias` 中找不到 key 时，原字符串作字面量命令使用，**不会**报错或警告。
+- shell 补全（`--run-agent <TAB>`）会列出所有 alias 名，与 `agent_cli` 字段值匹配的那条
+  在描述里以 `(default)` 标记。
+- `--run-agent` 建议放在 workspace 名之后。`zootree start --run-agent ws` 会把 `ws` 当作
+  alias 值吃掉，positional 名留空进入交互式选择器。
+
 
 ## 选项
 

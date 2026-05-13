@@ -166,6 +166,49 @@ fn test_parse_repos_arg_single() {
 }
 
 #[test]
+fn test_parse_global_config_agent_cli_alias() {
+    let toml_str = r#"
+agent_cli = "claude"
+
+[agent_cli_alias]
+claude = "claude --dangerously-skip-permissions -- $prompt"
+gemini = "gemini chat -- $prompt"
+"#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.agent_cli.as_deref(), Some("claude"));
+    assert_eq!(config.agent_cli_alias.len(), 2);
+    assert_eq!(
+        config.agent_cli_alias.get("claude").map(String::as_str),
+        Some("claude --dangerously-skip-permissions -- $prompt")
+    );
+    assert_eq!(
+        config.agent_cli_alias.get("gemini").map(String::as_str),
+        Some("gemini chat -- $prompt")
+    );
+}
+
+#[test]
+fn test_parse_global_config_agent_cli_alias_default_empty() {
+    let toml_str = "";
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.agent_cli_alias.is_empty());
+}
+
+#[test]
+fn test_serialize_global_config_agent_cli_alias_empty_omitted() {
+    let cfg = GlobalConfig {
+        agent_cli: Some("claude -- $prompt".into()),
+        ..GlobalConfig::default()
+    };
+    let s = toml::to_string(&cfg).unwrap();
+    assert!(
+        !s.contains("agent_cli_alias"),
+        "empty map should be skipped during serialization, got: {}",
+        s
+    );
+}
+
+#[test]
 fn workspace_status_value_enum_parses_kebab_case() {
     use clap::ValueEnum;
     use zootree::config::workspace::WorkspaceStatus;

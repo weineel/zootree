@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -70,6 +71,8 @@ pub struct GlobalConfig {
     pub log: LogConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_cli: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_cli_alias: BTreeMap<String, String>,
 }
 
 fn default_workspace_root() -> String {
@@ -89,6 +92,7 @@ impl Default for GlobalConfig {
             hooks: HooksConfig::default(),
             log: LogConfig::default(),
             agent_cli: None,
+            agent_cli_alias: BTreeMap::new(),
         }
     }
 }

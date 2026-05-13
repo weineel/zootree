@@ -159,3 +159,36 @@ pub fn complete_repos_list(current: &OsStr) -> Vec<CompletionCandidate> {
     };
     complete_repos_list_with(&mgr, current)
 }
+
+pub fn complete_agent_cli_alias_with(
+    mgr: &ConfigManager,
+    current: &OsStr,
+) -> Vec<CompletionCandidate> {
+    let prefix = current.to_string_lossy();
+    let Ok(global) = mgr.load_global_config() else {
+        return vec![];
+    };
+    let default_tpl = global.agent_cli.as_deref();
+
+    global
+        .agent_cli_alias
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix.as_ref()))
+        .map(|(name, tpl)| {
+            let is_default = default_tpl == Some(name.as_str());
+            let help = if is_default {
+                format!("(default) {}", tpl)
+            } else {
+                tpl.clone()
+            };
+            CompletionCandidate::new(name).help(Some(help.into()))
+        })
+        .collect()
+}
+
+pub fn complete_agent_cli_alias(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Ok(mgr) = ConfigManager::new() else {
+        return vec![];
+    };
+    complete_agent_cli_alias_with(&mgr, current)
+}

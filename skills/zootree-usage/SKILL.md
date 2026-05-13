@@ -149,6 +149,33 @@ max_files = 5
 max_size = "10MB"
 ```
 
+### agent_cli 与别名
+
+`agent_cli` 字段既可以是字面量命令模板（含 `$prompt` 占位符），也可以是
+`agent_cli_alias` 表中已注册的别名 key。`zootree start --run-agent` 默认使用
+`agent_cli` 字段；也可显式传入别名名或字面量命令。
+
+```toml
+agent_cli = "claude"   # 引用下面的 alias
+
+[agent_cli_alias]
+claude = "claude --dangerously-skip-permissions -- $prompt"
+claude-safe = "claude -- $prompt"
+gemini = "gemini chat -- $prompt"
+codex = "codex --skip-confirm -- $prompt"
+```
+
+用法：
+
+```bash
+zootree start ws --run-agent                  # 用 agent_cli 默认
+zootree start ws --run-agent claude-safe      # 切到指定 alias
+zootree start ws --run-agent="codex -- $prompt"  # 直接传字面量
+```
+
+- 别名解析单层：`agent_cli_alias` 中找不到的字符串按字面量执行，不报错。
+- `--run-agent <TAB>` 会列出所有 alias 名，与 `agent_cli` 匹配的那条标 `(default)`。
+
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 
 ```toml

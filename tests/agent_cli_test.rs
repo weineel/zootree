@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use zootree::config::global::ZellijConfig;
 use zootree::config::workspace::WorkspaceConfig;
-use zootree::core::layout::build_prompt;
+use zootree::core::layout::{build_prompt, resolve_agent_cli};
 
 fn make_workspace(title: &str, description: &str) -> WorkspaceConfig {
     WorkspaceConfig {
@@ -99,4 +100,35 @@ fn build_agent_cli_kdl_unclosed_quote_errors() {
     let err = build_agent_cli_kdl(r#"claude "unclosed"#, "any").unwrap_err();
     let msg = format!("{:#}", err);
     assert!(msg.contains("failed to parse agent_cli"), "got: {}", msg);
+}
+
+#[test]
+fn resolve_returns_alias_value_when_key_matches() {
+    let mut map = BTreeMap::new();
+    map.insert("safe".to_string(), "claude -- $prompt".to_string());
+    assert_eq!(resolve_agent_cli("safe", &map), "claude -- $prompt");
+}
+
+#[test]
+fn resolve_returns_input_when_key_missing() {
+    let mut map = BTreeMap::new();
+    map.insert("safe".to_string(), "claude -- $prompt".to_string());
+    assert_eq!(
+        resolve_agent_cli("gemini chat -- $prompt", &map),
+        "gemini chat -- $prompt"
+    );
+}
+
+#[test]
+fn resolve_returns_input_with_empty_alias_map() {
+    let map = BTreeMap::new();
+    assert_eq!(resolve_agent_cli("anything", &map), "anything");
+}
+
+#[test]
+fn resolve_does_not_chain_aliases() {
+    let mut map = BTreeMap::new();
+    map.insert("a".to_string(), "b".to_string());
+    map.insert("b".to_string(), "real -- $prompt".to_string());
+    assert_eq!(resolve_agent_cli("a", &map), "b");
 }

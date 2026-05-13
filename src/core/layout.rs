@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::config::workspace::WorkspaceConfig;
 
 pub struct LayoutVar {
@@ -185,4 +187,12 @@ pub fn build_agent_cli_kdl(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<
             escaped_args.join(" ")
         ))
     }
+}
+
+/// Resolve an agent_cli value against the alias map (single level).
+///
+/// If `value` is a key in `alias_map`, returns the alias's template; otherwise
+/// returns `value` unchanged so it can be used as a literal command string.
+pub fn resolve_agent_cli<'a>(value: &'a str, alias_map: &'a BTreeMap<String, String>) -> &'a str {
+    alias_map.get(value).map(String::as_str).unwrap_or(value)
 }

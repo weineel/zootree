@@ -1,14 +1,14 @@
 use chrono::Local;
 use std::ffi::OsStr;
 use tempfile::TempDir;
-use zootree::config::global::{HooksConfig, ZellijConfig};
+use zootree::config::global::{GlobalConfig, HooksConfig, ZellijConfig};
 use zootree::config::repo::RepoConfig;
 use zootree::config::template::TemplateConfig;
 use zootree::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use zootree::config::ConfigManager;
 use zootree::core::completers::{
-    complete_repo_with, complete_repos_list_with, complete_template_with, complete_workspace_with,
-    WorkspaceFilter,
+    complete_agent_cli_alias_with, complete_repo_with, complete_repos_list_with,
+    complete_template_with, complete_workspace_with, WorkspaceFilter,
 };
 
 fn make_workspace(name: &str, title: &str) -> WorkspaceConfig {
@@ -376,4 +376,108 @@ fn dynamic_elvish_registration_dispatches_to_complete_env() {
         s.contains("COMPLETE"),
         "elvish script missing COMPLETE env var: {s}"
     );
+}
+
+fn save_global(mgr: &ConfigManager, cfg: &GlobalConfig) {
+    mgr.save_global_config(cfg).unwrap();
+}
+
+#[test]
+fn agent_cli_alias_completer_returns_all_when_no_prefix() {
+    let (_tmp, mgr) = make_mgr();
+    let mut cfg = GlobalConfig::default();
+    cfg.agent_cli_alias
+        .insert("claude".into(), "claude -- $prompt".into());
+    cfg.agent_cli_alias
+        .insert("gemini".into(), "gemini -- $prompt".into());
+    cfg.agent_cli_alias
+        .insert("codex".into(), "codex -- $prompt".into());
+    save_global(&mgr, &cfg);
+
+    let cands = complete_agent_cli_alias_with(&mgr, OsStr::new(""));
+    let n = names(&cands);
+    assert_eq!(n, vec!["claude", "codex", "gemini"]); // BTreeMap order
+}
+
+#[test]
+fn agent_cli_alias_completer_filters_by_prefix() {
+    let (_tmp, mgr) = make_mgr();
+    let mut cfg = GlobalConfig::default();
+    cfg.agent_cli_alias.insert("claude".into(), "x".into());
+    cfg.agent_cli_alias.insert("claude-safe".into(), "y".into());
+    cfg.agent_cli_alias.insert("gemini".into(), "z".into());
+    save_global(&mgr, &cfg);
+
+    let cands = complete_agent_cli_alias_with(&mgr, OsStr::new("claude"));
+    let n = names(&cands);
+    assert_eq!(n, vec!["claude", "claude-safe"]);
+}
+
+#[test]
+fn agent_cli_alias_completer_marks_default_when_agent_cli_matches_alias_key() {
+    let (_tmp, mgr) = make_mgr();
+    let mut cfg = GlobalConfig {
+        agent_cli: Some("claude".into()),
+        ..Default::default()
+    };
+    cfg.agent_cli_alias
+        .insert("claude".into(), "claude -- $prompt".into());
+    cfg.agent_cli_alias
+        .insert("gemini".into(), "gemini -- $prompt".into());
+    save_global(&mgr, &cfg);
+
+    let cands = complete_agent_cli_alias_with(&mgr, OsStr::new(""));
+    let claude = cands
+        .iter()
+        .find(|c| c.get_value().to_string_lossy() == "claude")
+        .expect("claude candidate present");
+    let claude_help = claude.get_help().expect("help text").to_string();
+    assert!(
+        claude_help.starts_with("(default)"),
+        "claude marked as default: {}",
+        claude_help
+    );
+
+    let gemini = cands
+        .iter()
+        .find(|c| c.get_value().to_string_lossy() == "gemini")
+        .expect("gemini candidate present");
+    let gemini_help = gemini.get_help().expect("help text").to_string();
+    assert!(
+        !gemini_help.starts_with("(default)"),
+        "gemini not marked: {}",
+        gemini_help
+    );
+}
+
+#[test]
+fn agent_cli_alias_completer_no_default_marker_when_agent_cli_is_literal() {
+    let (_tmp, mgr) = make_mgr();
+    let mut cfg = GlobalConfig {
+        agent_cli: Some("claude --skip -- $prompt".into()),
+        ..Default::default()
+    };
+    cfg.agent_cli_alias
+        .insert("claude".into(), "claude -- $prompt".into());
+    save_global(&mgr, &cfg);
+
+    let cands = complete_agent_cli_alias_with(&mgr, OsStr::new(""));
+    for c in &cands {
+        let h = c.get_help().map(|h| h.to_string()).unwrap_or_default();
+        assert!(
+            !h.starts_with("(default)"),
+            "no candidate marked default when agent_cli is literal: {}",
+            h
+        );
+    }
+}
+
+#[test]
+fn agent_cli_alias_completer_empty_when_no_aliases() {
+    let (_tmp, mgr) = make_mgr();
+    let cfg = GlobalConfig::default();
+    save_global(&mgr, &cfg);
+
+    let cands = complete_agent_cli_alias_with(&mgr, OsStr::new(""));
+    assert!(cands.is_empty());
 }
