@@ -156,6 +156,7 @@ zootree create [options]             # Create a workspace
 
 zootree start [name]                 # Start a workspace
   --no-zellij                        # Don't launch Zellij
+  --run-agent                        # Launch configured agent_cli in the designated pane
 
 zootree list                         # List workspaces
   --status pending|in-progress|done|canceled
@@ -197,6 +198,7 @@ zootree logs                         # View logs
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
+agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
 [zellij]
 layout = "default"
@@ -264,6 +266,23 @@ Available variables:
 - `@BRANCH@` - Branch name
 - `@WORKSPACE_NAME@` - Workspace name
 - `@WORKSPACE_DIR@` - Workspace directory
+
+### Agent CLI
+
+`agent_cli` is a command template for launching a coding agent in a zellij pane. When you run `zootree start --run-agent`, the template is parsed with shell-style word splitting and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). The rendered command runs in:
+
+- **1 repo** → the repo tab's bottom-right pane
+- **≥2 repos** → the overview tab's last pane
+
+```toml
+# Claude Code
+agent_cli = "claude --dangerously-skip-permissions -- $prompt"
+
+# OpenAI Codex CLI
+agent_cli = "codex $prompt"
+```
+
+`$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`. Without `--run-agent`, the placeholder panes fall back to a regular shell.
 
 ## Options
 

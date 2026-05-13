@@ -9,6 +9,7 @@ fn test_parse_global_config_full() {
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
+agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
 [zellij]
 layout = "default"
@@ -31,6 +32,10 @@ max_files = 5
         ))
     );
     assert_eq!(config.log.max_files, Some(5));
+    assert_eq!(
+        config.agent_cli.as_deref(),
+        Some("claude --dangerously-skip-permissions -- $prompt")
+    );
 }
 
 #[test]
@@ -40,6 +45,7 @@ fn test_parse_global_config_defaults() {
     assert_eq!(config.zellij.layout, Some("default".into()));
     assert_eq!(config.branch_prefix, "zootree");
     assert!(config.copy_files.is_empty());
+    assert!(config.agent_cli.is_none());
 }
 
 #[test]

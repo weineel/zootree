@@ -68,6 +68,8 @@ pub struct GlobalConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_cli: Option<String>,
 }
 
 fn default_workspace_root() -> String {
@@ -86,6 +88,7 @@ impl Default for GlobalConfig {
             copy_files: Vec::new(),
             hooks: HooksConfig::default(),
             log: LogConfig::default(),
+            agent_cli: None,
         }
     }
 }

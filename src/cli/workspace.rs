@@ -320,7 +320,7 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     println!("workspace '{}' started", name);
 
     if !args.no_zellij {
-        launch_zellij(&config_mgr, &global, &workspace, &runner)?;
+        launch_zellij(&config_mgr, &global, &workspace, &runner, args.run_agent)?;
     }
 
     Ok(())
@@ -402,7 +402,7 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
         anyhow::bail!("workspace '{}' is not in_progress", name);
     }
 
-    launch_zellij(&config_mgr, &global, &workspace, &runner)?;
+    launch_zellij(&config_mgr, &global, &workspace, &runner, false)?;
     Ok(())
 }
 
@@ -419,6 +419,7 @@ fn launch_zellij(
     global: &crate::config::global::GlobalConfig,
     workspace: &WorkspaceConfig,
     runner: &RealRunner,
+    run_agent: bool,
 ) -> Result<()> {
     if std::env::var("ZELLIJ").is_ok() {
         anyhow::bail!(
@@ -451,10 +452,34 @@ fn launch_zellij(
     };
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+
+    let (overview_kdl, repo_kdl_for_first) = if run_agent {
+        let agent_cli_tpl = global.agent_cli.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
+            )
+        })?;
+        let prompt = crate::core::layout::build_prompt(workspace);
+        let kdl = crate::core::layout::build_agent_cli_kdl(agent_cli_tpl, &prompt)?;
+        if workspace.repos.len() == 1 {
+            (String::new(), kdl)
+        } else {
+            (kdl, String::new())
+        }
+    } else {
+        (String::new(), String::new())
+    };
+
     let mut vars = Vec::new();
-    for repo_entry in &workspace.repos {
+    for (i, repo_entry) in workspace.repos.iter().enumerate() {
         let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
         let lazygit_config = repo_config.lazygit.map(|lg| lg.config).unwrap_or_default();
+
+        let repo_agent_cli = if i == 0 {
+            repo_kdl_for_first.clone()
+        } else {
+            String::new()
+        };
 
         vars.push(LayoutVar {
             repo_name: repo_entry.name.clone(),
@@ -463,10 +488,22 @@ fn launch_zellij(
             workspace_name: workspace.name.clone(),
             workspace_dir: ws_dir.clone(),
             lazygit_config,
+            overview_agent_cli: overview_kdl.clone(),
+            repo_agent_cli,
         });
     }
 
     let rendered = LayoutRenderer::render(&template_content, &vars);
+
+    if run_agent
+        && !template_content.contains("$overview_agent_cli")
+        && !template_content.contains("$repo_agent_cli")
+    {
+        tracing::warn!(
+            "--run-agent is set but layout '{}' contains no $overview_agent_cli or $repo_agent_cli placeholder; agent_cli will not be executed",
+            layout_name
+        );
+    }
 
     let layout_dir = config_mgr.base_dir.join("layouts");
     std::fs::create_dir_all(&layout_dir)?;
@@ -539,6 +576,8 @@ pub struct StartArgs {
     pub name: Option<String>,
     #[arg(long, help = "Skip launching zellij session after start")]
     pub no_zellij: bool,
+    #[arg(long, help = "Launch configured agent_cli in the designated pane")]
+    pub run_agent: bool,
 }
 
 #[derive(Args)]

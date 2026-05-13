@@ -1972,6 +1972,7 @@ dependencies = [
  "ratatui",
  "serde",
  "shellexpand",
+ "shlex",
  "tempfile",
  "toml",
  "tracing",

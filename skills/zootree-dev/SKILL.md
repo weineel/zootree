@@ -165,6 +165,7 @@ fn test_something() {
 | `anyhow` (1) | 错误处理 |
 | `rand` (0.8) | 名称随机生成 |
 | `chrono` (0.4, serde) | 时间戳 |
+| `shlex` (1) | 把 `agent_cli` 字符串模板拆成 argv |
 | `cargo-husky` (1, dev, `default-features = false`, `user-hooks`) | 安装 `.cargo-husky/hooks/` 下的 git hook 到 `.git/hooks/`，在 `cargo check --tests` 首次构建时生效 |
 | `ratatui` (0.29) | TUI 框架，`src/tui_app/` 的渲染内核 |
 | `crossterm` (0.28) | 终端后端：raw mode、事件读取、alternate screen |

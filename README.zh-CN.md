@@ -153,6 +153,7 @@ zootree create [options]             # 创建工作空间
 
 zootree start [name]                 # 启动工作空间
   --no-zellij                        # 不启动 Zellij
+  --run-agent                        # 在指定 pane 中执行配置的 agent_cli
 
 zootree list                         # 列出工作空间
   --status pending|in-progress|done|canceled
@@ -194,6 +195,7 @@ zootree logs                         # 查看日志
 workspace_root = "~/zootree-workspaces"
 branch_prefix = "zootree"
 copy_files = [".env"]
+agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
 [zellij]
 layout = "default"
@@ -261,6 +263,23 @@ layout {
 - `@BRANCH@` - 分支名
 - `@WORKSPACE_NAME@` - 工作空间名
 - `@WORKSPACE_DIR@` - 工作空间目录
+
+### Agent CLI
+
+`agent_cli` 是用于在 zellij pane 中启动 coding agent 的命令模板。运行 `zootree start --run-agent` 时，模板会用 shell 风格拆分 token，并把 `$prompt` 替换成 workspace 的 `title`（若 `description` 非空则用换行连接）。渲染后的命令在以下 pane 中执行：
+
+- **1 个 repo** → 该 repo tab 右下 pane
+- **≥2 个 repo** → overview tab 最后一个 pane
+
+```toml
+# Claude Code
+agent_cli = "claude --dangerously-skip-permissions -- $prompt"
+
+# OpenAI Codex CLI
+agent_cli = "codex $prompt"
+```
+
+`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。不加 `--run-agent` 时，占位 pane 会回退为普通 shell。
 
 ## 选项
 

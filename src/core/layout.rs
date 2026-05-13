@@ -1,3 +1,5 @@
+use crate::config::workspace::WorkspaceConfig;
+
 pub struct LayoutVar {
     pub repo_name: String,
     pub worktree_path: String,
@@ -5,6 +7,8 @@ pub struct LayoutVar {
     pub workspace_name: String,
     pub workspace_dir: String,
     pub lazygit_config: String,
+    pub overview_agent_cli: String,
+    pub repo_agent_cli: String,
 }
 
 pub struct LayoutRenderer;
@@ -24,6 +28,10 @@ impl LayoutRenderer {
         result = result.replace("$workspace_name", &vars.workspace_name);
         result = result.replace("$workspace_dir", &vars.workspace_dir);
         result = result.replace("$lazygit_config", &vars.lazygit_config);
+        // agent_cli placeholders MUST be substituted last so injected KDL fragments
+        // don't get re-processed by the standard variable replacements.
+        result = result.replace("$overview_agent_cli", &vars.overview_agent_cli);
+        result = result.replace("$repo_agent_cli", &vars.repo_agent_cli);
         result
     }
 
@@ -104,7 +112,7 @@ layout {
             pane command="zootree" {
                 args "info" "$workspace_name" "--watch"
             }
-            pane cwd="$workspace_dir"
+            pane cwd="$workspace_dir" $overview_agent_cli
         }
         pane size=1 borderless=true {
             plugin location="status-bar"
@@ -122,7 +130,7 @@ layout {
             }
             pane {
                 pane size="30%" cwd="$worktree_path"
-                pane size="70%" cwd="$worktree_path"
+                pane size="70%" cwd="$worktree_path" $repo_agent_cli
             }
         }
         pane size=1 borderless=true {
@@ -130,5 +138,51 @@ layout {
         }
     }
 }"#
+    }
+}
+
+pub fn build_prompt(workspace: &WorkspaceConfig) -> String {
+    if workspace.description.is_empty() {
+        workspace.title.clone()
+    } else {
+        format!("{}\n{}", workspace.title, workspace.description)
+    }
+}
+
+fn kdl_escape(s: &str) -> String {
+    s.replace('\\', r"\\")
+        .replace('"', r#"\""#)
+        .replace('\n', r"\n")
+        .replace('\r', r"\r")
+        .replace('\t', r"\t")
+}
+
+pub fn build_agent_cli_kdl(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<String> {
+    let tokens = shlex::split(agent_cli_tpl)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse agent_cli: {}", agent_cli_tpl))?;
+    if tokens.is_empty() {
+        anyhow::bail!("agent_cli is empty");
+    }
+
+    let substituted: Vec<String> = tokens
+        .into_iter()
+        .map(|t| t.replace("$prompt", prompt))
+        .collect();
+
+    let command = kdl_escape(&substituted[0]);
+    let args = &substituted[1..];
+
+    if args.is_empty() {
+        Ok(format!(r#"command="{}""#, command))
+    } else {
+        let escaped_args: Vec<String> = args
+            .iter()
+            .map(|a| format!(r#""{}""#, kdl_escape(a)))
+            .collect();
+        Ok(format!(
+            "command=\"{}\" {{\n    args {}\n}}",
+            command,
+            escaped_args.join(" ")
+        ))
     }
 }

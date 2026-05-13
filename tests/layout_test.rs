@@ -12,6 +12,8 @@ fn test_variable_replacement() {
         workspace_name: "calm-river".into(),
         workspace_dir: "/home/user/ws/calm-river".into(),
         lazygit_config: "".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
     };
     let result = LayoutRenderer::replace_vars(template, &vars);
     assert!(result.contains(r#"name="frontend""#));
@@ -30,6 +32,8 @@ fn test_empty_lazygit_config_removes_ucf_arg() {
         workspace_name: "test".into(),
         workspace_dir: "/home/user/ws".into(),
         lazygit_config: "".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
     };
     let result = LayoutRenderer::replace_vars(template, &vars);
     assert!(!result.contains("-ucf"));
@@ -48,6 +52,8 @@ fn test_nonempty_lazygit_config_keeps_ucf_arg() {
         workspace_name: "test".into(),
         workspace_dir: "/home/user/ws".into(),
         lazygit_config: "/home/user/.lazygit.yml".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
     };
     let result = LayoutRenderer::replace_vars(template, &vars);
     assert!(result.contains(r#""-ucf" "/home/user/.lazygit.yml""#));
@@ -73,6 +79,8 @@ fn test_repeat_per_repo() {
             workspace_name: "test".into(),
             workspace_dir: "/ws".into(),
             lazygit_config: "".into(),
+            overview_agent_cli: "".into(),
+            repo_agent_cli: "".into(),
         },
         LayoutVar {
             repo_name: "backend".into(),
@@ -81,6 +89,8 @@ fn test_repeat_per_repo() {
             workspace_name: "test".into(),
             workspace_dir: "/ws".into(),
             lazygit_config: "".into(),
+            overview_agent_cli: "".into(),
+            repo_agent_cli: "".into(),
         },
     ];
     let result = LayoutRenderer::render(template, &repos);
@@ -118,6 +128,8 @@ fn default_layout_info_args_expanded_on_render() {
         workspace_name: "calm-river".into(),
         workspace_dir: "/ws/calm-river".into(),
         lazygit_config: "".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
     }];
     let rendered = LayoutRenderer::render(template, &vars);
     assert!(
@@ -125,4 +137,58 @@ fn default_layout_info_args_expanded_on_render() {
         "expected $workspace_name to expand\n---\n{}",
         rendered
     );
+}
+
+#[test]
+fn test_overview_agent_cli_placeholder_substituted() {
+    let template = r#"pane cwd="$workspace_dir" $overview_agent_cli"#;
+    let vars = LayoutVar {
+        repo_name: "frontend".into(),
+        worktree_path: "/ws/frontend".into(),
+        branch: "zootree/test".into(),
+        workspace_name: "test".into(),
+        workspace_dir: "/ws".into(),
+        lazygit_config: "".into(),
+        overview_agent_cli: r#"command="claude" {
+    args "--" "hello"
+}"#
+        .into(),
+        repo_agent_cli: "".into(),
+    };
+    let result = LayoutRenderer::replace_vars(template, &vars);
+    assert!(
+        result.contains(r#"cwd="/ws""#),
+        "workspace_dir replaced: {}",
+        result
+    );
+    assert!(
+        result.contains(r#"command="claude""#),
+        "agent_cli kdl injected: {}",
+        result
+    );
+    assert!(
+        result.contains(r#"args "--" "hello""#),
+        "agent args present: {}",
+        result
+    );
+    assert!(!result.contains("$overview_agent_cli"));
+}
+
+#[test]
+fn test_empty_agent_cli_leaves_layout_intact() {
+    let template = r#"pane cwd="$worktree_path" $repo_agent_cli"#;
+    let vars = LayoutVar {
+        repo_name: "frontend".into(),
+        worktree_path: "/ws/frontend".into(),
+        branch: "zootree/test".into(),
+        workspace_name: "test".into(),
+        workspace_dir: "/ws".into(),
+        lazygit_config: "".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
+    };
+    let result = LayoutRenderer::replace_vars(template, &vars);
+    assert!(!result.contains("$repo_agent_cli"));
+    assert!(!result.contains("command=\"claude\""));
+    assert!(result.contains(r#"cwd="/ws/frontend""#));
 }
