@@ -153,7 +153,7 @@ zootree create [options]             # 创建工作空间
 
 zootree start [name]                 # 启动工作空间
   --no-zellij                        # 不启动 Zellij
-  --run-agent [alias|command]        # 在指定 pane 中执行 agent_cli（alias 名或字面量命令）
+  --run-agent [alias|command]        # 启动 coding agent（详见「配置 → Agent CLI」）
 
 zootree list                         # 列出工作空间
   --status pending|in-progress|done|canceled
@@ -188,6 +188,16 @@ zootree logs                         # 查看日志
 ```
 
 ## 配置文件
+
+zootree 从 `~/.config/zootree/` 读取配置。速查表：
+
+| 文件 / 字段 | 作用 |
+|---|---|
+| `config.toml` | 全局默认值：workspace 根目录、分支前缀、文件复制、hooks、agent CLI |
+| `repos/<name>.toml` | 单仓库覆盖：path、目标分支、复制文件、hooks、lazygit 配置 |
+| `layouts/<name>.kdl` | 自定义 zellij 布局，供 `[zellij].layout` 引用 |
+| `[hooks]` 小节 | workspace/repo 生命周期事件触发的 shell 命令 |
+| `agent_cli` / `agent_cli_alias` | `zootree start --run-agent` 启动的 coding agent 命令模板 |
 
 ### 全局配置 (~/.config/zootree/config.toml)
 
@@ -235,16 +245,16 @@ post_create = "echo hello"
 pre_remove = { file = "~/.config/zootree/hooks/cleanup.sh" }
 
 # 内联脚本
-pre_done = { inline = "echo 'cleaning up' && rm -rf $WORKTREE_PATH" }
+pre_done = { inline = "echo 'cleaning up' && rm -rf $ZOOTREE_WORKTREE_PATH" }
 ```
 
 Hook 可用环境变量：
-- `WORKSPACE` - 工作空间名称
-- `REPO` - 仓库名称
-- `BRANCH` - 分支名
-- `TARGET_BRANCH` - 目标分支
-- `WORKTREE_PATH` - worktree 路径
-- `WORKSPACE_DIR` - 工作空间目录
+- `ZOOTREE_WORKSPACE` - 工作空间名称
+- `ZOOTREE_REPO` - 仓库名称
+- `ZOOTREE_BRANCH` - 分支名
+- `ZOOTREE_TARGET_BRANCH` - 目标分支
+- `ZOOTREE_WORKTREE_PATH` - worktree 路径
+- `ZOOTREE_WORKSPACE_DIR` - 工作空间目录
 
 ### 布局模板 (~/.config/zootree/layouts/<name>.kdl)
 
@@ -266,25 +276,18 @@ layout {
 
 ### Agent CLI
 
-`agent_cli` 是用于在 zellij pane 中启动 coding agent 的命令模板。运行 `zootree start --run-agent` 时，模板会用 shell 风格拆分 token，并把 `$prompt` 替换成 workspace 的 `title`（若 `description` 非空则用换行连接）。渲染后的命令在以下 pane 中执行：
+`agent_cli` 是在 zellij pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
+
+渲染后的命令在以下 pane 中执行：
 
 - **1 个 repo** → 该 repo tab 右下 pane
 - **≥2 个 repo** → overview tab 最后一个 pane
 
-```toml
-# Claude Code
-agent_cli = "claude --dangerously-skip-permissions -- $prompt"
+不加 `--run-agent` 时，这些占位 pane 会回退为普通 shell。
 
-# OpenAI Codex CLI
-agent_cli = "codex $prompt"
-```
+#### 别名
 
-`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。不加 `--run-agent` 时，占位 pane 会回退为普通 shell。
-
-### agent_cli 与别名
-
-`agent_cli` 既可以是字面量命令模板，也可以是 `agent_cli_alias` 中已注册的别名。`--run-agent`
-默认使用该字段；也可显式传入别名或字面量。
+`agent_cli` 既可以是字面量命令模板，也可以是 `agent_cli_alias` 中已注册的别名：
 
 ```toml
 agent_cli = "claude"   # 引用 alias "claude"
@@ -296,21 +299,19 @@ gemini = "gemini chat -- $prompt"
 codex = "codex --skip-confirm -- $prompt"
 ```
 
-启动用法：
+别名解析为一层：`agent_cli_alias` 中找不到 key 时，原字符串作字面量命令使用，**不会**报错或警告。
+
+#### 使用 `--run-agent`
 
 ```bash
-zootree start ws                              # 不启动 agent
-zootree start ws --run-agent                  # 用 agent_cli 默认（这里是 "claude"）
-zootree start ws --run-agent claude-safe      # 切换到 alias claude-safe
+zootree start ws                                        # 不启动 agent
+zootree start ws --run-agent                            # 用 agent_cli 默认值（这里是 "claude"）
+zootree start ws --run-agent claude-safe                # 切换到 alias claude-safe
 zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 ```
 
-- 别名解析为一层：`agent_cli_alias` 中找不到 key 时，原字符串作字面量命令使用，**不会**报错或警告。
-- shell 补全（`--run-agent <TAB>`）会列出所有 alias 名，与 `agent_cli` 字段值匹配的那条
-  在描述里以 `(default)` 标记。
-- `--run-agent` 建议放在 workspace 名之后。`zootree start --run-agent ws` 会把 `ws` 当作
-  alias 值吃掉，positional 名留空进入交互式选择器。
-
+- `--run-agent` 建议放在 workspace 名之后。`zootree start --run-agent ws` 会把 `ws` 当作 alias 值吃掉，positional 名留空进入交互式选择器。
+- shell 补全（`--run-agent <TAB>`）会列出所有 alias 名，与当前 `agent_cli` 值匹配的那条在描述里以 `(default)` 标记。
 
 ## 选项
 
