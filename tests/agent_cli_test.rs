@@ -29,6 +29,72 @@ fn build_prompt_joins_title_and_description_with_newline() {
     assert_eq!(build_prompt(&ws), "Add login\nImplement OAuth2");
 }
 
+use zootree::core::layout::{build_agent_cli_display, AliasInfo};
+
+#[test]
+fn build_agent_cli_display_returns_none_when_unset() {
+    let ws = make_workspace("Hello", "");
+    assert!(build_agent_cli_display(None, &BTreeMap::new(), &ws).is_none());
+}
+
+#[test]
+fn build_agent_cli_display_substitutes_single_line_prompt() {
+    let ws = make_workspace("Add login", "");
+    let out = build_agent_cli_display(Some("claude --skip -- $prompt"), &BTreeMap::new(), &ws)
+        .expect("Some")
+        .expect("Ok");
+    assert!(out.command.contains("claude"), "got: {}", out.command);
+    assert!(out.command.contains("--skip"), "got: {}", out.command);
+    assert!(
+        out.command.contains("'Add login'"),
+        "expected single-quoted prompt, got: {}",
+        out.command
+    );
+    assert!(
+        out.alias.is_none(),
+        "expected no alias, got: {:?}",
+        out.alias
+    );
+}
+
+#[test]
+fn build_agent_cli_display_handles_multiline_prompt() {
+    let ws = make_workspace("Add login", "Implement OAuth2");
+    let out = build_agent_cli_display(Some("claude --skip -- $prompt"), &BTreeMap::new(), &ws)
+        .expect("Some")
+        .expect("Ok");
+    // build_prompt joins title + description with '\n'.
+    // shlex::try_join uses POSIX single-quoting which preserves the literal newline byte.
+    assert!(
+        out.command.contains("Add login\nImplement OAuth2"),
+        "got: {:?}",
+        out.command
+    );
+}
+
+#[test]
+fn build_agent_cli_display_returns_err_on_invalid_template() {
+    let ws = make_workspace("Hello", "");
+    let unclosed = "claude 'unclosed";
+    let result = build_agent_cli_display(Some(unclosed), &BTreeMap::new(), &ws).expect("Some");
+    assert!(
+        result.is_err(),
+        "expected Err for unclosed quote, got: {:?}",
+        result.map(|d| d.command)
+    );
+}
+
+#[test]
+fn build_agent_cli_display_returns_err_on_empty_template() {
+    let ws = make_workspace("Hello", "");
+    let result = build_agent_cli_display(Some("   "), &BTreeMap::new(), &ws).expect("Some");
+    assert!(
+        result.is_err(),
+        "expected Err for empty template, got: {:?}",
+        result.map(|d| d.command)
+    );
+}
+
 use zootree::core::layout::build_agent_cli_kdl;
 
 #[test]
@@ -131,4 +197,72 @@ fn resolve_does_not_chain_aliases() {
     map.insert("a".to_string(), "b".to_string());
     map.insert("b".to_string(), "real -- $prompt".to_string());
     assert_eq!(resolve_agent_cli("a", &map), "b");
+}
+
+#[test]
+fn build_agent_cli_display_resolves_alias_and_reports_provenance() {
+    let ws = make_workspace("Add login", "");
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("safe".to_string(), "claude --skip -- $prompt".to_string());
+
+    let out = build_agent_cli_display(Some("safe"), &alias_map, &ws)
+        .expect("Some")
+        .expect("Ok");
+
+    assert_eq!(
+        out.alias,
+        Some(AliasInfo {
+            name: "safe".to_string(),
+            template: "claude --skip -- $prompt".to_string(),
+        }),
+    );
+    assert!(out.command.contains("claude"), "got: {}", out.command);
+    assert!(out.command.contains("--skip"), "got: {}", out.command);
+    assert!(
+        out.command.contains("'Add login'"),
+        "expected prompt expansion, got: {}",
+        out.command
+    );
+}
+
+#[test]
+fn build_agent_cli_display_no_alias_when_tpl_is_literal() {
+    let ws = make_workspace("Hello", "");
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("safe".to_string(), "claude -- $prompt".to_string());
+
+    let out = build_agent_cli_display(Some("gemini chat -- $prompt"), &alias_map, &ws)
+        .expect("Some")
+        .expect("Ok");
+
+    assert!(out.alias.is_none(), "got: {:?}", out.alias);
+    assert!(out.command.contains("gemini"), "got: {}", out.command);
+}
+
+#[test]
+fn build_agent_cli_display_alias_with_invalid_template_errors() {
+    let ws = make_workspace("Hello", "");
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("broken".to_string(), "claude 'unclosed".to_string());
+
+    let result = build_agent_cli_display(Some("broken"), &alias_map, &ws).expect("Some");
+    assert!(
+        result.is_err(),
+        "expected Err for alias pointing at invalid template, got: {:?}",
+        result.map(|d| d.command)
+    );
+}
+
+#[test]
+fn build_agent_cli_display_alias_with_empty_template_errors() {
+    let ws = make_workspace("Hello", "");
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("empty".to_string(), "   ".to_string());
+
+    let result = build_agent_cli_display(Some("empty"), &alias_map, &ws).expect("Some");
+    assert!(
+        result.is_err(),
+        "expected Err for alias pointing at empty template, got: {:?}",
+        result.map(|d| d.command)
+    );
 }

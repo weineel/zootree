@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
 
+use crate::config::global::GlobalConfig;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{complete_workspace, WorkspaceFilter};
@@ -65,13 +66,18 @@ pub fn handle_info(args: &InfoArgs) -> Result<()> {
         return Ok(());
     }
 
-    print!("{}", render_once(&status, &workspace));
+    let global = config_mgr.load_global_config().unwrap_or_default();
+    print!("{}", render_once(&status, &workspace, &global));
     Ok(())
 }
 
 /// Build the multi-line textual report shown by `zootree info <name>`
 /// without `--watch`. Pure function — easy to test.
-pub fn render_once(status: &WorkspaceStatus, ws: &WorkspaceConfig) -> String {
+pub fn render_once(
+    status: &WorkspaceStatus,
+    ws: &WorkspaceConfig,
+    global: &GlobalConfig,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Workspace: {} ({})", ws.title, ws.name);
     let _ = writeln!(out, "Status:    {}", status_label(status));
@@ -87,6 +93,34 @@ pub fn render_once(status: &WorkspaceStatus, ws: &WorkspaceConfig) -> String {
         let _ = writeln!(out, "Description:");
         for l in ws.description.lines() {
             let _ = writeln!(out, "  {}", l);
+        }
+    }
+    let _ = writeln!(out);
+    match crate::core::layout::build_agent_cli_display(
+        global.agent_cli.as_deref(),
+        &global.agent_cli_alias,
+        ws,
+    ) {
+        Some(Ok(display)) => {
+            let _ = writeln!(out, "Agent:");
+            if let Some(alias) = &display.alias {
+                let _ = writeln!(out, "  {}  (via alias: {})", display.command, alias.name);
+                let _ = writeln!(out);
+                let _ = writeln!(out, "Alias:");
+                let _ = writeln!(out, "  {} = {}", alias.name, alias.template);
+            } else {
+                let _ = writeln!(out, "  {}", display.command);
+            }
+        }
+        Some(Err(e)) => {
+            let _ = writeln!(out, "Agent:");
+            let _ = writeln!(out, "  (failed to parse agent_cli: {:#})", e);
+        }
+        None => {
+            let _ = writeln!(out, "Prompt:");
+            for l in crate::core::layout::build_prompt(ws).lines() {
+                let _ = writeln!(out, "  {}", l);
+            }
         }
     }
     let _ = writeln!(out);

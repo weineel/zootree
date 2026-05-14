@@ -196,3 +196,61 @@ pub fn build_agent_cli_kdl(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<
 pub fn resolve_agent_cli<'a>(value: &'a str, alias_map: &'a BTreeMap<String, String>) -> &'a str {
     alias_map.get(value).map(String::as_str).unwrap_or(value)
 }
+
+/// Resolved alias info: which alias key was hit, and the alias's raw template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasInfo {
+    pub name: String,
+    pub template: String,
+}
+
+/// Display-ready agent command, plus optional alias provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDisplay {
+    /// Shell-quoted command line with `$prompt` substituted.
+    pub command: String,
+    /// `Some(..)` when `agent_cli_tpl` was a key in the alias map.
+    pub alias: Option<AliasInfo>,
+}
+
+/// Resolved display of agent_cli with `$prompt` substituted, suitable for showing in `zootree info`.
+///
+/// Resolves `agent_cli_tpl` against `alias_map` (single level, same semantics as
+/// [`resolve_agent_cli`]) before parsing — so when `agent_cli_tpl` is an alias
+/// key, the displayed command reflects the alias's underlying template.
+///
+/// - Returns `None` when `agent_cli_tpl` is `None` (caller should fall back to displaying `build_prompt`).
+/// - Returns `Some(Err(..))` when the (possibly alias-resolved) template fails to parse via shlex,
+///   is empty, or fails to re-join after substitution.
+/// - Returns `Some(Ok(display))` where `display.command` is a single shell-quoted command string;
+///   `display.alias` is `Some(..)` if the input matched an alias key.
+pub fn build_agent_cli_display(
+    agent_cli_tpl: Option<&str>,
+    alias_map: &BTreeMap<String, String>,
+    workspace: &WorkspaceConfig,
+) -> Option<anyhow::Result<AgentDisplay>> {
+    let tpl = agent_cli_tpl?;
+    let alias = alias_map.get(tpl).map(|template| AliasInfo {
+        name: tpl.to_string(),
+        template: template.clone(),
+    });
+    let resolved: &str = alias.as_ref().map(|a| a.template.as_str()).unwrap_or(tpl);
+    let prompt = build_prompt(workspace);
+
+    let result = (|| -> anyhow::Result<String> {
+        let tokens = shlex::split(resolved)
+            .ok_or_else(|| anyhow::anyhow!("failed to parse agent_cli: {}", resolved))?;
+        if tokens.is_empty() {
+            anyhow::bail!("agent_cli is empty");
+        }
+        let substituted: Vec<String> = tokens
+            .into_iter()
+            .map(|t| t.replace("$prompt", &prompt))
+            .collect();
+        let joined = shlex::try_join(substituted.iter().map(|s| s.as_str()))
+            .map_err(|e| anyhow::anyhow!("failed to join agent_cli: {}", e))?;
+        Ok(joined)
+    })();
+
+    Some(result.map(|command| AgentDisplay { command, alias }))
+}

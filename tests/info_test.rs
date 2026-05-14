@@ -1,5 +1,5 @@
 use zootree::cli::info::render_once;
-use zootree::config::global::ZellijConfig;
+use zootree::config::global::{GlobalConfig, ZellijConfig};
 use zootree::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 
 fn base_ws() -> WorkspaceConfig {
@@ -18,7 +18,11 @@ fn base_ws() -> WorkspaceConfig {
 
 #[test]
 fn render_once_includes_core_fields() {
-    let out = render_once(&WorkspaceStatus::InProgress, &base_ws());
+    let out = render_once(
+        &WorkspaceStatus::InProgress,
+        &base_ws(),
+        &GlobalConfig::default(),
+    );
     assert!(out.contains("Workspace: Demo title (demo)"), "{}", out);
     assert!(out.contains("Status:    in_progress"), "{}", out);
     assert!(out.contains("Branch:    zootree/demo"), "{}", out);
@@ -28,7 +32,11 @@ fn render_once_includes_core_fields() {
 
 #[test]
 fn render_once_omits_description_when_empty() {
-    let out = render_once(&WorkspaceStatus::Pending, &base_ws());
+    let out = render_once(
+        &WorkspaceStatus::Pending,
+        &base_ws(),
+        &GlobalConfig::default(),
+    );
     assert!(!out.contains("Description:"), "{}", out);
 }
 
@@ -36,7 +44,7 @@ fn render_once_omits_description_when_empty() {
 fn render_once_includes_description_when_present() {
     let mut ws = base_ws();
     ws.description = "line one\nline two".into();
-    let out = render_once(&WorkspaceStatus::Pending, &ws);
+    let out = render_once(&WorkspaceStatus::Pending, &ws, &GlobalConfig::default());
     assert!(
         out.contains("Description:\n  line one\n  line two"),
         "{}",
@@ -57,7 +65,7 @@ fn render_once_lists_repos_with_target_branch() {
             target_branch: None,
         },
     ];
-    let out = render_once(&WorkspaceStatus::InProgress, &ws);
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &GlobalConfig::default());
     assert!(out.contains("- frontend"), "{}", out);
     assert!(out.contains("-> main"), "{}", out);
     assert!(out.contains("- backend"), "{}", out);
@@ -74,7 +82,7 @@ fn render_once_shows_last_five_events() {
             detail: None,
         });
     }
-    let out = render_once(&WorkspaceStatus::InProgress, &ws);
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &GlobalConfig::default());
     assert!(out.contains("Recent events:"), "{}", out);
     assert!(!out.contains("step-0"), "oldest trimmed: {}", out);
     assert!(!out.contains("step-1"), "oldest trimmed: {}", out);
@@ -86,7 +94,7 @@ fn render_once_shows_last_five_events() {
 fn render_once_covers_all_statuses() {
     use WorkspaceStatus::*;
     for s in [Pending, InProgress, Done, Canceled] {
-        let out = render_once(&s, &base_ws());
+        let out = render_once(&s, &base_ws(), &GlobalConfig::default());
         let label = match s {
             Pending => "pending",
             InProgress => "in_progress",
@@ -100,4 +108,129 @@ fn render_once_covers_all_statuses() {
             out
         );
     }
+}
+
+#[test]
+fn render_once_includes_agent_section_when_configured() {
+    let ws = base_ws();
+    let global = GlobalConfig {
+        agent_cli: Some("claude --skip -- $prompt".into()),
+        ..Default::default()
+    };
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+    assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+    assert!(
+        out.contains("claude"),
+        "missing claude in command:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Prompt:"),
+        "should not include Prompt: when configured:\n{}",
+        out
+    );
+}
+
+#[test]
+fn render_once_includes_prompt_section_when_not_configured() {
+    let ws = base_ws();
+    let global = GlobalConfig::default();
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+    assert!(out.contains("Prompt:"), "missing Prompt: section:\n{}", out);
+    assert!(
+        !out.contains("Agent:"),
+        "should not include Agent: when unconfigured:\n{}",
+        out
+    );
+}
+
+#[test]
+fn render_once_shows_agent_section_with_error_on_invalid_template() {
+    let ws = base_ws();
+    let global = GlobalConfig {
+        agent_cli: Some("claude 'unclosed".into()),
+        ..Default::default()
+    };
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+    assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+    assert!(
+        out.contains("failed to parse"),
+        "missing error message:\n{}",
+        out
+    );
+}
+
+#[test]
+fn render_once_includes_alias_annotation_and_alias_section() {
+    use std::collections::BTreeMap;
+    let ws = base_ws();
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("safe".to_string(), "claude --skip -- $prompt".to_string());
+    let global = GlobalConfig {
+        agent_cli: Some("safe".into()),
+        agent_cli_alias: alias_map,
+        ..Default::default()
+    };
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+
+    assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+    assert!(
+        out.contains("(via alias: safe)"),
+        "missing alias annotation:\n{}",
+        out
+    );
+    assert!(
+        out.contains("Alias:\n  safe = claude --skip -- $prompt"),
+        "missing single-line Alias section:\n{}",
+        out
+    );
+}
+
+#[test]
+fn render_once_omits_alias_section_for_literal_template() {
+    let ws = base_ws();
+    let global = GlobalConfig {
+        agent_cli: Some("claude --skip -- $prompt".into()),
+        ..Default::default()
+    };
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+
+    assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+    assert!(
+        !out.contains("via alias:"),
+        "should not include alias annotation:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Alias:"),
+        "should not include Alias section:\n{}",
+        out
+    );
+}
+
+#[test]
+fn render_once_omits_alias_section_on_parse_error() {
+    use std::collections::BTreeMap;
+    let ws = base_ws();
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("broken".to_string(), "claude 'unclosed".to_string());
+    let global = GlobalConfig {
+        agent_cli: Some("broken".into()),
+        agent_cli_alias: alias_map,
+        ..Default::default()
+    };
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+
+    assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+    assert!(out.contains("failed to parse"), "missing error:\n{}", out);
+    assert!(
+        !out.contains("via alias:"),
+        "should not show alias annotation on parse error:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Alias:"),
+        "should not show Alias section on parse error:\n{}",
+        out
+    );
 }

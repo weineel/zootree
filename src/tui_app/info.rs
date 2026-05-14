@@ -1,5 +1,6 @@
 //! `InfoApp`: detailed single-workspace view.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Local};
@@ -21,6 +22,8 @@ pub(crate) struct InfoState {
     pub status: WorkspaceStatus,
     pub workspace: WorkspaceConfig,
     pub loaded_at: DateTime<Local>,
+    pub agent_cli: Option<String>,
+    pub agent_cli_alias: BTreeMap<String, String>,
 }
 
 impl InfoApp {
@@ -41,10 +44,15 @@ impl InfoApp {
     pub(crate) fn reload(&mut self) {
         match self.config_mgr.load_workspace(&self.name) {
             Ok((status, workspace)) => {
+                let global = self.config_mgr.load_global_config().ok();
+                let agent_cli = global.as_ref().and_then(|g| g.agent_cli.clone());
+                let agent_cli_alias = global.map(|g| g.agent_cli_alias).unwrap_or_default();
                 self.state = Some(InfoState {
                     status,
                     workspace,
                     loaded_at: Local::now(),
+                    agent_cli,
+                    agent_cli_alias,
                 });
                 self.last_error = None;
             }
@@ -176,44 +184,31 @@ impl InfoApp {
         };
 
         let ws = &state.workspace;
+        let meta_lines = build_meta_lines(
+            ws,
+            state.agent_cli.as_deref(),
+            &state.agent_cli_alias,
+            area.width,
+        );
+        let meta_height_full = meta_lines.len() as u16;
 
-        // Compute meta block height: 4 fixed lines (Title/Branch/Dir/Created),
-        // plus description block if non-empty (blank line + "Description:" + N lines).
-        let desc_height = if ws.description.is_empty() {
-            0
-        } else {
-            2 + ws.description.lines().count() as u16
-        };
-        let meta_height = 4 + desc_height;
+        let max_meta = area.height.saturating_sub(8);
+        let actual_meta = meta_height_full.min(max_meta);
 
-        // Repos block: top border + header + rows (or 1 "(none)" row).
         let repos_rows = ws.repos.len().max(1) as u16;
         let repos_height = 2 + repos_rows;
 
         let chunks = Layout::vertical([
-            Constraint::Length(meta_height),
+            Constraint::Length(actual_meta),
+            Constraint::Length(1),
             Constraint::Length(repos_height),
+            Constraint::Length(1),
             Constraint::Min(1),
         ])
         .split(area);
 
-        // Meta
-        let mut lines: Vec<Line> = Vec::new();
-        let created_str = format_rfc3339_to_minute(&ws.created_at);
-        lines.push(meta_line("Title:", &ws.title));
-        lines.push(meta_line("Branch:", &ws.branch));
-        lines.push(meta_line("Dir:", &ws.workspace_dir));
-        lines.push(meta_line("Created:", &created_str));
-        if !ws.description.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from("  Description:"));
-            for l in ws.description.lines() {
-                lines.push(Line::from(format!("    {}", l)));
-            }
-        }
-        frame.render_widget(Paragraph::new(lines), chunks[0]);
+        frame.render_widget(Paragraph::new(meta_lines), chunks[0]);
 
-        // Repos
         let rows: Vec<Row> = if ws.repos.is_empty() {
             vec![Row::new(vec![
                 "(none)".to_string(),
@@ -243,9 +238,8 @@ impl InfoApp {
                 .style(Style::default().fg(Color::DarkGray)),
         )
         .block(Block::default().borders(Borders::TOP).title(" Repos "));
-        frame.render_widget(table, chunks[1]);
+        frame.render_widget(table, chunks[2]);
 
-        // Events
         let recent = last_n(&ws.events, 5);
         let items: Vec<ListItem> = recent
             .iter()
@@ -263,7 +257,7 @@ impl InfoApp {
                 .borders(Borders::TOP)
                 .title(" Recent events "),
         );
-        frame.render_widget(list, chunks[2]);
+        frame.render_widget(list, chunks[4]);
     }
 
     fn render_status_line(&self, frame: &mut Frame, area: Rect) {
@@ -298,7 +292,7 @@ impl InfoApp {
     }
 }
 
-fn meta_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
+fn meta_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("  {:<10}", label),
@@ -306,6 +300,87 @@ fn meta_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
         ),
         Span::raw(value.to_string()),
     ])
+}
+
+/// Content width for blocks indented 4 cols (Description, Agent/Prompt body).
+fn content_width(area_width: u16) -> usize {
+    (area_width as usize).saturating_sub(4).max(20)
+}
+
+/// Content width for kv-line values, which start at column 12 (2 leading
+/// spaces + 10-col label field) and continuation lines are indented to col 12.
+fn kv_content_width(area_width: u16) -> usize {
+    (area_width as usize).saturating_sub(12).max(20)
+}
+
+fn push_wrapped_kv(lines: &mut Vec<Line<'static>>, label: &str, value: &str, area_width: u16) {
+    let wrapped = textwrap::wrap(value, kv_content_width(area_width));
+    if wrapped.is_empty() {
+        lines.push(meta_line(label, ""));
+        return;
+    }
+    lines.push(meta_line(label, &wrapped[0]));
+    for cont in &wrapped[1..] {
+        lines.push(Line::from(format!("            {}", cont)));
+    }
+}
+
+fn resolve_agent_or_prompt_display(
+    ws: &WorkspaceConfig,
+    agent_cli: Option<&str>,
+    alias_map: &BTreeMap<String, String>,
+) -> (&'static str, String, Option<crate::core::layout::AliasInfo>) {
+    match crate::core::layout::build_agent_cli_display(agent_cli, alias_map, ws) {
+        Some(Ok(display)) => ("Agent:", display.command, display.alias),
+        Some(Err(e)) => (
+            "Agent:",
+            format!("(failed to parse agent_cli: {:#})", e),
+            None,
+        ),
+        None => ("Prompt:", crate::core::layout::build_prompt(ws), None),
+    }
+}
+
+fn build_meta_lines(
+    ws: &WorkspaceConfig,
+    agent_cli: Option<&str>,
+    alias_map: &BTreeMap<String, String>,
+    area_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    push_wrapped_kv(&mut lines, "Title:", &ws.title, area_width);
+    lines.push(meta_line("Branch:", &ws.branch));
+    lines.push(meta_line("Dir:", &ws.workspace_dir));
+    lines.push(meta_line(
+        "Created:",
+        &format_rfc3339_to_minute(&ws.created_at),
+    ));
+    if !ws.description.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("  Description:"));
+        for wrapped in textwrap::wrap(&ws.description, content_width(area_width)) {
+            lines.push(Line::from(format!("    {}", wrapped)));
+        }
+    }
+    lines.push(Line::from(""));
+    let (label, content, alias) = resolve_agent_or_prompt_display(ws, agent_cli, alias_map);
+    lines.push(Line::from(format!("  {}", label)));
+    let body = match &alias {
+        Some(a) => format!("{}  (via alias: {})", content, a.name),
+        None => content,
+    };
+    for wrapped in textwrap::wrap(&body, content_width(area_width)) {
+        lines.push(Line::from(format!("    {}", wrapped)));
+    }
+    if let Some(a) = alias {
+        lines.push(Line::from(""));
+        lines.push(Line::from("  Alias:"));
+        let alias_body = format!("{} = {}", a.name, a.template);
+        for wrapped in textwrap::wrap(&alias_body, content_width(area_width)) {
+            lines.push(Line::from(format!("    {}", wrapped)));
+        }
+    }
+    lines
 }
 
 fn status_color(s: &WorkspaceStatus) -> Color {
@@ -584,5 +659,152 @@ mod tests {
         let mgr_once = ConfigManager::with_base_dir(tmp.path().to_path_buf());
         let once = InfoApp::new("demo".into(), mgr_once, false, Duration::from_secs(5));
         assert_eq!(<InfoApp as crate::tui_app::App>::tick_interval(&once), None);
+    }
+
+    #[test]
+    fn render_wraps_long_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let mut ws = sample_workspace("demo");
+        ws.title = "A".repeat(200);
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 40, 30);
+        let title_a_lines: Vec<&str> = out.lines().filter(|l| l.contains("AAAA")).collect();
+        assert!(
+            title_a_lines.len() >= 2,
+            "expected title to wrap to >=2 lines at width=40, got {}:\n{}",
+            title_a_lines.len(),
+            out
+        );
+    }
+
+    #[test]
+    fn render_shows_agent_section_when_configured() {
+        use crate::config::global::GlobalConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace("demo");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let global = GlobalConfig {
+            agent_cli: Some("claude --skip -- $prompt".into()),
+            ..Default::default()
+        };
+        mgr.save_global_config(&global).unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 100, 30);
+        assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+        assert!(out.contains("claude"), "missing claude command:\n{}", out);
+        assert!(
+            !out.contains("Prompt:"),
+            "should not include Prompt:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn render_shows_prompt_section_when_not_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace("demo");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 100, 30);
+        assert!(out.contains("Prompt:"), "missing Prompt: section:\n{}", out);
+        assert!(
+            !out.contains("Agent:"),
+            "should not include Agent: when unconfigured:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn render_shows_alias_annotation_and_alias_section() {
+        use crate::config::global::GlobalConfig;
+        use std::collections::BTreeMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace("demo");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mut alias_map = BTreeMap::new();
+        alias_map.insert("safe".to_string(), "claude --skip -- $prompt".to_string());
+        let global = GlobalConfig {
+            agent_cli: Some("safe".into()),
+            agent_cli_alias: alias_map,
+            ..Default::default()
+        };
+        mgr.save_global_config(&global).unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 120, 30);
+        assert!(out.contains("Agent:"), "missing Agent:\n{}", out);
+        assert!(
+            out.contains("(via alias: safe)"),
+            "missing alias annotation:\n{}",
+            out
+        );
+        assert!(out.contains("Alias:"), "missing Alias label:\n{}", out);
+        assert!(
+            out.contains("safe = claude --skip -- $prompt"),
+            "missing alias body:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn render_omits_alias_section_for_literal_template() {
+        use crate::config::global::GlobalConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let ws = sample_workspace("demo");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let global = GlobalConfig {
+            agent_cli: Some("claude --skip -- $prompt".into()),
+            ..Default::default()
+        };
+        mgr.save_global_config(&global).unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+
+        let out = render_to_string(&mut app, 120, 30);
+        assert!(out.contains("Agent:"), "missing Agent:\n{}", out);
+        assert!(
+            !out.contains("via alias:"),
+            "should not include alias annotation:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Alias:"),
+            "should not include Alias section:\n{}",
+            out
+        );
     }
 }
