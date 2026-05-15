@@ -120,6 +120,7 @@ impl crate::tui_app::App for InfoApp {
             }
             E::Tick => self.reload(),
             E::Resize(_, _) => {}
+            E::Paste(_) => {}
         }
         Ok(())
     }

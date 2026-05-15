@@ -60,6 +60,12 @@ fn main() {
     };
 
     if let Err(e) = run(cli.command) {
+        if e.downcast_ref::<zootree::tui_app::CancelledByUser>()
+            .is_some()
+        {
+            eprintln!("aborted");
+            std::process::exit(1);
+        }
         tracing::error!("{:#}", e);
         std::process::exit(1);
     }

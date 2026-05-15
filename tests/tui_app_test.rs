@@ -21,6 +21,7 @@ impl App for NoopApp {
             Event::Key(_) => self.last_seen = Some("key"),
             Event::Tick => self.last_seen = Some("tick"),
             Event::Resize(_, _) => self.last_seen = Some("resize"),
+            Event::Paste(_) => self.last_seen = Some("paste"),
         }
         self.quit = true;
         Ok(())
