@@ -222,7 +222,7 @@ impl SelectPromptState {
                 .enumerate()
                 .filter_map(|(i, item)| self.matcher.fuzzy_match(item, &f).map(|s| (s, i)))
                 .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.0));
             self.visible = scored.into_iter().map(|(_, i)| i).collect();
         }
         if !self.visible.is_empty() && self.cursor >= self.visible.len() {
@@ -262,33 +262,25 @@ impl SelectPromptState {
                     self.outcome = Some(PromptOutcome::Submitted(original));
                 }
             }
-            KeyCode::Down => {
-                if !self.visible.is_empty() {
-                    self.cursor = (self.cursor + 1) % self.visible.len();
-                }
+            KeyCode::Down if !self.visible.is_empty() => {
+                self.cursor = (self.cursor + 1) % self.visible.len();
             }
-            KeyCode::Char('n') if ctrl => {
-                if !self.visible.is_empty() {
-                    self.cursor = (self.cursor + 1) % self.visible.len();
-                }
+            KeyCode::Char('n') if ctrl && !self.visible.is_empty() => {
+                self.cursor = (self.cursor + 1) % self.visible.len();
             }
-            KeyCode::Up => {
-                if !self.visible.is_empty() {
-                    self.cursor = if self.cursor == 0 {
-                        self.visible.len() - 1
-                    } else {
-                        self.cursor - 1
-                    };
-                }
+            KeyCode::Up if !self.visible.is_empty() => {
+                self.cursor = if self.cursor == 0 {
+                    self.visible.len() - 1
+                } else {
+                    self.cursor - 1
+                };
             }
-            KeyCode::Char('p') if ctrl => {
-                if !self.visible.is_empty() {
-                    self.cursor = if self.cursor == 0 {
-                        self.visible.len() - 1
-                    } else {
-                        self.cursor - 1
-                    };
-                }
+            KeyCode::Char('p') if ctrl && !self.visible.is_empty() => {
+                self.cursor = if self.cursor == 0 {
+                    self.visible.len() - 1
+                } else {
+                    self.cursor - 1
+                };
             }
             KeyCode::Backspace => {
                 self.filter.delete_char();
