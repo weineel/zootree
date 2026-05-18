@@ -119,6 +119,21 @@ fn default_layout_overview_uses_info_watch() {
 }
 
 #[test]
+fn default_layout_defines_tab_template_for_new_tabs() {
+    let template = LayoutRenderer::default_layout();
+    assert!(
+        template.contains("default_tab_template"),
+        "default layout should define default_tab_template so manually opened tabs inherit chrome\n---\n{}",
+        template
+    );
+    assert!(
+        template.contains("children"),
+        "default_tab_template should include children placeholder\n---\n{}",
+        template
+    );
+}
+
+#[test]
 fn default_layout_info_args_expanded_on_render() {
     let template = LayoutRenderer::default_layout();
     let vars = vec![LayoutVar {

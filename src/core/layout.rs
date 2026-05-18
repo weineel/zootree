@@ -106,26 +106,27 @@ impl LayoutRenderer {
     pub fn default_layout() -> &'static str {
         r#"// 自动生成，修改无效，仅作参考和调试用途
 layout {
-    tab name="overview" {
+    default_tab_template {
         pane size=1 borderless=true {
             plugin location="tab-bar"
         }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="overview" {
         pane split_direction="vertical" {
             pane command="zootree" {
                 args "info" "$workspace_name" "--watch"
             }
             pane cwd="$workspace_dir" $overview_agent_cli
         }
-        pane size=1 borderless=true {
-            plugin location="status-bar"
-        }
     }
 
     // @repeat-per-repo
     tab name="$repo_name" {
-        pane size=1 borderless=true {
-            plugin location="tab-bar"
-        }
         pane split_direction="vertical" {
             pane size="60%" command="lazygit" {
                 args "-p" "$worktree_path" "-ucf" "$lazygit_config"
@@ -134,9 +135,6 @@ layout {
                 pane size="30%" cwd="$worktree_path"
                 pane size="70%" cwd="$worktree_path" $repo_agent_cli
             }
-        }
-        pane size=1 borderless=true {
-            plugin location="status-bar"
         }
     }
 }"#
