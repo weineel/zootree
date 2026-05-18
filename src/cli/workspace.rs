@@ -191,6 +191,16 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
             .join(", ")
     );
 
+    let should_start = args.start || args.run_agent.is_some();
+    if should_start {
+        let start_args = StartArgs {
+            name: Some(name.clone()),
+            no_zellij: false,
+            run_agent: args.run_agent.clone(),
+        };
+        handle_start(&start_args)?;
+    }
+
     Ok(())
 }
 
@@ -574,6 +584,17 @@ pub struct CreateArgs {
         add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_template(c))
     )]
     pub template: Option<String>,
+    #[arg(long, help = "Start the workspace immediately after creation")]
+    pub start: bool,
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_name = "ALIAS_OR_CMD",
+        help = "Launch agent_cli in the designated pane after start (implies --start)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_agent_cli_alias(c)),
+    )]
+    pub run_agent: Option<Option<String>>,
 }
 
 #[derive(Args)]
