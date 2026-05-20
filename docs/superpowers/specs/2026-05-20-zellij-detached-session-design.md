@@ -118,7 +118,7 @@ for k in &spec.env_remove {
 }
 ```
 
-`MockRunner` 同步在 `take_calls()` 记录中保留该字段，便于断言。
+`MockRunner::run` / `run_interactive` 当前手动 clone `CommandSpec` 字段（`runner.rs:81-86` 和 `92-97`）写入 `self.calls`；这两处 clone 也需补上 `env_remove: spec.env_remove.clone()`，确保断言可见。
 
 所有现有 `CommandSpec { ... }` 字面量需补 `env_remove: vec![]`。不引入 builder/`Default` —— 项目当前风格为字面量构造，统一加字段更直白。
 
@@ -245,9 +245,7 @@ assert_eq!(plan_launch(true,  true),  LaunchPlan::AlreadyRunningHint);
 用 `MockRunner` 断言 `start_session_background`：
 
 - 命令为 `zellij`、参数顺序正确、`env_remove` 包含三个 ZELLIJ 变量。
-- 失败路径：MockRunner 返回非零退出 + stderr 时，错误信息包含 stderr。
-
-`MockRunner` 若不支持配置返回值，新增 `MockRunner::with_output(Output)` 或类似最小扩展。
+- 失败路径：通过 `MockRunner::push_response(Output)` 注入非零退出 + stderr 后，错误信息应包含 stderr。
 
 ### 编排层（追加到 `tests/start_agent_test.rs` 或新文件）
 
