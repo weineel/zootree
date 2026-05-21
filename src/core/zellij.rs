@@ -82,6 +82,35 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
         ])
     }
 
+    pub fn start_session_background(&self, session_name: &str, layout_path: &Path) -> Result<()> {
+        info!("starting zellij session in background: {}", session_name);
+        let spec = CommandSpec {
+            program: "zellij".into(),
+            args: vec![
+                "-l".into(),
+                layout_path.to_string_lossy().into(),
+                "attach".into(),
+                "--create-background".into(),
+                session_name.into(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            env_remove: vec![
+                "ZELLIJ".into(),
+                "ZELLIJ_SESSION_NAME".into(),
+                "ZELLIJ_PANE_ID".into(),
+            ],
+        };
+        let output = self.runner.run(&spec)?;
+        if !output.status.success() {
+            bail!(
+                "zellij background session create failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
     pub fn attach_session(&self, session_name: &str) -> Result<()> {
         info!("attaching to zellij session: {}", session_name);
         self.zellij_interactive(vec!["attach".into(), session_name.into()])

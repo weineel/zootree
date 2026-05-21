@@ -69,3 +69,59 @@ fn plan_launch_inside_no_session_yields_background_create() {
 fn plan_launch_inside_session_exists_yields_already_running_hint() {
     assert_eq!(plan_launch(true, true), LaunchPlan::AlreadyRunningHint);
 }
+
+use std::path::Path;
+
+fn failure_output(stderr: &str) -> Output {
+    Output {
+        status: ExitStatus::from_raw(1 << 8), // wait-status: exit code 1
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+#[test]
+fn start_session_background_invokes_zellij_with_correct_args_and_env_remove() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output());
+    let zellij = ZellijOps::new(&runner);
+
+    zellij
+        .start_session_background("ws-foo", Path::new("/tmp/layout.kdl"))
+        .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 1);
+    let c = &calls[0];
+    assert_eq!(c.program, "zellij");
+    assert_eq!(
+        c.args,
+        vec![
+            "-l",
+            "/tmp/layout.kdl",
+            "attach",
+            "--create-background",
+            "ws-foo"
+        ]
+    );
+    assert!(c.env_remove.iter().any(|k| k == "ZELLIJ"));
+    assert!(c.env_remove.iter().any(|k| k == "ZELLIJ_SESSION_NAME"));
+    assert!(c.env_remove.iter().any(|k| k == "ZELLIJ_PANE_ID"));
+}
+
+#[test]
+fn start_session_background_propagates_failure_with_stderr() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output("zellij: layout parse error"));
+    let zellij = ZellijOps::new(&runner);
+
+    let err = zellij
+        .start_session_background("ws-foo", Path::new("/tmp/layout.kdl"))
+        .unwrap_err();
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("layout parse error"),
+        "expected stderr propagated, got: {}",
+        msg
+    );
+}
