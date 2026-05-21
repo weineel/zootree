@@ -125,3 +125,94 @@ fn start_session_background_propagates_failure_with_stderr() {
         msg
     );
 }
+
+fn stdout_output(stdout: &[u8]) -> Output {
+    Output {
+        status: ExitStatus::from_raw(0),
+        stdout: stdout.to_vec(),
+        stderr: Vec::new(),
+    }
+}
+
+#[test]
+fn dispatch_launch_inside_zellij_no_session_creates_background() {
+    use zootree::cli::workspace::dispatch_launch;
+    let runner = MockRunner::new();
+    // session_exists -> list-sessions returns lines without our session
+    runner.push_response(stdout_output(b"other-session\n"));
+    // start_session_background succeeds
+    runner.push_response(success_output());
+
+    let zellij = ZellijOps::new(&runner);
+    dispatch_launch(
+        &zellij,
+        "fair-fox",         // workspace_name (used in printed hint)
+        "zootree-fair-fox", // session_name
+        Path::new("/tmp/layout.kdl"),
+        true, // in_zellij
+    )
+    .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].args, vec!["list-sessions"]);
+    assert_eq!(calls[1].program, "zellij");
+    assert!(calls[1].args.contains(&"--create-background".to_string()));
+    assert!(calls[1].args.contains(&"zootree-fair-fox".to_string()));
+}
+
+#[test]
+fn dispatch_launch_inside_zellij_session_exists_invokes_only_list_sessions() {
+    use zootree::cli::workspace::dispatch_launch;
+    let runner = MockRunner::new();
+    // list-sessions includes our session
+    runner.push_response(stdout_output(b"zootree-fair-fox\nother-session\n"));
+
+    let zellij = ZellijOps::new(&runner);
+    dispatch_launch(
+        &zellij,
+        "fair-fox",
+        "zootree-fair-fox",
+        Path::new("/tmp/layout.kdl"),
+        true,
+    )
+    .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "should only call list-sessions, no follow-up"
+    );
+    assert_eq!(calls[0].args, vec!["list-sessions"]);
+}
+
+#[test]
+fn dispatch_launch_outside_zellij_no_session_calls_start_session() {
+    use zootree::cli::workspace::dispatch_launch;
+    let runner = MockRunner::new();
+    runner.push_response(stdout_output(b"")); // list-sessions empty
+    runner.push_response(success_output()); // start_session (interactive) ok
+
+    let zellij = ZellijOps::new(&runner);
+    dispatch_launch(
+        &zellij,
+        "fair-fox",
+        "zootree-fair-fox",
+        Path::new("/tmp/layout.kdl"),
+        false,
+    )
+    .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].args, vec!["list-sessions"]);
+    assert!(
+        calls[1]
+            .args
+            .iter()
+            .any(|a| a == "--new-session-with-layout"),
+        "expected start_session via --new-session-with-layout, got {:?}",
+        calls[1].args
+    );
+}
