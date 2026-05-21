@@ -4,6 +4,35 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::info;
 
+pub fn is_inside_zellij() -> bool {
+    std::env::var_os("ZELLIJ").is_some() || std::env::var_os("ZELLIJ_SESSION_NAME").is_some()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LaunchPlan {
+    /// Not inside a zellij session and target session does not exist —
+    /// create + attach in foreground (current default behavior).
+    ForegroundCreate,
+    /// Not inside a zellij session but target session exists —
+    /// attach to it in foreground.
+    ForegroundAttach,
+    /// Inside a zellij session and target session does not exist —
+    /// create the target session in the background, do not attach.
+    BackgroundCreate,
+    /// Inside a zellij session and target session already exists —
+    /// do nothing, just print a hint pointing at `zootree open`.
+    AlreadyRunningHint,
+}
+
+pub fn plan_launch(in_zellij: bool, session_exists: bool) -> LaunchPlan {
+    match (in_zellij, session_exists) {
+        (false, false) => LaunchPlan::ForegroundCreate,
+        (false, true) => LaunchPlan::ForegroundAttach,
+        (true, false) => LaunchPlan::BackgroundCreate,
+        (true, true) => LaunchPlan::AlreadyRunningHint,
+    }
+}
+
 pub struct ZellijOps<'a, R: CommandRunner> {
     runner: &'a R,
 }

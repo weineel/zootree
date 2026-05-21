@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
-use zootree::core::zellij::ZellijOps;
+use zootree::core::zellij::{plan_launch, LaunchPlan, ZellijOps};
 use zootree::runner::{CommandRunner, CommandSpec, MockRunner};
 
 fn success_output() -> Output {
@@ -48,4 +48,24 @@ fn mock_runner_preserves_env_remove() {
         calls[0].env_remove,
         vec!["FOO".to_string(), "BAR".to_string()]
     );
+}
+
+#[test]
+fn plan_launch_outside_no_session_yields_foreground_create() {
+    assert_eq!(plan_launch(false, false), LaunchPlan::ForegroundCreate);
+}
+
+#[test]
+fn plan_launch_outside_session_exists_yields_foreground_attach() {
+    assert_eq!(plan_launch(false, true), LaunchPlan::ForegroundAttach);
+}
+
+#[test]
+fn plan_launch_inside_no_session_yields_background_create() {
+    assert_eq!(plan_launch(true, false), LaunchPlan::BackgroundCreate);
+}
+
+#[test]
+fn plan_launch_inside_session_exists_yields_already_running_hint() {
+    assert_eq!(plan_launch(true, true), LaunchPlan::AlreadyRunningHint);
 }
