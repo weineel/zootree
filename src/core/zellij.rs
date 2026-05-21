@@ -19,6 +19,7 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
             args,
             cwd: None,
             env: HashMap::new(),
+            env_remove: vec![],
         };
         self.runner.run(&spec)
     }
@@ -29,6 +30,7 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
             args,
             cwd: None,
             env: HashMap::new(),
+            env_remove: vec![],
         };
         let status = self.runner.run_interactive(&spec)?;
         if !status.success() {
