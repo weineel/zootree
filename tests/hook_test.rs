@@ -83,6 +83,36 @@ fn test_file_hook_command() {
 }
 
 #[test]
+fn test_file_hook_expands_tilde_path() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output());
+    let engine = HookEngine::new(&runner);
+
+    let ctx = HookContext {
+        workspace: "calm-river".into(),
+        repo: None,
+        branch: "zootree/calm-river".into(),
+        target_branch: None,
+        worktree_path: None,
+        workspace_dir: "/home/user/ws/calm-river".into(),
+    };
+
+    let hook = HookValue::File {
+        file: "~/.config/zootree/hooks/cleanup.sh".into(),
+    };
+    engine.execute(&hook, &ctx).unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls[0].program, "sh");
+    assert_ne!(calls[0].args[0], "~/.config/zootree/hooks/cleanup.sh");
+    assert!(
+        calls[0].args[0].ends_with("/.config/zootree/hooks/cleanup.sh"),
+        "expanded path should keep hook suffix, got: {:?}",
+        calls[0].args
+    );
+}
+
+#[test]
 fn test_inline_hook_command() {
     let runner = MockRunner::new();
     runner.push_response(success_output());

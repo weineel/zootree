@@ -167,7 +167,6 @@ zootree done [name]                  # Finish a workspace
   --no-merge                         # Skip merge
   --no-clean                         # Skip cleanup
   --push                             # Push branches
-  --delete-remote                    # Delete remote branches
   --force                            # Force execution
 
 zootree cancel [name]                # Cancel a workspace
@@ -179,8 +178,8 @@ zootree cancel [name]                # Cancel a workspace
 
 ```bash
 zootree template list                # List templates
-zootree template show <name>         # Show a template
-zootree template delete <name>       # Delete a template
+zootree template save <name> --from <workspace>
+                                    # Save a workspace as a template
 ```
 
 ### Utilities

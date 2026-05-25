@@ -94,15 +94,33 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         strategy: Option<&str>,
         message: &str,
     ) -> Result<()> {
-        self.git(repo_path, vec!["checkout", target])?;
+        self.merge_with_worktree(repo_path, None, branch, target, strategy, message)
+    }
+
+    pub fn merge_with_worktree(
+        &self,
+        repo_path: &str,
+        branch_worktree_path: Option<&str>,
+        branch: &str,
+        target: &str,
+        strategy: Option<&str>,
+        message: &str,
+    ) -> Result<()> {
         match strategy {
             Some("rebase") => {
-                self.git(repo_path, vec!["rebase", branch])?;
+                let branch_worktree_path = branch_worktree_path.ok_or_else(|| {
+                    anyhow::anyhow!("rebase strategy requires branch worktree path")
+                })?;
+                self.git(branch_worktree_path, vec!["rebase", target])?;
+                self.git(repo_path, vec!["checkout", target])?;
+                self.git(repo_path, vec!["merge", "--ff-only", branch])?;
             }
             Some("merge") => {
+                self.git(repo_path, vec!["checkout", target])?;
                 self.git(repo_path, vec!["merge", branch])?;
             }
             _ => {
+                self.git(repo_path, vec!["checkout", target])?;
                 // 默认使用 squash 方式
                 self.git(repo_path, vec!["merge", "--squash", branch])?;
                 // exit 1 表示有 staged 变更，exit 0 表示无变更（已是最新）

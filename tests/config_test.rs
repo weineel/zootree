@@ -1,7 +1,12 @@
-use zootree::cli::workspace::parse_repos_arg;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{ExitStatus, Output};
+use tempfile::TempDir;
+use zootree::cli::workspace::{build_repo_entries, parse_repos_arg};
 use zootree::config::global::GlobalConfig;
 use zootree::config::global::HookValue;
 use zootree::config::repo::RepoConfig;
+use zootree::config::ConfigManager;
+use zootree::runner::MockRunner;
 
 #[test]
 fn test_parse_global_config_full() {
@@ -163,6 +168,100 @@ fn test_parse_repos_arg() {
 fn test_parse_repos_arg_single() {
     let result = parse_repos_arg("frontend:develop");
     assert_eq!(result, vec![("frontend".into(), Some("develop".into()))]);
+}
+
+fn success_branch_output(branch: &str) -> Output {
+    Output {
+        status: ExitStatus::from_raw(0),
+        stdout: format!("{}\n", branch).into_bytes(),
+        stderr: Vec::new(),
+    }
+}
+
+#[test]
+fn build_repo_entries_prefers_explicit_branch() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config(
+        "frontend",
+        &RepoConfig {
+            path: "/repo/frontend".into(),
+            default_target_branch: Some("develop".into()),
+            copy_files: Vec::new(),
+            hooks: Default::default(),
+            lazygit: None,
+            zellij: None,
+        },
+    )
+    .unwrap();
+    let runner = MockRunner::new();
+
+    let entries = build_repo_entries(
+        &mgr,
+        &runner,
+        vec![("frontend".to_string(), Some("release".to_string()))],
+    )
+    .unwrap();
+
+    assert_eq!(entries[0].name, "frontend");
+    assert_eq!(entries[0].target_branch.as_deref(), Some("release"));
+    assert!(runner.take_calls().is_empty());
+}
+
+#[test]
+fn build_repo_entries_uses_repo_default_branch() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config(
+        "frontend",
+        &RepoConfig {
+            path: "/repo/frontend".into(),
+            default_target_branch: Some("develop".into()),
+            copy_files: Vec::new(),
+            hooks: Default::default(),
+            lazygit: None,
+            zellij: None,
+        },
+    )
+    .unwrap();
+    let runner = MockRunner::new();
+
+    let entries = build_repo_entries(&mgr, &runner, vec![("frontend".to_string(), None)]).unwrap();
+
+    assert_eq!(entries[0].target_branch.as_deref(), Some("develop"));
+    assert!(runner.take_calls().is_empty());
+}
+
+#[test]
+fn build_repo_entries_falls_back_to_current_branch() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config(
+        "frontend",
+        &RepoConfig {
+            path: "/repo/frontend".into(),
+            default_target_branch: None,
+            copy_files: Vec::new(),
+            hooks: Default::default(),
+            lazygit: None,
+            zellij: None,
+        },
+    )
+    .unwrap();
+    let runner = MockRunner::new();
+    runner.push_response(success_branch_output("mainline"));
+
+    let entries = build_repo_entries(&mgr, &runner, vec![("frontend".to_string(), None)]).unwrap();
+
+    assert_eq!(entries[0].target_branch.as_deref(), Some("mainline"));
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls[0].args,
+        vec!["-C", "/repo/frontend", "rev-parse", "--abbrev-ref", "HEAD"]
+    );
 }
 
 #[test]

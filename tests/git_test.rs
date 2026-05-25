@@ -132,6 +132,73 @@ fn test_merge_command() {
 }
 
 #[test]
+fn test_merge_rebase_command_order() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output()); // rebase target branch
+    runner.push_response(success_output()); // checkout target branch
+    runner.push_response(success_output()); // fast-forward target
+    let git = GitOps::new(&runner);
+
+    git.merge_with_worktree(
+        "/home/user/projects/frontend",
+        Some("/home/user/zootree-workspaces/calm-river/frontend"),
+        "zootree/calm-river",
+        "develop",
+        Some("rebase"),
+        "unused for rebase",
+    )
+    .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "-C",
+            "/home/user/zootree-workspaces/calm-river/frontend",
+            "rebase",
+            "develop"
+        ]
+    );
+    assert_eq!(
+        calls[1].args,
+        vec!["-C", "/home/user/projects/frontend", "checkout", "develop"]
+    );
+    assert_eq!(
+        calls[2].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "merge",
+            "--ff-only",
+            "zootree/calm-river"
+        ]
+    );
+}
+
+#[test]
+fn test_merge_rebase_requires_worktree_path() {
+    let runner = MockRunner::new();
+    let git = GitOps::new(&runner);
+
+    let err = git
+        .merge_with_worktree(
+            "/home/user/projects/frontend",
+            None,
+            "zootree/calm-river",
+            "develop",
+            Some("rebase"),
+            "unused for rebase",
+        )
+        .unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("rebase strategy requires branch worktree path"));
+    assert!(runner.take_calls().is_empty());
+}
+
+#[test]
 fn test_merge_squash() {
     let runner = MockRunner::new();
     runner.push_response(success_output()); // checkout

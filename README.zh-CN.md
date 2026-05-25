@@ -164,7 +164,6 @@ zootree done [name]                  # 完成工作空间
   --no-merge                         # 不合并
   --no-clean                         # 不清理
   --push                             # 推送
-  --delete-remote                    # 删除远程分支
   --force                            # 强制执行
 
 zootree cancel [name]                # 取消工作空间
@@ -176,8 +175,8 @@ zootree cancel [name]                # 取消工作空间
 
 ```bash
 zootree template list                # 列出模板
-zootree template show <name>         # 显示模板
-zootree template delete <name>       # 删除模板
+zootree template save <name> --from <workspace>
+                                    # 将 workspace 保存为模板
 ```
 
 ### 工具

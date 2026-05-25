@@ -52,6 +52,42 @@ pub fn parse_repos_arg(repos_str: &str) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+pub fn build_repo_entries<R: crate::runner::CommandRunner>(
+    config_mgr: &ConfigManager,
+    runner: &R,
+    repos: Vec<(String, Option<String>)>,
+) -> Result<Vec<RepoEntry>> {
+    let git = GitOps::new(runner);
+    let mut entries = Vec::new();
+
+    for (name, branch) in repos {
+        let repo_config = config_mgr.load_repo_config(&name)?;
+        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+        let target_branch = branch
+            .or(repo_config.default_target_branch.clone())
+            .unwrap_or_else(|| {
+                git.current_branch(&repo_path)
+                    .unwrap_or_else(|_| "main".into())
+            });
+        entries.push(RepoEntry {
+            name,
+            target_branch: Some(target_branch),
+        });
+    }
+
+    Ok(entries)
+}
+
+fn template_repos_to_entries_input(
+    tmpl_name: &str,
+    repos: Vec<String>,
+) -> Result<Vec<(String, Option<String>)>> {
+    if repos.is_empty() {
+        anyhow::bail!("template '{}' has no repos", tmpl_name);
+    }
+    Ok(repos.into_iter().map(|name| (name, None)).collect())
+}
+
 pub fn handle_create(args: &CreateArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.ensure_dirs()?;
@@ -70,31 +106,12 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     };
 
     let repo_entries = if let Some(repos_str) = &args.repos {
-        let parsed = parse_repos_arg(repos_str);
-        let mut entries = Vec::new();
-        for (name, branch) in parsed {
-            let repo_config = config_mgr.load_repo_config(&name)?;
-            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-            let target_branch = branch
-                .or(repo_config.default_target_branch.clone())
-                .unwrap_or_else(|| {
-                    git.current_branch(&repo_path)
-                        .unwrap_or_else(|_| "main".into())
-                });
-            entries.push(RepoEntry {
-                name,
-                target_branch: Some(target_branch),
-            });
-        }
-        entries
+        build_repo_entries(&config_mgr, &runner, parse_repos_arg(repos_str))?
+    } else if let Some(tmpl_name) = &args.template {
+        let tmpl = config_mgr.load_template(tmpl_name)?;
+        let repos = template_repos_to_entries_input(tmpl_name, tmpl.repos)?;
+        build_repo_entries(&config_mgr, &runner, repos)?
     } else {
-        let _template_repos = if let Some(tmpl_name) = &args.template {
-            let tmpl = config_mgr.load_template(tmpl_name)?;
-            Some(tmpl.repos)
-        } else {
-            None
-        };
-
         let all_repos = config_mgr.list_repos()?;
         if all_repos.is_empty() {
             anyhow::bail!("no repos registered. Use 'zootree repo add' first.");
@@ -793,8 +810,9 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
             } else {
                 format!("{}\n\n{}", workspace.title, workspace.description)
             };
-            git.merge(
+            git.merge_with_worktree(
                 &repo_path,
+                Some(&worktree_path),
                 &workspace.branch,
                 &target_branch,
                 strategy,
@@ -1039,6 +1057,18 @@ mod tests {
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
             msg.contains("use --force to proceed anyway"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn template_repos_to_entries_input_errors_on_empty_template() {
+        let result = template_repos_to_entries_input("empty", Vec::new());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("template 'empty' has no repos"),
             "got: {}",
             msg
         );

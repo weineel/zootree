@@ -43,7 +43,10 @@ impl<'a, R: CommandRunner> HookEngine<'a, R> {
     pub fn execute(&self, hook: &HookValue, ctx: &HookContext) -> Result<()> {
         let (program, args) = match hook {
             HookValue::Simple(cmd) => ("sh".to_string(), vec!["-c".to_string(), cmd.clone()]),
-            HookValue::File { file } => ("sh".to_string(), vec![file.clone()]),
+            HookValue::File { file } => (
+                "sh".to_string(),
+                vec![shellexpand::tilde(file).into_owned()],
+            ),
             HookValue::Inline { inline } => {
                 ("sh".to_string(), vec!["-c".to_string(), inline.clone()])
             }
