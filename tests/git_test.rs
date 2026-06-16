@@ -11,6 +11,35 @@ fn success_output() -> Output {
     }
 }
 
+fn success_stdout(stdout: &str) -> Output {
+    Output {
+        status: ExitStatus::from_raw(0),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+    }
+}
+
+#[test]
+fn test_repo_root_command() {
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout("/home/user/projects/frontend\n"));
+    let git = GitOps::new(&runner);
+
+    let root = git.repo_root("/home/user/projects/frontend/src").unwrap();
+
+    assert_eq!(root, "/home/user/projects/frontend");
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend/src",
+            "rev-parse",
+            "--show-toplevel",
+        ]
+    );
+}
+
 #[test]
 fn test_worktree_add_command() {
     let runner = MockRunner::new();

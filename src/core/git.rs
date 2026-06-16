@@ -45,6 +45,12 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(branch)
     }
 
+    pub fn repo_root(&self, repo_path: &str) -> Result<String> {
+        let output = self.git(repo_path, vec!["rev-parse", "--show-toplevel"])?;
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(root)
+    }
+
     pub fn branch_exists(&self, repo_path: &str, branch: &str) -> Result<bool> {
         let spec = CommandSpec {
             program: "git".into(),

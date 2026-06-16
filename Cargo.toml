@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "development-tools"]
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
-kdl = "6"
+kdl = "6.5"
 dirs = "6"
 glob = "0.3"
 tracing = "0.1"
@@ -35,7 +35,9 @@ textwrap = "0.16"
 
 [dev-dependencies]
 tempfile = "3"
-cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+cargo-husky = { version = "1", default-features = false, features = [
+  "user-hooks",
+] }
 
 # The profile that 'dist' will build with
 [profile.dist]

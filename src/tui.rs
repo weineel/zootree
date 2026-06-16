@@ -45,6 +45,19 @@ pub fn select_multi(prompt: &str, items: &[String]) -> Result<Vec<usize>> {
     }
 }
 
+pub fn select_multi_with_defaults(
+    prompt: &str,
+    items: &[String],
+    default_indices: &[usize],
+) -> Result<Vec<usize>> {
+    let state = MultiSelectPromptState::with_defaults(prompt, items.to_vec(), default_indices);
+    match run_inline(state)? {
+        PromptOutcome::Submitted(v) => Ok(v),
+        PromptOutcome::Aborted | PromptOutcome::Interrupted => Err(CancelledByUser.into()),
+        PromptOutcome::Skipped => unreachable!("select_multi is required"),
+    }
+}
+
 pub fn confirm(prompt: &str, default: bool) -> Result<bool> {
     let state = ConfirmPromptState::new(prompt, default);
     match run_inline(state)? {

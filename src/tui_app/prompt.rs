@@ -317,6 +317,17 @@ impl MultiSelectPromptState {
         }
     }
 
+    pub fn with_defaults(prompt: &str, items: Vec<String>, default_indices: &[usize]) -> Self {
+        let mut state = Self::new(prompt, items);
+        for &idx in default_indices {
+            if idx < state.checked.len() && !state.checked[idx] {
+                state.checked[idx] = true;
+                state.selection_order.push(idx);
+            }
+        }
+        state
+    }
+
     pub fn prompt(&self) -> &str {
         self.inner.prompt()
     }
@@ -992,6 +1003,19 @@ mod tests {
         match s.outcome() {
             Some(PromptOutcome::Submitted(v)) => assert!(v.is_empty()),
             _ => panic!("expected Submitted([])"),
+        }
+    }
+
+    #[test]
+    fn multi_with_defaults_preselects_items() {
+        let mut s =
+            MultiSelectPromptState::with_defaults("Pick", vec!["a".into(), "b".into()], &[1]);
+        assert!(!s.is_checked(0));
+        assert!(s.is_checked(1));
+        s.handle_key(key(KeyCode::Enter));
+        match s.outcome() {
+            Some(PromptOutcome::Submitted(v)) => assert_eq!(v, &vec![1]),
+            _ => panic!("expected Submitted([1])"),
         }
     }
 
