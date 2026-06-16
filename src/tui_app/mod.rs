@@ -69,7 +69,10 @@ pub fn run_app<A: App>(mut app: A) -> anyhow::Result<()> {
 fn main_loop<B: ratatui::backend::Backend, A: App>(
     terminal: &mut Terminal<B>,
     app: &mut A,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     // Poll budget: tick interval if set, otherwise a reasonable idle timeout so
     // we still respond to keys quickly when ticks are off.
     let tick_rate = app.tick_interval().unwrap_or(Duration::from_millis(250));
@@ -218,7 +221,10 @@ pub fn run_inline<A: InlineApp>(mut app: A) -> anyhow::Result<PromptOutcome<A::O
 fn inline_loop<B: ratatui::backend::Backend, A: InlineApp>(
     terminal: &mut ratatui::Terminal<B>,
     app: &mut A,
-) -> anyhow::Result<PromptOutcome<A::Output>> {
+) -> anyhow::Result<PromptOutcome<A::Output>>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut last_height = app.desired_height().max(1);
     loop {
         let height = app.desired_height().max(1);

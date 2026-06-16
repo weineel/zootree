@@ -4,12 +4,12 @@
 //! terminal IO are delegated to `run_inline`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use tui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{TextArea, WrapMode};
 
 use crate::tui_app::PromptOutcome;
 
-/// Multi-line text prompt. Backed by `tui_textarea::TextArea` for correct
-/// CJK / unicode-width behavior.
+/// Multi-line text prompt. Backed by `ratatui_textarea::TextArea` for correct
+/// CJK / unicode-width behavior, soft-wrap, and Emacs-style editing keys.
 pub struct TextPromptState {
     prompt: String,
     required: bool,
@@ -21,6 +21,9 @@ impl TextPromptState {
     pub fn new(prompt: &str) -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
+        // 长行按可视宽度自动折行显示；逻辑上仍是一行。
+        // WordOrGlyph: 优先按词断行，长单词回退到 grapheme cluster。
+        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         Self {
             prompt: prompt.to_string(),
             required: true,
@@ -77,9 +80,15 @@ impl TextPromptState {
         let alt = m.contains(KeyModifiers::ALT);
         let shift = m.contains(KeyModifiers::SHIFT);
 
+        // —— zootree 自定义语义键：必须在 textarea.input() 之前拦截 ——
+        // - Ctrl+C：硬中断
+        // - Esc：取消（必填）或跳过（选填）
+        // - Alt|Shift+Enter：显式插入换行
+        // - 裸 Enter：提交（库默认会把 Enter 当 newline，必须截下）
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 self.outcome = Some(PromptOutcome::Interrupted);
+                return;
             }
             KeyCode::Esc => {
                 self.outcome = Some(if self.required {
@@ -87,40 +96,24 @@ impl TextPromptState {
                 } else {
                     PromptOutcome::Skipped
                 });
+                return;
             }
             KeyCode::Enter if alt || shift => {
                 self.textarea.insert_newline();
+                return;
             }
             KeyCode::Enter => {
                 let text = self.text();
                 self.outcome = Some(PromptOutcome::Submitted(text));
-            }
-            KeyCode::Backspace => {
-                self.textarea.delete_char();
-            }
-            KeyCode::Char(c) => {
-                self.textarea.insert_char(c);
-            }
-            KeyCode::Left => {
-                self.textarea.move_cursor(CursorMove::Back);
-            }
-            KeyCode::Right => {
-                self.textarea.move_cursor(CursorMove::Forward);
-            }
-            KeyCode::Up => {
-                self.textarea.move_cursor(CursorMove::Up);
-            }
-            KeyCode::Down => {
-                self.textarea.move_cursor(CursorMove::Down);
-            }
-            KeyCode::Home => {
-                self.textarea.move_cursor(CursorMove::Head);
-            }
-            KeyCode::End => {
-                self.textarea.move_cursor(CursorMove::End);
+                return;
             }
             _ => {}
         }
+
+        // 其余所有键交给库：Backspace、方向键、Home/End、
+        // Ctrl+A/E/W/U/K、Alt+B/F/D、Ctrl+Z/R(undo/redo)、文本选择、yank……
+        // 返回值是“是否改动了 buffer”，对我们没有意义。
+        let _ = self.textarea.input(key);
     }
 
     pub fn handle_paste(&mut self, s: &str) {
@@ -1151,5 +1144,61 @@ mod tests {
         let mut s = ConfirmPromptState::new("Delete?", false);
         s.handle_key(key_release(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(s.outcome().is_none());
+    }
+
+    #[test]
+    fn text_ctrl_a_moves_to_line_start() {
+        // 验证 Emacs 键 Ctrl+A：通过库的 input() 路径生效。
+        let mut s = TextPromptState::new("Title").required();
+        s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Char('b')));
+        s.handle_key(key(KeyCode::Char('c')));
+        // 光标当前在 "abc" 末尾；Ctrl+A 应跳到行首
+        s.handle_key(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        // 在行首插入 'X' 验证位置
+        s.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(s.text(), "Xabc");
+    }
+
+    #[test]
+    fn text_ctrl_e_moves_to_line_end() {
+        let mut s = TextPromptState::new("Title").required();
+        s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Char('b')));
+        s.handle_key(key(KeyCode::Char('c')));
+        s.handle_key(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        s.handle_key(key_mod(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        s.handle_key(key(KeyCode::Char('Z')));
+        assert_eq!(s.text(), "abcZ");
+    }
+
+    #[test]
+    fn text_ctrl_w_deletes_previous_word() {
+        let mut s = TextPromptState::new("Title").required();
+        for c in "hello world".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(s.text(), "hello world");
+        s.handle_key(key_mod(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let after = s.text();
+        assert!(
+            after == "hello " || after == "hello",
+            "expected 'hello' or 'hello ', got {:?}",
+            after
+        );
+    }
+
+    #[test]
+    fn text_ctrl_k_cuts_to_line_end() {
+        let mut s = TextPromptState::new("Title").required();
+        for c in "foobar".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.handle_key(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL)); // 跳到行首
+        s.handle_key(key(KeyCode::Right));
+        s.handle_key(key(KeyCode::Right));
+        s.handle_key(key(KeyCode::Right)); // 现在光标在 'b' 之前
+        s.handle_key(key_mod(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(s.text(), "foo");
     }
 }
