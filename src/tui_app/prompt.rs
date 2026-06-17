@@ -85,9 +85,14 @@ impl TextPromptState {
         // - Esc：取消（必填）或跳过（选填）
         // - Alt|Shift+Enter：显式插入换行
         // - 裸 Enter：提交（库默认会把 Enter 当 newline，必须截下）
+        // - Ctrl+U：删到行首（库的 input() 把它当单字符删除，行为不符标准）
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 self.outcome = Some(PromptOutcome::Interrupted);
+                return;
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.textarea.delete_line_by_head();
                 return;
             }
             KeyCode::Esc => {
@@ -1200,5 +1205,22 @@ mod tests {
         s.handle_key(key(KeyCode::Right)); // 现在光标在 'b' 之前
         s.handle_key(key_mod(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert_eq!(s.text(), "foo");
+    }
+
+    #[test]
+    fn text_ctrl_u_deletes_to_line_start() {
+        // Ctrl+U 应删到行首（显式拦截，库的 input() 默认行为不符标准）
+        let mut s = TextPromptState::new("Title").required();
+        for c in "hello world".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        // 从行首右移 8 步 → 光标在 "hello wo|rld" 的 'r' 之前
+        s.handle_key(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        for _ in 0..8 {
+            s.handle_key(key(KeyCode::Right));
+        }
+        s.handle_key(key_mod(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        // "hello wo" 被删除，剩 "rld"
+        assert_eq!(s.text(), "rld");
     }
 }
