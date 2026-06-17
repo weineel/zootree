@@ -483,7 +483,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 const TEXT_MIN_VISIBLE_LINES: u16 = 5;
-const TEXT_MAX_VISIBLE_LINES: u16 = 10;
 
 impl InlineApp for TextPromptState {
     type Output = String;
@@ -541,9 +540,8 @@ impl InlineApp for TextPromptState {
     }
 
     fn desired_height(&self) -> u16 {
-        let editor =
-            (self.line_count() as u16).clamp(TEXT_MIN_VISIBLE_LINES, TEXT_MAX_VISIBLE_LINES);
-        // 1 header + editor + 2 borders + 1 help
+        let editor = (self.line_count() as u16).max(TEXT_MIN_VISIBLE_LINES);
+        // 1 header + editor + 2 borders + 1 help；无上界，内容有多高就长多高
         1 + editor + 2 + 1
     }
 
