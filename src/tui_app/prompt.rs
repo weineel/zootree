@@ -540,8 +540,9 @@ impl InlineApp for TextPromptState {
     }
 
     fn desired_height(&self) -> u16 {
-        let editor = (self.line_count() as u16).max(TEXT_MIN_VISIBLE_LINES);
-        // 1 header + editor + 2 borders + 1 help；无上界，内容有多高就长多高
+        let editor = TEXT_MIN_VISIBLE_LINES;
+        // 1 header + fixed editor + 2 borders + 1 help. Keep the inline
+        // viewport stable; ratatui-textarea scrolls overflowing lines inside.
         1 + editor + 2 + 1
     }
 
@@ -1099,14 +1100,15 @@ mod tests {
     }
 
     #[test]
-    fn text_desired_height_grows_above_floor() {
+    fn text_desired_height_stays_fixed_above_floor() {
         let mut s = TextPromptState::new("Desc").optional();
         for _ in 0..6 {
             s.handle_key(key_mod(KeyCode::Enter, KeyModifiers::ALT));
         }
-        // line_count = 7 → 1 + 7 + 2 + 1 = 11
+        // line_count = 7, but the inline viewport stays fixed and the
+        // textarea scrolls internally.
         assert_eq!(s.line_count(), 7);
-        assert_eq!(s.desired_height(), 11);
+        assert_eq!(s.desired_height(), 9);
     }
 
     fn key_release(code: KeyCode, m: KeyModifiers) -> KeyEvent {

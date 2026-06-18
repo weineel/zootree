@@ -187,10 +187,15 @@ pub fn run_inline<A: InlineApp>(mut app: A) -> anyhow::Result<PromptOutcome<A::O
     let _ = execute!(stdout, EnableBracketedPaste);
 
     let backend = CrosstermBackend::new(stdout);
+    // 初始 viewport 高度 cap 到"终端高度 - 1"，避免 inline viewport
+    // 在终端底部增高时把上方内容（包括 prompt header）顶出屏幕。
+    let term_height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+    let max_h = term_height.saturating_sub(1).max(1);
+    let initial_h = app.desired_height().max(1).min(max_h);
     let mut terminal = ratatui::Terminal::with_options(
         backend,
         ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(app.desired_height().max(1)),
+            viewport: ratatui::Viewport::Inline(initial_h),
         },
     )?;
 
@@ -225,16 +230,15 @@ fn inline_loop<B: ratatui::backend::Backend, A: InlineApp>(
 where
     B::Error: Send + Sync + 'static,
 {
-    let mut last_height = app.desired_height().max(1);
+    let mut last_height = 0u16;
     loop {
-        let height = app.desired_height().max(1);
+        let term_size = terminal.size()?;
+        // cap 到"终端高度 - 1"：超过后 textarea 内部自动 scroll 让光标行可见，
+        // 避免 inline viewport 把上方内容顶出屏幕。
+        let max_h = term_size.height.saturating_sub(1).max(1);
+        let height = app.desired_height().max(1).min(max_h);
         if height != last_height {
-            terminal.resize(ratatui::layout::Rect::new(
-                0,
-                0,
-                terminal.size()?.width,
-                height,
-            ))?;
+            terminal.resize(ratatui::layout::Rect::new(0, 0, term_size.width, height))?;
             last_height = height;
         }
         terminal.draw(|f| app.render(f))?;
