@@ -16,6 +16,8 @@ pub struct InfoApp {
     pub(crate) interval: Duration,
     pub(crate) quit: bool,
     pub(crate) last_error: Option<String>,
+    pub(crate) body_scroll: usize,
+    pub(crate) last_body_height: u16,
 }
 
 pub(crate) struct InfoState {
@@ -36,6 +38,8 @@ impl InfoApp {
             interval,
             quit: false,
             last_error: None,
+            body_scroll: 0,
+            last_body_height: 1,
         };
         app.reload();
         app
@@ -100,7 +104,7 @@ pub fn status_label(s: &WorkspaceStatus) -> &'static str {
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 impl crate::tui_app::App for InfoApp {
@@ -115,6 +119,12 @@ impl crate::tui_app::App for InfoApp {
                     KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
                     KeyCode::Char('c') if ctrl => self.quit = true,
                     KeyCode::Char('r') => self.reload(),
+                    KeyCode::Down | KeyCode::Char('j') => self.scroll_down(1),
+                    KeyCode::Up | KeyCode::Char('k') => self.scroll_up(1),
+                    KeyCode::PageDown => self.scroll_down(self.page_scroll_amount()),
+                    KeyCode::PageUp => self.scroll_up(self.page_scroll_amount()),
+                    KeyCode::Home => self.body_scroll = 0,
+                    KeyCode::End => self.body_scroll = usize::MAX,
                     _ => {}
                 }
             }
@@ -173,7 +183,7 @@ impl InfoApp {
         frame.render_widget(para, area);
     }
 
-    fn render_body(&self, frame: &mut Frame, area: Rect) {
+    fn render_body(&mut self, frame: &mut Frame, area: Rect) {
         let Some(state) = &self.state else {
             let msg = self
                 .last_error
@@ -185,84 +195,25 @@ impl InfoApp {
         };
 
         let ws = &state.workspace;
-        let meta_lines = build_meta_lines(
+        let body_lines = build_body_lines(
             ws,
             state.agent_cli.as_deref(),
             &state.agent_cli_alias,
             area.width,
         );
-        let meta_height_full = meta_lines.len() as u16;
+        self.last_body_height = area.height.max(1);
+        let max_scroll = body_lines
+            .len()
+            .saturating_sub(area.height as usize)
+            .min(u16::MAX as usize);
+        self.body_scroll = self.body_scroll.min(max_scroll);
 
-        let max_meta = area.height.saturating_sub(8);
-        let actual_meta = meta_height_full.min(max_meta);
-
-        let repos_rows = ws.repos.len().max(1) as u16;
-        let repos_height = 2 + repos_rows;
-
-        let chunks = Layout::vertical([
-            Constraint::Length(actual_meta),
-            Constraint::Length(1),
-            Constraint::Length(repos_height),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
-        .split(area);
-
-        frame.render_widget(Paragraph::new(meta_lines), chunks[0]);
-
-        let rows: Vec<Row> = if ws.repos.is_empty() {
-            vec![Row::new(vec![
-                "(none)".to_string(),
-                "".to_string(),
-                "".to_string(),
-            ])]
-        } else {
-            ws.repos
-                .iter()
-                .map(|r| {
-                    let target = r.target_branch.as_deref().unwrap_or("*");
-                    let worktree = format!("{}/{}", ws.workspace_dir, r.name);
-                    Row::new(vec![r.name.clone(), target.to_string(), worktree])
-                })
-                .collect()
-        };
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(15),
-                Constraint::Length(15),
-                Constraint::Min(20),
-            ],
-        )
-        .header(
-            Row::new(vec!["NAME", "TARGET", "WORKTREE"])
-                .style(Style::default().fg(Color::DarkGray)),
-        )
-        .block(Block::default().borders(Borders::TOP).title(" Repos "));
-        frame.render_widget(table, chunks[2]);
-
-        let recent = last_n(&ws.events, 5);
-        let items: Vec<ListItem> = recent
-            .iter()
-            .map(|e| {
-                let ts = format_rfc3339_to_minute(&e.timestamp);
-                let mut text = format!("{}  {}", ts, e.action);
-                if let Some(d) = &e.detail {
-                    text.push_str(&format!("  ({})", d));
-                }
-                ListItem::new(text)
-            })
-            .collect();
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .title(" Recent events "),
-        );
-        frame.render_widget(list, chunks[4]);
+        let para = Paragraph::new(body_lines).scroll((self.body_scroll as u16, 0));
+        frame.render_widget(para, area);
     }
 
     fn render_status_line(&self, frame: &mut Frame, area: Rect) {
-        let left = "[q] quit   [r] reload".to_string();
+        let left = "[q] quit   [r] reload   [Up/Down/Pg] scroll".to_string();
         let right = if let Some(state) = &self.state {
             let mode = if self.watch {
                 format!("watching ({}s)", self.interval.as_secs())
@@ -290,6 +241,20 @@ impl InfoApp {
             Paragraph::new(combined).style(Style::default().fg(Color::DarkGray)),
             area,
         );
+    }
+}
+
+impl InfoApp {
+    fn page_scroll_amount(&self) -> usize {
+        self.last_body_height.saturating_sub(1).max(1) as usize
+    }
+
+    fn scroll_down(&mut self, amount: usize) {
+        self.body_scroll = self.body_scroll.saturating_add(amount);
+    }
+
+    fn scroll_up(&mut self, amount: usize) {
+        self.body_scroll = self.body_scroll.saturating_sub(amount);
     }
 }
 
@@ -379,6 +344,59 @@ fn build_meta_lines(
         let alias_body = format!("{} = {}", a.name, a.template);
         for wrapped in textwrap::wrap(&alias_body, content_width(area_width)) {
             lines.push(Line::from(format!("    {}", wrapped)));
+        }
+    }
+    lines
+}
+
+fn build_body_lines(
+    ws: &WorkspaceConfig,
+    agent_cli: Option<&str>,
+    alias_map: &BTreeMap<String, String>,
+    area_width: u16,
+) -> Vec<Line<'static>> {
+    let wrap_width = usize::from(area_width.max(1));
+    let mut lines = build_meta_lines(ws, agent_cli, alias_map, area_width);
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  Repos",
+        Style::default().fg(Color::DarkGray),
+    ));
+    lines.push(Line::styled(
+        "  NAME            TARGET          WORKTREE",
+        Style::default().fg(Color::DarkGray),
+    ));
+    if ws.repos.is_empty() {
+        lines.push(Line::from("  (none)"));
+    } else {
+        for repo in &ws.repos {
+            let target = repo.target_branch.as_deref().unwrap_or("*");
+            let worktree = format!("{}/{}", ws.workspace_dir, repo.name);
+            let row = format!("  {:<15} {:<15} {}", repo.name, target, worktree);
+            for wrapped in textwrap::wrap(&row, wrap_width) {
+                lines.push(Line::from(wrapped.into_owned()));
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  Recent events",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let recent = last_n(&ws.events, 5);
+    if recent.is_empty() {
+        lines.push(Line::from("  (none)"));
+    } else {
+        for event in recent {
+            let ts = format_rfc3339_to_minute(&event.timestamp);
+            let mut text = format!("  {}  {}", ts, event.action);
+            if let Some(detail) = &event.detail {
+                text.push_str(&format!("  ({})", detail));
+            }
+            for wrapped in textwrap::wrap(&text, wrap_width) {
+                lines.push(Line::from(wrapped.into_owned()));
+            }
         }
     }
     lines
@@ -806,6 +824,43 @@ mod tests {
             !out.contains("Alias:"),
             "should not include Alias section:\n{}",
             out
+        );
+    }
+
+    #[test]
+    fn end_scrolls_long_watch_content_into_view() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let mut ws = sample_workspace("demo");
+        ws.description = (0..30)
+            .map(|i| format!("description-line-{:02}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, true, Duration::from_secs(5));
+
+        let before = render_to_string(&mut app, 80, 12);
+        assert!(
+            !before.contains("description-line-29"),
+            "last description line should start below the viewport:\n{}",
+            before
+        );
+
+        let ev = crate::tui_app::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::End,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        <InfoApp as crate::tui_app::App>::on_event(&mut app, ev).unwrap();
+
+        let after = render_to_string(&mut app, 80, 12);
+        assert!(
+            after.contains("description-line-29"),
+            "scrolling down should reveal later content:\n{}",
+            after
         );
     }
 }
