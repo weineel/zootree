@@ -11,6 +11,7 @@ fn make_workspace(title: &str, description: &str) -> WorkspaceConfig {
         branch: "zootree/test".into(),
         workspace_dir: "/tmp/ws".into(),
         created_at: "2026-05-12T00:00:00+08:00".into(),
+        agent_cli: None,
         zellij: ZellijConfig::default(),
         repos: Vec::new(),
         events: Vec::new(),

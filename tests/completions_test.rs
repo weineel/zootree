@@ -19,6 +19,7 @@ fn make_workspace(name: &str, title: &str) -> WorkspaceConfig {
         branch: format!("zootree/{}", name),
         workspace_dir: format!("/tmp/{}", name),
         created_at: Local::now().to_rfc3339(),
+        agent_cli: None,
         zellij: ZellijConfig {
             session_mode: Some("standalone".into()),
             ..Default::default()

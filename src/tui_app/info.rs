@@ -195,12 +195,8 @@ impl InfoApp {
         };
 
         let ws = &state.workspace;
-        let body_lines = build_body_lines(
-            ws,
-            state.agent_cli.as_deref(),
-            &state.agent_cli_alias,
-            area.width,
-        );
+        let agent_cli = ws.agent_cli.as_deref().or(state.agent_cli.as_deref());
+        let body_lines = build_body_lines(ws, agent_cli, &state.agent_cli_alias, area.width);
         self.last_body_height = area.height.max(1);
         let max_scroll = body_lines
             .len()
@@ -424,6 +420,7 @@ mod tests {
             branch: format!("zootree/{}", name),
             workspace_dir: format!("/tmp/{}", name),
             created_at: "2026-05-10T14:22:00+08:00".into(),
+            agent_cli: None,
             zellij: ZellijConfig::default(),
             repos: vec![],
             events: vec![],

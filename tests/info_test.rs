@@ -10,6 +10,7 @@ fn base_ws() -> WorkspaceConfig {
         branch: "zootree/demo".into(),
         workspace_dir: "/tmp/demo".into(),
         created_at: "2026-05-10T14:22:00+08:00".into(),
+        agent_cli: None,
         zellij: ZellijConfig::default(),
         repos: vec![],
         events: vec![],
@@ -182,6 +183,43 @@ fn render_once_includes_alias_annotation_and_alias_section() {
     assert!(
         out.contains("Alias:\n  safe = claude --skip -- $prompt"),
         "missing single-line Alias section:\n{}",
+        out
+    );
+}
+
+#[test]
+fn render_once_prefers_workspace_agent_over_global_default() {
+    use std::collections::BTreeMap;
+    let mut ws = base_ws();
+    ws.agent_cli = Some("codexd_brainstorming".into());
+
+    let mut alias_map = BTreeMap::new();
+    alias_map.insert("claude".to_string(), "claude -- $prompt".to_string());
+    alias_map.insert(
+        "codexd_brainstorming".to_string(),
+        "codexd brainstorming -- $prompt".to_string(),
+    );
+    let global = GlobalConfig {
+        agent_cli: Some("claude".into()),
+        agent_cli_alias: alias_map,
+        ..Default::default()
+    };
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &global);
+
+    assert!(out.contains("Agent:"), "missing Agent: section:\n{}", out);
+    assert!(
+        out.contains("codexd brainstorming"),
+        "workspace agent should be shown:\n{}",
+        out
+    );
+    assert!(
+        out.contains("(via alias: codexd_brainstorming)"),
+        "workspace agent alias should be annotated:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("claude --"),
+        "global default agent should not be shown:\n{}",
         out
     );
 }

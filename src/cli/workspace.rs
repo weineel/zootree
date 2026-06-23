@@ -1,4 +1,4 @@
-use crate::config::global::{HooksConfig, ZellijConfig};
+use crate::config::global::{GlobalConfig, HooksConfig, ZellijConfig};
 use crate::config::repo::RepoConfig;
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
@@ -179,6 +179,21 @@ fn ensure_current_repo_registered<R: crate::runner::CommandRunner>(
     }))
 }
 
+fn selected_agent_cli_value(
+    run_agent: &Option<Option<String>>,
+    global: &GlobalConfig,
+) -> Result<Option<String>> {
+    match run_agent {
+        None => Ok(None),
+        Some(Some(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(_) => Ok(Some(global.agent_cli.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
+            )
+        })?)),
+    }
+}
+
 pub fn handle_create(args: &CreateArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.ensure_dirs()?;
@@ -280,6 +295,7 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     let workspace_dir = format!("{}/{}", shellexpand::tilde(&global.workspace_root), name);
 
     let now = Local::now().to_rfc3339();
+    let agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
 
     let workspace = WorkspaceConfig {
         title,
@@ -288,6 +304,7 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
         branch,
         workspace_dir,
         created_at: now.clone(),
+        agent_cli,
         zellij: ZellijConfig {
             session_mode: Some("standalone".into()),
             ..Default::default()
@@ -363,6 +380,10 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
     std::fs::create_dir_all(&ws_dir)?;
+
+    if args.run_agent.is_some() {
+        workspace.agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
+    }
 
     for repo_entry in &workspace.repos {
         let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;

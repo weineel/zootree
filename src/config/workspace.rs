@@ -32,6 +32,8 @@ pub struct WorkspaceConfig {
     pub branch: String,
     pub workspace_dir: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_cli: Option<String>,
     #[serde(default)]
     pub zellij: ZellijConfig,
     #[serde(default)]

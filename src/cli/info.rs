@@ -96,11 +96,8 @@ pub fn render_once(
         }
     }
     let _ = writeln!(out);
-    match crate::core::layout::build_agent_cli_display(
-        global.agent_cli.as_deref(),
-        &global.agent_cli_alias,
-        ws,
-    ) {
+    let agent_cli = ws.agent_cli.as_deref().or(global.agent_cli.as_deref());
+    match crate::core::layout::build_agent_cli_display(agent_cli, &global.agent_cli_alias, ws) {
         Some(Ok(display)) => {
             let _ = writeln!(out, "Agent:");
             if let Some(alias) = &display.alias {

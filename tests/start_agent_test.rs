@@ -11,6 +11,7 @@ fn make_workspace(repos: Vec<&str>) -> WorkspaceConfig {
         branch: "zootree/calm-river".into(),
         workspace_dir: "/ws/calm-river".into(),
         created_at: "2026-05-12T00:00:00+08:00".into(),
+        agent_cli: None,
         zellij: ZellijConfig::default(),
         repos: repos
             .into_iter()
