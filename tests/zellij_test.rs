@@ -188,6 +188,33 @@ fn dispatch_launch_inside_zellij_session_exists_invokes_only_list_sessions() {
 }
 
 #[test]
+fn dispatch_launch_does_not_treat_session_name_prefix_as_existing() {
+    use zootree::cli::workspace::dispatch_launch;
+    let runner = MockRunner::new();
+    runner.push_response(stdout_output(b"zootree-fair-fox-old\nother-session\n"));
+    runner.push_response(success_output());
+
+    let zellij = ZellijOps::new(&runner);
+    dispatch_launch(
+        &zellij,
+        "fair-fox",
+        "zootree-fair-fox",
+        Path::new("/tmp/layout.kdl"),
+        true,
+    )
+    .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].args, vec!["list-sessions"]);
+    assert!(
+        calls[1].args.contains(&"--create-background".to_string()),
+        "expected missing exact session to create in background, got {:?}",
+        calls[1].args
+    );
+}
+
+#[test]
 fn dispatch_launch_outside_zellij_no_session_calls_start_session() {
     use zootree::cli::workspace::dispatch_launch;
     let runner = MockRunner::new();

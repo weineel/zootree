@@ -33,6 +33,10 @@ pub fn plan_launch(in_zellij: bool, session_exists: bool) -> LaunchPlan {
     }
 }
 
+fn session_list_line_matches(line: &str, session_name: &str) -> bool {
+    line.split_whitespace().next() == Some(session_name)
+}
+
 pub struct ZellijOps<'a, R: CommandRunner> {
     runner: &'a R,
 }
@@ -131,7 +135,7 @@ impl<'a, R: CommandRunner> ZellijOps<'a, R> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout
             .lines()
-            .any(|line| line.trim().starts_with(session_name)))
+            .any(|line| session_list_line_matches(line, session_name)))
     }
 
     pub fn add_tab(&self, session_name: &str, layout_path: &Path, tab_name: &str) -> Result<()> {
