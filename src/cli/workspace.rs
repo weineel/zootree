@@ -96,6 +96,12 @@ struct CurrentRepoDefault {
     current_branch: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ListWorkspaceItem {
+    status: WorkspaceStatus,
+    workspace: WorkspaceConfig,
+}
+
 fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -509,27 +515,21 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    for ws in &workspaces {
+    let mut items = Vec::with_capacity(workspaces.len());
+    for ws in workspaces {
         let (status, _) = config_mgr.load_workspace(&ws.name)?;
-        let status_str = format_status(&status);
-        let repos_str = ws
-            .repos
-            .iter()
-            .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if matches!(status, WorkspaceStatus::InProgress) {
-            println!(
-                "  {} ({}) - {} [{}] {}",
-                ws.name, status_str, ws.title, repos_str, ws.workspace_dir
-            );
-        } else {
-            println!(
-                "  {} ({}) - {} [{}]",
-                ws.name, status_str, ws.title, repos_str
-            );
-        }
+        items.push(ListWorkspaceItem {
+            status,
+            workspace: ws,
+        });
     }
+
+    let output = if args.oneline {
+        render_list_oneline(&items)
+    } else {
+        render_list_cards(&items)
+    };
+    print!("{}", output);
 
     Ok(())
 }
@@ -541,6 +541,68 @@ fn format_status(status: &WorkspaceStatus) -> &'static str {
         WorkspaceStatus::Done => "done",
         WorkspaceStatus::Canceled => "canceled",
     }
+}
+
+fn format_repo_targets(repos: &[RepoEntry]) -> String {
+    if repos.is_empty() {
+        return "(none)".into();
+    }
+
+    repos
+        .iter()
+        .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_list_oneline(items: &[ListWorkspaceItem]) -> String {
+    let mut out = String::new();
+
+    for item in items {
+        let ws = &item.workspace;
+        let status_str = format_status(&item.status);
+        let repos_str = format_repo_targets(&ws.repos);
+
+        if matches!(item.status, WorkspaceStatus::InProgress) {
+            out.push_str(&format!(
+                "  {} ({}) - {} [{}] {}\n",
+                ws.name, status_str, ws.title, repos_str, ws.workspace_dir
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {} ({}) - {} [{}]\n",
+                ws.name, status_str, ws.title, repos_str
+            ));
+        }
+    }
+
+    out
+}
+
+fn render_list_cards(items: &[ListWorkspaceItem]) -> String {
+    let mut out = String::new();
+
+    for (idx, item) in items.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+
+        let ws = &item.workspace;
+        out.push_str(&format!(
+            "{}  [{}]  {}\n",
+            ws.name,
+            format_status(&item.status),
+            ws.branch
+        ));
+        out.push_str(&format!("  title: {}\n", ws.title));
+        out.push_str(&format!("  repos: {}\n", format_repo_targets(&ws.repos)));
+
+        if matches!(item.status, WorkspaceStatus::InProgress) {
+            out.push_str(&format!("  dir:   {}\n", ws.workspace_dir));
+        }
+    }
+
+    out
 }
 
 pub fn handle_open(args: &OpenArgs) -> Result<()> {
@@ -755,6 +817,9 @@ pub struct ListArgs {
         help = "Filter by status (repeatable: pending, in_progress, done, canceled)"
     )]
     pub status: Vec<WorkspaceStatus>,
+
+    #[arg(long, help = "Use the legacy one-line output format")]
+    pub oneline: bool,
 }
 
 #[derive(Args)]
@@ -1174,8 +1239,15 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
+
+    #[derive(Parser)]
+    struct TestListCli {
+        #[command(flatten)]
+        args: ListArgs,
+    }
 
     fn success_output(stdout: &str) -> Output {
         Output {
@@ -1183,6 +1255,162 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: Vec::new(),
         }
+    }
+
+    fn list_workspace(
+        status: WorkspaceStatus,
+        name: &str,
+        title: &str,
+        branch: &str,
+        workspace_dir: &str,
+        repos: Vec<RepoEntry>,
+    ) -> ListWorkspaceItem {
+        ListWorkspaceItem {
+            status,
+            workspace: WorkspaceConfig {
+                title: title.into(),
+                name: name.into(),
+                description: String::new(),
+                branch: branch.into(),
+                workspace_dir: workspace_dir.into(),
+                created_at: "2026-06-23T10:00:00+08:00".into(),
+                agent_cli: None,
+                zellij: ZellijConfig::default(),
+                repos,
+                events: Vec::new(),
+            },
+        }
+    }
+
+    fn repo(name: &str, target_branch: Option<&str>) -> RepoEntry {
+        RepoEntry {
+            name: name.into(),
+            target_branch: target_branch.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn list_args_parse_oneline_flag() {
+        let parsed =
+            TestListCli::try_parse_from(["test", "--status", "in-progress", "--oneline"]).unwrap();
+
+        assert_eq!(parsed.args.status, vec![WorkspaceStatus::InProgress]);
+        assert!(parsed.args.oneline);
+    }
+
+    #[test]
+    fn render_list_oneline_matches_legacy_format() {
+        let items = vec![
+            list_workspace(
+                WorkspaceStatus::InProgress,
+                "pure-vine",
+                "List output redesign",
+                "zootree/pure-vine",
+                "/Users/lijufeng/zootree-workspaces/pure-vine",
+                vec![repo("zootree", Some("main"))],
+            ),
+            list_workspace(
+                WorkspaceStatus::Pending,
+                "calm-river",
+                "Pending work",
+                "zootree/calm-river",
+                "/Users/lijufeng/zootree-workspaces/calm-river",
+                vec![repo("frontend", None)],
+            ),
+        ];
+
+        let out = render_list_oneline(&items);
+
+        assert_eq!(
+            out,
+            "  pure-vine (in_progress) - List output redesign [zootree:main] /Users/lijufeng/zootree-workspaces/pure-vine\n  calm-river (pending) - Pending work [frontend:*]\n"
+        );
+    }
+
+    #[test]
+    fn render_list_cards_includes_branch_title_repos_and_dir_for_in_progress() {
+        let items = vec![list_workspace(
+            WorkspaceStatus::InProgress,
+            "pure-vine",
+            "zootree list 每项都堆在一行显示再窄屏时可视化效果太差",
+            "zootree/pure-vine",
+            "/Users/lijufeng/zootree-workspaces/pure-vine",
+            vec![repo("zootree", Some("main"))],
+        )];
+
+        let out = render_list_cards(&items);
+
+        assert_eq!(
+            out,
+            "pure-vine  [in_progress]  zootree/pure-vine\n  title: zootree list 每项都堆在一行显示再窄屏时可视化效果太差\n  repos: zootree:main\n  dir:   /Users/lijufeng/zootree-workspaces/pure-vine\n"
+        );
+    }
+
+    #[test]
+    fn render_list_cards_omits_dir_for_pending() {
+        let items = vec![list_workspace(
+            WorkspaceStatus::Pending,
+            "calm-river",
+            "Pending work",
+            "zootree/calm-river",
+            "/Users/lijufeng/zootree-workspaces/calm-river",
+            vec![repo("frontend", None)],
+        )];
+
+        let out = render_list_cards(&items);
+
+        assert_eq!(
+            out,
+            "calm-river  [pending]  zootree/calm-river\n  title: Pending work\n  repos: frontend:*\n"
+        );
+    }
+
+    #[test]
+    fn render_list_cards_separates_items_with_blank_line() {
+        let items = vec![
+            list_workspace(
+                WorkspaceStatus::Pending,
+                "one",
+                "First",
+                "zootree/one",
+                "/tmp/one",
+                vec![repo("frontend", Some("main"))],
+            ),
+            list_workspace(
+                WorkspaceStatus::Pending,
+                "two",
+                "Second",
+                "zootree/two",
+                "/tmp/two",
+                vec![repo("backend", Some("develop"))],
+            ),
+        ];
+
+        let out = render_list_cards(&items);
+
+        assert_eq!(
+            out,
+            "one  [pending]  zootree/one\n  title: First\n  repos: frontend:main\n\ntwo  [pending]  zootree/two\n  title: Second\n  repos: backend:develop\n"
+        );
+    }
+
+    #[test]
+    fn render_list_cards_shows_none_when_repos_empty() {
+        let items = vec![list_workspace(
+            WorkspaceStatus::Done,
+            "empty-repos",
+            "No repos",
+            "zootree/empty-repos",
+            "/tmp/empty-repos",
+            Vec::new(),
+        )];
+
+        let out = render_list_cards(&items);
+
+        assert_eq!(
+            out,
+            "empty-repos  [done]  zootree/empty-repos\n  title: No repos\n  repos: (none)\n"
+        );
     }
 
     #[test]

@@ -158,8 +158,9 @@ zootree start [name]                 # Start a workspace
   --no-zellij                        # Don't launch Zellij
   --run-agent [alias|command]        # Launch a coding agent (see Configuration → Agent CLI)
 
-zootree list                         # List workspaces
+zootree list                         # List workspaces as compact cards
   --status pending|in-progress|done|canceled
+  --oneline                          # Use legacy one-line output for fzf/scripts
 
 zootree open [name]                  # Open an existing workspace
 
