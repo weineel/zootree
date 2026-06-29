@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+pub mod create_wizard;
 pub mod info;
 pub mod prompt;
 
@@ -53,15 +54,34 @@ pub fn run_app<A: App>(mut app: A) -> anyhow::Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
+    // Best-effort: enable kitty keyboard protocol so Shift+Enter is reported
+    // distinctly from Enter in fullscreen apps too.
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        ),
+    );
+
+    // Bracketed paste keeps multiline paste as one event. `main_loop` forwards
+    // paste events to apps that already understand `Event::Paste`.
+    let _ = execute!(stdout, EnableBracketedPaste);
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let loop_result = main_loop(&mut terminal, &mut app);
 
     // Always restore the terminal, even if the loop errored.
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+    );
     let _ = terminal.show_cursor();
+    let _ = disable_raw_mode();
 
     loop_result
 }
@@ -86,10 +106,8 @@ where
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
-            match event::read()? {
-                CtEvent::Key(k) => app.on_event(Event::Key(k))?,
-                CtEvent::Resize(w, h) => app.on_event(Event::Resize(w, h))?,
-                _ => {}
+            if let Some(event) = app_event_from_crossterm(event::read()?) {
+                app.on_event(event)?;
             }
         }
 
@@ -103,6 +121,15 @@ where
         if app.should_quit() {
             return Ok(());
         }
+    }
+}
+
+fn app_event_from_crossterm(event: CtEvent) -> Option<Event> {
+    match event {
+        CtEvent::Key(key) => Some(Event::Key(key)),
+        CtEvent::Resize(width, height) => Some(Event::Resize(width, height)),
+        CtEvent::Paste(text) => Some(Event::Paste(text)),
+        _ => None,
     }
 }
 
@@ -254,6 +281,19 @@ where
                 CtEvent::Paste(s) => app.on_event(Event::Paste(s))?,
                 _ => {}
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_event_from_crossterm_preserves_paste() {
+        match app_event_from_crossterm(CtEvent::Paste("line one\nline two".into())) {
+            Some(Event::Paste(text)) => assert_eq!(text, "line one\nline two"),
+            _ => panic!("expected paste event"),
         }
     }
 }

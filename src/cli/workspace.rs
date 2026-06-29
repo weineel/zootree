@@ -1,4 +1,8 @@
-use crate::config::global::{GlobalConfig, HooksConfig, ZellijConfig};
+use crate::cli::create_flow::{
+    create_args_need_wizard, draft_from_args, resolve_agent_cli_for_draft, workspace_from_draft,
+    AfterCreateMode, CreateDraftError, CreateWizardOutput,
+};
+use crate::config::global::{GlobalConfig, HooksConfig};
 use crate::config::repo::RepoConfig;
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
@@ -11,16 +15,20 @@ use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
 use crate::core::layout::{LayoutRenderer, LayoutVar};
-use crate::core::name_gen::NameGenerator;
 use crate::core::zellij::ZellijOps;
 use crate::runner::RealRunner;
 use crate::tui;
+use crate::tui_app::create_wizard::run_create_wizard;
 use anyhow::Result;
 use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::config::global::ZellijConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -80,6 +88,7 @@ pub fn build_repo_entries<R: crate::runner::CommandRunner>(
     Ok(entries)
 }
 
+#[cfg(test)]
 fn template_repos_to_entries_input(
     tmpl_name: &str,
     repos: Vec<String>,
@@ -205,131 +214,35 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     config_mgr.ensure_dirs()?;
     let global = config_mgr.load_global_config()?;
     let runner = RealRunner;
-    let git = GitOps::new(&runner);
-
-    let title = match &args.title {
-        Some(t) => t.clone(),
-        None => tui::input_required("Title")?,
-    };
-
-    let description = match &args.description {
-        Some(d) => d.clone(),
-        None => tui::input_optional("Description (optional)")?.unwrap_or_default(),
-    };
-
-    let repo_entries = if let Some(repos_str) = &args.repos {
-        build_repo_entries(&config_mgr, &runner, parse_repos_arg(repos_str))?
-    } else if let Some(tmpl_name) = &args.template {
-        let tmpl = config_mgr.load_template(tmpl_name)?;
-        let repos = template_repos_to_entries_input(tmpl_name, tmpl.repos)?;
-        build_repo_entries(&config_mgr, &runner, repos)?
-    } else {
-        let current_repo =
-            ensure_current_repo_registered(&config_mgr, &runner, &std::env::current_dir()?)?;
-        let all_repos = config_mgr.list_repos()?;
-        if all_repos.is_empty() {
-            anyhow::bail!("no repos registered. Use 'zootree repo add' first.");
-        }
-
-        let default_indices: Vec<usize> = current_repo
-            .as_ref()
-            .and_then(|repo| all_repos.iter().position(|name| name == &repo.name))
-            .into_iter()
-            .collect();
-        let selected = if default_indices.is_empty() {
-            tui::select_multi("Select repos", &all_repos)?
-        } else {
-            tui::select_multi_with_defaults("Select repos", &all_repos, &default_indices)?
-        };
-        if selected.is_empty() {
-            anyhow::bail!("at least one repo must be selected");
-        }
-
-        let mut entries = Vec::new();
-        for idx in selected {
-            let name = &all_repos[idx];
-            let repo_config = config_mgr.load_repo_config(name)?;
-
-            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-            let current = git
-                .current_branch(&repo_path)
-                .unwrap_or_else(|_| "main".into());
-            let current_repo_branch = current_repo
-                .as_ref()
-                .filter(|repo| repo.name == *name)
-                .map(|repo| repo.current_branch.clone());
-            let target_branch = if let Some(default) = current_repo_branch {
-                let input = tui::input_optional(&format!(
-                    "Target branch for {} (default: {})",
-                    name, default
-                ))?;
-                input.unwrap_or(default)
-            } else if let Some(default) = &repo_config.default_target_branch {
-                default.clone()
-            } else {
-                let input = tui::input_optional(&format!(
-                    "Target branch for {} (default: {})",
-                    name, current
-                ))?;
-                input.unwrap_or(current)
-            };
-
-            entries.push(RepoEntry {
-                name: name.clone(),
-                target_branch: Some(target_branch),
-            });
-        }
-        entries
-    };
-
-    let name_gen = NameGenerator::new();
     let existing: Vec<String> = config_mgr
         .list_workspaces(None::<&[WorkspaceStatus]>)?
         .iter()
         .map(|w| w.name.clone())
         .collect();
-    let name = match &args.name {
-        Some(n) => n.clone(),
-        None => name_gen.generate_avoiding(&existing),
+    let needs_wizard = create_args_need_wizard(args);
+    let needs_repo_selection = args.repos.is_none() && args.template.is_none();
+    let current_repo = if needs_wizard && needs_repo_selection {
+        ensure_current_repo_registered(&config_mgr, &runner, &std::env::current_dir()?)?
+            .map(|repo| (repo.name, repo.current_branch))
+    } else {
+        None
     };
-
-    let branch = match &args.branch {
-        Some(b) => b.clone(),
-        None => format!("{}/{}", global.branch_prefix, name),
+    let draft = draft_from_args(args, &config_mgr, &runner, &global, current_repo, &existing)?;
+    let output = if needs_wizard {
+        run_create_wizard(draft, global.clone(), existing.clone())?
+    } else {
+        let errors = draft.validate(&existing, &global);
+        if !errors.is_empty() {
+            anyhow::bail!("invalid create options: {}", format_draft_errors(&errors));
+        }
+        CreateWizardOutput { draft }
     };
-
-    let workspace_dir = format!("{}/{}", shellexpand::tilde(&global.workspace_root), name);
-
-    let now = Local::now().to_rfc3339();
-    let agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
-
-    let workspace = WorkspaceConfig {
-        title,
-        name: name.clone(),
-        description,
-        branch,
-        workspace_dir,
-        created_at: now.clone(),
-        agent_cli,
-        zellij: ZellijConfig {
-            session_mode: Some("standalone".into()),
-            ..Default::default()
-        },
-        repos: repo_entries,
-        events: vec![Event {
-            action: "created".into(),
-            timestamp: now,
-            detail: None,
-        }],
-    };
+    let agent_cli = resolve_agent_cli_for_draft(&output.draft.after_create, &global)?;
+    let workspace = workspace_from_draft(&output.draft, Local::now().to_rfc3339(), agent_cli);
+    let name = workspace.name.clone();
 
     config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace)?;
-
-    let recently = TemplateConfig {
-        repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-        zellij: workspace.zellij.clone(),
-    };
-    config_mgr.save_template("recently", &recently)?;
+    save_recently_template(&config_mgr, &workspace)?;
 
     println!("workspace '{}' created (pending)", name);
     println!("  branch: {}", workspace.branch);
@@ -343,12 +256,61 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
             .join(", ")
     );
 
-    let should_start = args.start || args.run_agent.is_some();
-    if should_start {
+    start_after_create_if_needed(&name, &output.draft.after_create)?;
+
+    Ok(())
+}
+
+fn format_draft_errors(errors: &[CreateDraftError]) -> String {
+    errors
+        .iter()
+        .map(|error| match error {
+            CreateDraftError::TitleRequired => "title is required".to_string(),
+            CreateDraftError::TitleSingleLineRequired => "title must be a single line".to_string(),
+            CreateDraftError::WorkspaceNameRequired => "workspace name is required".to_string(),
+            CreateDraftError::WorkspaceNameSingleLineRequired => {
+                "workspace name must be a single line".to_string()
+            }
+            CreateDraftError::WorkspaceBranchRequired => "workspace branch is required".to_string(),
+            CreateDraftError::WorkspaceBranchSingleLineRequired => {
+                "workspace branch must be a single line".to_string()
+            }
+            CreateDraftError::WorkspaceNameExists(name) => {
+                format!("workspace name '{}' already exists", name)
+            }
+            CreateDraftError::RepoRequired => "at least one repo must be selected".to_string(),
+            CreateDraftError::TargetBranchRequired(repo) => {
+                format!("target branch for repo '{}' is required", repo)
+            }
+            CreateDraftError::TargetBranchSingleLineRequired(repo) => {
+                format!("target branch for repo '{}' must be a single line", repo)
+            }
+            CreateDraftError::DefaultAgentMissing => {
+                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
+                    .to_string()
+            }
+            CreateDraftError::RunAgentSingleLineRequired => {
+                "run-agent must be a single line".to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn save_recently_template(config_mgr: &ConfigManager, workspace: &WorkspaceConfig) -> Result<()> {
+    let recently = TemplateConfig {
+        repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
+        zellij: workspace.zellij.clone(),
+    };
+    config_mgr.save_template("recently", &recently)
+}
+
+fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()> {
+    if mode.should_start() {
         let start_args = StartArgs {
-            name: Some(name.clone()),
+            name: Some(name.to_string()),
             no_zellij: false,
-            run_agent: args.run_agent.clone(),
+            run_agent: mode.run_agent_arg(),
         };
         handle_start(&start_args)?;
     }
