@@ -19,6 +19,7 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
             args: full_args.clone(),
             cwd: None,
             env: HashMap::new(),
+            env_remove: vec![],
         };
         let output = self.runner.run(&spec)?;
         if !output.status.success() {
@@ -63,6 +64,7 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
             ],
             cwd: None,
             env: HashMap::new(),
+            env_remove: vec![],
         };
         let output = self.runner.run(&spec)?;
         Ok(output.status.success())
@@ -142,6 +144,7 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
                         args,
                         cwd: None,
                         env: HashMap::new(),
+                        env_remove: vec![],
                     };
                     let output = self.runner.run(&spec)?;
                     !output.status.success()
@@ -178,6 +181,7 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
             ],
             cwd: None,
             env: HashMap::new(),
+            env_remove: vec![],
         };
         let output = self.runner.run(&spec)?;
         let stdout = String::from_utf8_lossy(&output.stdout);

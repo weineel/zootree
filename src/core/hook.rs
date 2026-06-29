@@ -62,6 +62,7 @@ impl<'a, R: CommandRunner> HookEngine<'a, R> {
             args,
             cwd,
             env: ctx.env_vars(),
+            env_remove: vec![],
         };
 
         let output = self.runner.run(&spec)?;

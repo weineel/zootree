@@ -455,6 +455,7 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
             &workspace,
             &runner,
             args.run_agent.clone(),
+            crate::core::zellij::is_inside_zellij(),
         )?;
     }
 
@@ -593,7 +594,14 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
         anyhow::bail!("workspace '{}' is not in_progress", name);
     }
 
-    launch_zellij(&config_mgr, &global, &workspace, &runner, None)?;
+    launch_zellij(
+        &config_mgr,
+        &global,
+        &workspace,
+        &runner,
+        None,
+        crate::core::zellij::is_inside_zellij(),
+    )?;
     Ok(())
 }
 
@@ -605,20 +613,54 @@ fn write_default_layout(base_dir: &Path) -> String {
     content
 }
 
+pub fn dispatch_launch<R: crate::runner::CommandRunner>(
+    zellij: &ZellijOps<'_, R>,
+    workspace_name: &str,
+    session_name: &str,
+    layout_file: &std::path::Path,
+    in_zellij: bool,
+) -> Result<()> {
+    let session_exists = zellij.session_exists(session_name)?;
+    let plan = crate::core::zellij::plan_launch(in_zellij, session_exists);
+
+    match plan {
+        crate::core::zellij::LaunchPlan::ForegroundCreate => {
+            zellij.start_session(session_name, layout_file)?;
+        }
+        crate::core::zellij::LaunchPlan::ForegroundAttach => {
+            zellij.attach_session(session_name)?;
+        }
+        crate::core::zellij::LaunchPlan::BackgroundCreate => {
+            zellij.start_session_background(session_name, layout_file)?;
+            println!(
+                "zellij session '{}' is running in background.",
+                session_name
+            );
+            println!(
+                "Run `zootree open {}` (outside zellij) to attach.",
+                workspace_name
+            );
+        }
+        crate::core::zellij::LaunchPlan::AlreadyRunningHint => {
+            println!("zellij session '{}' already exists.", session_name);
+            println!(
+                "Run `zootree open {}` (outside zellij) to attach.",
+                workspace_name
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn launch_zellij(
     config_mgr: &ConfigManager,
     global: &crate::config::global::GlobalConfig,
     workspace: &WorkspaceConfig,
     runner: &RealRunner,
     run_agent: Option<Option<String>>,
+    in_zellij: bool,
 ) -> Result<()> {
-    if std::env::var("ZELLIJ").is_ok() {
-        anyhow::bail!(
-            "already inside a zellij session (ZELLIJ is set); cannot start a new session. \
-             Use a regular terminal to run 'zootree start'"
-        );
-    }
-
     let zellij = ZellijOps::new(runner);
 
     let layout_name = workspace
@@ -722,14 +764,13 @@ fn launch_zellij(
         _ => format!("zootree-{}", workspace.name),
     };
 
-    match zellij.start_session(&session_name, &layout_file) {
-        Ok(()) => {}
-        Err(e) => {
-            tracing::warn!("start_session failed ({}), trying attach", e);
-            zellij.attach_session(&session_name)?;
-        }
-    }
-
+    dispatch_launch(
+        &zellij,
+        &workspace.name,
+        &session_name,
+        &layout_file,
+        in_zellij,
+    )?;
     Ok(())
 }
 

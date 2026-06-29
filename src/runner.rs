@@ -7,6 +7,7 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub env: HashMap<String, String>,
+    pub env_remove: Vec<String>,
 }
 
 pub trait CommandRunner {
@@ -27,6 +28,9 @@ impl CommandRunner for RealRunner {
         if let Some(cwd) = &spec.cwd {
             cmd.current_dir(cwd);
         }
+        for k in &spec.env_remove {
+            cmd.env_remove(k);
+        }
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
@@ -39,6 +43,9 @@ impl CommandRunner for RealRunner {
         cmd.args(&spec.args);
         if let Some(cwd) = &spec.cwd {
             cmd.current_dir(cwd);
+        }
+        for k in &spec.env_remove {
+            cmd.env_remove(k);
         }
         for (k, v) in &spec.env {
             cmd.env(k, v);
@@ -83,6 +90,7 @@ impl CommandRunner for MockRunner {
             args: spec.args.clone(),
             cwd: spec.cwd.clone(),
             env: spec.env.clone(),
+            env_remove: spec.env_remove.clone(),
         });
         let output = self.responses.borrow_mut().remove(0);
         Ok(output)
@@ -94,6 +102,7 @@ impl CommandRunner for MockRunner {
             args: spec.args.clone(),
             cwd: spec.cwd.clone(),
             env: spec.env.clone(),
+            env_remove: spec.env_remove.clone(),
         });
         let output = self.responses.borrow_mut().remove(0);
         Ok(output.status)
