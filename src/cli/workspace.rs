@@ -1,9 +1,9 @@
 use crate::cli::create_flow::{
-    create_args_need_wizard, draft_from_args, resolve_agent_cli_for_draft, workspace_from_draft,
+    create_args_need_wizard, discover_current_repo_candidate, draft_from_args,
+    persist_selected_pending_repos, resolve_agent_cli_for_draft, workspace_from_draft,
     AfterCreateMode, CreateDraftError, CreateWizardOutput,
 };
-use crate::config::global::{GlobalConfig, HooksConfig};
-use crate::config::repo::RepoConfig;
+use crate::config::global::GlobalConfig;
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
@@ -23,8 +23,7 @@ use anyhow::Result;
 use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -99,99 +98,10 @@ fn template_repos_to_entries_input(
     Ok(repos.into_iter().map(|name| (name, None)).collect())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CurrentRepoDefault {
-    name: String,
-    current_branch: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 struct ListWorkspaceItem {
     status: WorkspaceStatus,
     workspace: WorkspaceConfig,
-}
-
-fn canonical_or_original(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn repo_name_from_path(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "repo".into())
-}
-
-fn unique_repo_name(config_mgr: &ConfigManager, base: &str) -> Result<String> {
-    let existing: HashSet<String> = config_mgr.list_repos()?.into_iter().collect();
-    if !existing.contains(base) {
-        return Ok(base.to_string());
-    }
-
-    for i in 2.. {
-        let candidate = format!("{}-{}", base, i);
-        if !existing.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    unreachable!("unbounded repo name search should always return")
-}
-
-fn registered_repo_for_path(
-    config_mgr: &ConfigManager,
-    repo_root: &Path,
-) -> Result<Option<String>> {
-    let repo_root = canonical_or_original(repo_root);
-    for name in config_mgr.list_repos()? {
-        let config = config_mgr.load_repo_config(&name)?;
-        let expanded = shellexpand::tilde(&config.path).into_owned();
-        if canonical_or_original(Path::new(&expanded)) == repo_root {
-            return Ok(Some(name));
-        }
-    }
-    Ok(None)
-}
-
-fn ensure_current_repo_registered<R: crate::runner::CommandRunner>(
-    config_mgr: &ConfigManager,
-    runner: &R,
-    cwd: &Path,
-) -> Result<Option<CurrentRepoDefault>> {
-    let git = GitOps::new(runner);
-    let cwd = cwd.to_string_lossy().into_owned();
-    let root = match git.repo_root(&cwd) {
-        Ok(root) => PathBuf::from(root),
-        Err(_) => return Ok(None),
-    };
-    let root = canonical_or_original(&root);
-    let root_str = root.to_string_lossy().into_owned();
-    let current_branch = git
-        .current_branch(&root_str)
-        .unwrap_or_else(|_| "main".into());
-
-    let name = if let Some(name) = registered_repo_for_path(config_mgr, &root)? {
-        name
-    } else {
-        let base = repo_name_from_path(&root);
-        let name = unique_repo_name(config_mgr, &base)?;
-        let repo_config = RepoConfig {
-            path: root_str.clone(),
-            default_target_branch: None,
-            copy_files: Vec::new(),
-            hooks: HooksConfig::default(),
-            lazygit: None,
-            zellij: None,
-        };
-        config_mgr.save_repo_config(&name, &repo_config)?;
-        println!("repo '{}' registered at {}", name, root.display());
-        name
-    };
-
-    Ok(Some(CurrentRepoDefault {
-        name,
-        current_branch,
-    }))
 }
 
 fn selected_agent_cli_value(
@@ -222,13 +132,12 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     let needs_wizard = create_args_need_wizard(args);
     let needs_repo_selection = args.repos.is_none() && args.template.is_none();
     let current_repo = if needs_wizard && needs_repo_selection {
-        ensure_current_repo_registered(&config_mgr, &runner, &std::env::current_dir()?)?
-            .map(|repo| (repo.name, repo.current_branch))
+        discover_current_repo_candidate(&config_mgr, &runner, &std::env::current_dir()?)?
     } else {
         None
     };
     let draft = draft_from_args(args, &config_mgr, &runner, &global, current_repo, &existing)?;
-    let output = if needs_wizard {
+    let mut output = if needs_wizard {
         run_create_wizard(draft, global.clone(), existing.clone())?
     } else {
         let errors = draft.validate(&existing, &global);
@@ -237,6 +146,7 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
         }
         CreateWizardOutput { draft }
     };
+    persist_selected_pending_repos(&config_mgr, &mut output.draft)?;
     let agent_cli = resolve_agent_cli_for_draft(&output.draft.after_create, &global)?;
     let workspace = workspace_from_draft(&output.draft, Local::now().to_rfc3339(), agent_cli);
     let name = workspace.name.clone();
@@ -1265,21 +1175,11 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
 
     #[derive(Parser)]
     struct TestListCli {
         #[command(flatten)]
         args: ListArgs,
-    }
-
-    fn success_output(stdout: &str) -> Output {
-        Output {
-            status: ExitStatus::from_raw(0),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
-        }
     }
 
     fn list_workspace(
@@ -1538,100 +1438,5 @@ mod tests {
             "got: {}",
             msg
         );
-    }
-
-    #[test]
-    fn ensure_current_repo_registered_adds_unregistered_git_repo() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let repo_root = tmp.path().join("repo");
-        std::fs::create_dir(&repo_root).unwrap();
-
-        let runner = crate::runner::MockRunner::new();
-        runner.push_response(success_output(&format!("{}\n", repo_root.display())));
-        runner.push_response(success_output("feature/current\n"));
-
-        let current = ensure_current_repo_registered(&config_mgr, &runner, &repo_root)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(current.name, "repo");
-        assert_eq!(current.current_branch, "feature/current");
-        let config = config_mgr.load_repo_config("repo").unwrap();
-        assert_eq!(
-            PathBuf::from(config.path),
-            canonical_or_original(&repo_root)
-        );
-        assert!(config.default_target_branch.is_none());
-    }
-
-    #[test]
-    fn ensure_current_repo_registered_reuses_existing_repo_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let repo_root = tmp.path().join("repo");
-        std::fs::create_dir(&repo_root).unwrap();
-        config_mgr
-            .save_repo_config(
-                "custom",
-                &RepoConfig {
-                    path: repo_root.to_string_lossy().into_owned(),
-                    default_target_branch: Some("develop".into()),
-                    copy_files: Vec::new(),
-                    hooks: HooksConfig::default(),
-                    lazygit: None,
-                    zellij: None,
-                },
-            )
-            .unwrap();
-
-        let runner = crate::runner::MockRunner::new();
-        runner.push_response(success_output(&format!("{}\n", repo_root.display())));
-        runner.push_response(success_output("feature/current\n"));
-
-        let current = ensure_current_repo_registered(&config_mgr, &runner, &repo_root)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(current.name, "custom");
-        assert_eq!(config_mgr.list_repos().unwrap(), vec!["custom"]);
-    }
-
-    #[test]
-    fn ensure_current_repo_registered_avoids_name_collision() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let existing_root = tmp.path().join("existing-repo");
-        let repo_root = tmp.path().join("repo");
-        std::fs::create_dir(&existing_root).unwrap();
-        std::fs::create_dir(&repo_root).unwrap();
-        config_mgr
-            .save_repo_config(
-                "repo",
-                &RepoConfig {
-                    path: existing_root.to_string_lossy().into_owned(),
-                    default_target_branch: None,
-                    copy_files: Vec::new(),
-                    hooks: HooksConfig::default(),
-                    lazygit: None,
-                    zellij: None,
-                },
-            )
-            .unwrap();
-
-        let runner = crate::runner::MockRunner::new();
-        runner.push_response(success_output(&format!("{}\n", repo_root.display())));
-        runner.push_response(success_output("feature/current\n"));
-
-        let current = ensure_current_repo_registered(&config_mgr, &runner, &repo_root)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(current.name, "repo-2");
-        assert!(config_mgr.load_repo_config("repo").is_ok());
-        assert!(config_mgr.load_repo_config("repo-2").is_ok());
     }
 }

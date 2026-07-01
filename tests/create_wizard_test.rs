@@ -6,7 +6,8 @@ use zootree::cli::create_flow::{
 };
 use zootree::config::global::GlobalConfig;
 use zootree::tui_app::create_wizard::{
-    CreateStep, CreateWizardApp, CreateWizardOutcome, CreateWizardPage,
+    repo_list_label, review_repo_label, CreateStep, CreateWizardApp, CreateWizardOutcome,
+    CreateWizardPage,
 };
 use zootree::tui_app::{App, Event};
 
@@ -67,6 +68,28 @@ fn clear_text_field_for_test(app: &mut CreateWizardApp) {
         .unwrap();
     app.on_event(key_mod(KeyCode::Char('u'), KeyModifiers::CONTROL))
         .unwrap();
+}
+
+#[test]
+fn repo_list_label_marks_pending_registration() {
+    let repo =
+        RepoDraftEntry::pending_registration("zootree", "feature/current", true, "/repo/zootree");
+
+    assert_eq!(
+        repo_list_label(&repo, true, true),
+        "> [x] zootree (new, will register)"
+    );
+}
+
+#[test]
+fn review_repo_label_marks_pending_registration() {
+    let repo =
+        RepoDraftEntry::pending_registration("zootree", "feature/current", true, "/repo/zootree");
+
+    assert_eq!(
+        review_repo_label(&repo),
+        "- zootree (new, will register) -> feature/current"
+    );
 }
 
 #[test]

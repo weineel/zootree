@@ -1,11 +1,14 @@
 use crate::cli::workspace::CreateArgs;
-use crate::config::global::GlobalConfig;
 use crate::config::global::ZellijConfig;
+use crate::config::global::{GlobalConfig, HooksConfig};
+use crate::config::repo::RepoConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig};
 use crate::config::ConfigManager;
 use crate::core::git::GitOps;
 use crate::core::name_gen::NameGenerator;
 use crate::runner::CommandRunner;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AfterCreateMode {
@@ -44,10 +47,17 @@ pub enum CreateDraftError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoDraftSource {
+    Registered,
+    PendingRegistration { path: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoDraftEntry {
     pub name: String,
     pub target_branch: String,
     pub selected: bool,
+    pub source: RepoDraftSource,
 }
 
 impl RepoDraftEntry {
@@ -56,6 +66,33 @@ impl RepoDraftEntry {
             name: name.into(),
             target_branch: target_branch.into(),
             selected,
+            source: RepoDraftSource::Registered,
+        }
+    }
+
+    pub fn pending_registration(
+        name: impl Into<String>,
+        target_branch: impl Into<String>,
+        selected: bool,
+        path: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            target_branch: target_branch.into(),
+            selected,
+            source: RepoDraftSource::PendingRegistration { path: path.into() },
+        }
+    }
+
+    pub fn is_pending_registration(&self) -> bool {
+        matches!(self.source, RepoDraftSource::PendingRegistration { .. })
+    }
+
+    pub fn display_name(&self) -> String {
+        if self.is_pending_registration() {
+            format!("{} (new, will register)", self.name)
+        } else {
+            self.name.clone()
         }
     }
 }
@@ -163,6 +200,109 @@ pub struct CreateWizardOutput {
     pub draft: CreateDraft,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrentRepoCandidate {
+    Registered {
+        name: String,
+        current_branch: String,
+    },
+    PendingRegistration {
+        name: String,
+        path: String,
+        current_branch: String,
+    },
+}
+
+impl CurrentRepoCandidate {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Registered { name, .. } | Self::PendingRegistration { name, .. } => name,
+        }
+    }
+
+    pub fn current_branch(&self) -> &str {
+        match self {
+            Self::Registered { current_branch, .. }
+            | Self::PendingRegistration { current_branch, .. } => current_branch,
+        }
+    }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn repo_name_from_path(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "repo".into())
+}
+
+fn unique_repo_name(config_mgr: &ConfigManager, base: &str) -> anyhow::Result<String> {
+    let existing: HashSet<String> = config_mgr.list_repos()?.into_iter().collect();
+    if !existing.contains(base) {
+        return Ok(base.to_string());
+    }
+
+    for i in 2.. {
+        let candidate = format!("{}-{}", base, i);
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("unbounded repo name search should always return")
+}
+
+fn registered_repo_for_path(
+    config_mgr: &ConfigManager,
+    repo_root: &Path,
+) -> anyhow::Result<Option<String>> {
+    let repo_root = canonical_or_original(repo_root);
+    for name in config_mgr.list_repos()? {
+        let config = config_mgr.load_repo_config(&name)?;
+        let expanded = shellexpand::tilde(&config.path).into_owned();
+        if canonical_or_original(Path::new(&expanded)) == repo_root {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+pub fn discover_current_repo_candidate<R: CommandRunner>(
+    config_mgr: &ConfigManager,
+    runner: &R,
+    cwd: &Path,
+) -> anyhow::Result<Option<CurrentRepoCandidate>> {
+    let git = GitOps::new(runner);
+    let cwd = cwd.to_string_lossy().into_owned();
+    let root = match git.repo_root(&cwd) {
+        Ok(root) => PathBuf::from(root),
+        Err(_) => return Ok(None),
+    };
+    let root = canonical_or_original(&root);
+    let root_str = root.to_string_lossy().into_owned();
+    let current_branch = git
+        .current_branch(&root_str)
+        .unwrap_or_else(|_| "main".into());
+
+    if let Some(name) = registered_repo_for_path(config_mgr, &root)? {
+        return Ok(Some(CurrentRepoCandidate::Registered {
+            name,
+            current_branch,
+        }));
+    }
+
+    let base = repo_name_from_path(&root);
+    let name = unique_repo_name(config_mgr, &base)?;
+    Ok(Some(CurrentRepoCandidate::PendingRegistration {
+        name,
+        path: root_str,
+        current_branch,
+    }))
+}
+
 pub fn create_args_need_wizard(args: &CreateArgs) -> bool {
     args.title.is_none() || (args.repos.is_none() && args.template.is_none())
 }
@@ -172,7 +312,7 @@ pub fn draft_from_args<R: CommandRunner>(
     config_mgr: &ConfigManager,
     runner: &R,
     global: &GlobalConfig,
-    current_repo: Option<(String, String)>,
+    current_repo: Option<CurrentRepoCandidate>,
     existing_workspaces: &[String],
 ) -> anyhow::Result<CreateDraft> {
     let name = args.name.clone().unwrap_or_else(|| {
@@ -282,7 +422,7 @@ pub fn workspace_from_draft(
 pub fn build_repo_draft_entries<R: CommandRunner>(
     config_mgr: &ConfigManager,
     runner: &R,
-    current_repo: Option<(String, String)>,
+    current_repo: Option<CurrentRepoCandidate>,
 ) -> anyhow::Result<Vec<RepoDraftEntry>> {
     let git = GitOps::new(runner);
     let mut repos = Vec::new();
@@ -291,13 +431,13 @@ pub fn build_repo_draft_entries<R: CommandRunner>(
         let expanded_path = shellexpand::tilde(&config.path).into_owned();
         let is_current = current_repo
             .as_ref()
-            .map(|(current_name, _)| current_name == &name)
+            .map(|candidate| candidate.name() == name)
             .unwrap_or(false);
-        let target_branch = if let Some((_, branch)) = current_repo
-            .as_ref()
-            .filter(|(current_name, _)| current_name == &name)
-        {
-            branch.clone()
+        let target_branch = if is_current {
+            current_repo
+                .as_ref()
+                .map(|candidate| candidate.current_branch().to_string())
+                .unwrap_or_else(|| "main".into())
         } else if let Some(default) = config.default_target_branch {
             default
         } else {
@@ -306,6 +446,21 @@ pub fn build_repo_draft_entries<R: CommandRunner>(
         };
         repos.push(RepoDraftEntry::new(name, target_branch, is_current));
     }
+
+    if let Some(CurrentRepoCandidate::PendingRegistration {
+        name,
+        path,
+        current_branch,
+    }) = current_repo
+    {
+        repos.push(RepoDraftEntry::pending_registration(
+            name,
+            current_branch,
+            true,
+            path,
+        ));
+    }
+
     Ok(repos)
 }
 
@@ -332,6 +487,32 @@ fn build_requested_repo_draft_entries<R: CommandRunner>(
     }
 
     Ok(entries)
+}
+
+pub fn persist_selected_pending_repos(
+    config_mgr: &ConfigManager,
+    draft: &mut CreateDraft,
+) -> anyhow::Result<()> {
+    for repo in draft.repos.iter_mut().filter(|repo| repo.selected) {
+        let RepoDraftSource::PendingRegistration { path } = repo.source.clone() else {
+            continue;
+        };
+
+        let available_name = unique_repo_name(config_mgr, &repo.name)?;
+        repo.name = available_name;
+        let repo_config = RepoConfig {
+            path,
+            default_target_branch: None,
+            copy_files: Vec::new(),
+            hooks: HooksConfig::default(),
+            lazygit: None,
+            zellij: None,
+        };
+        config_mgr.save_repo_config(&repo.name, &repo_config)?;
+        repo.source = RepoDraftSource::Registered;
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

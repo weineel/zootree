@@ -2,9 +2,10 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
 use tempfile::TempDir;
 use zootree::cli::create_flow::{
-    build_repo_draft_entries, create_args_need_wizard, draft_from_args,
-    resolve_agent_cli_for_draft, workspace_from_draft, AfterCreateMode, CreateDraft,
-    CreateDraftError, CreateWizardLayout, CreateWizardOutput, RepoDraftEntry,
+    build_repo_draft_entries, create_args_need_wizard, discover_current_repo_candidate,
+    draft_from_args, persist_selected_pending_repos, resolve_agent_cli_for_draft,
+    workspace_from_draft, AfterCreateMode, CreateDraft, CreateDraftError, CreateWizardLayout,
+    CreateWizardOutput, CurrentRepoCandidate, RepoDraftEntry, RepoDraftSource,
 };
 use zootree::cli::workspace::CreateArgs;
 use zootree::config::global::GlobalConfig;
@@ -217,7 +218,10 @@ fn draft_from_args_explicit_repos_only_touches_requested_repos() {
         &mgr,
         &runner,
         &global,
-        Some(("broken".into(), "feature/current".into())),
+        Some(CurrentRepoCandidate::Registered {
+            name: "broken".into(),
+            current_branch: "feature/current".into(),
+        }),
         &[],
     )
     .unwrap();
@@ -255,7 +259,10 @@ fn draft_from_args_template_only_touches_template_repos() {
         &mgr,
         &runner,
         &global,
-        Some(("broken".into(), "feature/current".into())),
+        Some(CurrentRepoCandidate::Registered {
+            name: "broken".into(),
+            current_branch: "feature/current".into(),
+        }),
         &[],
     )
     .unwrap();
@@ -296,7 +303,10 @@ fn draft_from_args_missing_title_template_includes_all_repos_with_template_selec
         &mgr,
         &runner,
         &global,
-        Some(("backend".into(), "feature/current".into())),
+        Some(CurrentRepoCandidate::Registered {
+            name: "backend".into(),
+            current_branch: "feature/current".into(),
+        }),
         &[],
     )
     .unwrap();
@@ -413,7 +423,10 @@ fn repo_draft_prefers_current_repo_branch_over_config_default() {
     let repos = build_repo_draft_entries(
         &mgr,
         &runner,
-        Some(("frontend".to_string(), "feature/current".to_string())),
+        Some(CurrentRepoCandidate::Registered {
+            name: "frontend".to_string(),
+            current_branch: "feature/current".to_string(),
+        }),
     )
     .unwrap();
 
@@ -421,6 +434,192 @@ fn repo_draft_prefers_current_repo_branch_over_config_default() {
     assert!(frontend.selected);
     assert_eq!(frontend.target_branch, "feature/current");
     assert!(runner.take_calls().is_empty());
+}
+
+#[test]
+fn repo_draft_appends_pending_current_repo_selected_by_default() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config("backend", &repo_config("/repo/backend", Some("develop")))
+        .unwrap();
+    let runner = MockRunner::new();
+
+    let repos = build_repo_draft_entries(
+        &mgr,
+        &runner,
+        Some(CurrentRepoCandidate::PendingRegistration {
+            name: "zootree".into(),
+            path: "/repo/zootree".into(),
+            current_branch: "feature/current".into(),
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(repos.len(), 2);
+    assert_eq!(repos[0].name, "backend");
+    assert_eq!(repos[0].source, RepoDraftSource::Registered);
+    assert!(!repos[0].selected);
+    assert_eq!(repos[1].name, "zootree");
+    assert_eq!(
+        repos[1].source,
+        RepoDraftSource::PendingRegistration {
+            path: "/repo/zootree".into()
+        }
+    );
+    assert!(repos[1].selected);
+    assert_eq!(repos[1].target_branch, "feature/current");
+}
+
+#[test]
+fn draft_from_args_includes_pending_current_repo_for_interactive_repo_selection() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let runner = MockRunner::new();
+    let global = GlobalConfig::default();
+    let args = create_args_with(Some("auth cleanup"), None, None);
+
+    let draft = draft_from_args(
+        &args,
+        &mgr,
+        &runner,
+        &global,
+        Some(CurrentRepoCandidate::PendingRegistration {
+            name: "zootree".into(),
+            path: "/repo/zootree".into(),
+            current_branch: "feature/current".into(),
+        }),
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(draft.repos.len(), 1);
+    assert_eq!(draft.repos[0].name, "zootree");
+    assert!(draft.repos[0].selected);
+    assert!(draft.repos[0].is_pending_registration());
+}
+
+#[test]
+fn repo_draft_entry_new_defaults_to_registered_source() {
+    let entry = RepoDraftEntry::new("frontend", "main", true);
+
+    assert_eq!(entry.source, RepoDraftSource::Registered);
+}
+
+#[test]
+fn pending_repo_draft_entry_records_path_and_label() {
+    let entry =
+        RepoDraftEntry::pending_registration("zootree", "feature/current", true, "/repo/zootree");
+
+    assert_eq!(entry.name, "zootree");
+    assert_eq!(entry.target_branch, "feature/current");
+    assert!(entry.selected);
+    assert_eq!(
+        entry.source,
+        RepoDraftSource::PendingRegistration {
+            path: "/repo/zootree".into()
+        }
+    );
+    assert!(entry.is_pending_registration());
+    assert_eq!(entry.display_name(), "zootree (new, will register)");
+}
+
+#[test]
+fn discover_current_repo_candidate_returns_pending_without_writing_config() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
+    mgr.ensure_dirs().unwrap();
+    let repo_root = tmp.path().join("zootree");
+    std::fs::create_dir(&repo_root).unwrap();
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout(&format!("{}\n", repo_root.display())));
+    runner.push_response(success_stdout("feature/current\n"));
+
+    let candidate = discover_current_repo_candidate(&mgr, &runner, &repo_root)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        candidate,
+        CurrentRepoCandidate::PendingRegistration {
+            name: "zootree".into(),
+            path: repo_root
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            current_branch: "feature/current".into(),
+        }
+    );
+    assert!(mgr.list_repos().unwrap().is_empty());
+}
+
+#[test]
+fn discover_current_repo_candidate_reuses_registered_repo_for_same_path() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
+    mgr.ensure_dirs().unwrap();
+    let repo_root = tmp.path().join("zootree");
+    std::fs::create_dir(&repo_root).unwrap();
+    mgr.save_repo_config(
+        "custom",
+        &repo_config(&repo_root.to_string_lossy(), Some("develop")),
+    )
+    .unwrap();
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout(&format!("{}\n", repo_root.display())));
+    runner.push_response(success_stdout("feature/current\n"));
+
+    let candidate = discover_current_repo_candidate(&mgr, &runner, &repo_root)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        candidate,
+        CurrentRepoCandidate::Registered {
+            name: "custom".into(),
+            current_branch: "feature/current".into(),
+        }
+    );
+    assert_eq!(mgr.list_repos().unwrap(), vec!["custom"]);
+}
+
+#[test]
+fn discover_current_repo_candidate_uses_collision_safe_pending_name() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
+    mgr.ensure_dirs().unwrap();
+    let existing_root = tmp.path().join("existing");
+    let repo_root = tmp.path().join("zootree");
+    std::fs::create_dir(&existing_root).unwrap();
+    std::fs::create_dir(&repo_root).unwrap();
+    mgr.save_repo_config(
+        "zootree",
+        &repo_config(&existing_root.to_string_lossy(), None),
+    )
+    .unwrap();
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout(&format!("{}\n", repo_root.display())));
+    runner.push_response(success_stdout("feature/current\n"));
+
+    let candidate = discover_current_repo_candidate(&mgr, &runner, &repo_root)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        candidate,
+        CurrentRepoCandidate::PendingRegistration {
+            name: "zootree-2".into(),
+            path: repo_root
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            current_branch: "feature/current".into(),
+        }
+    );
+    assert_eq!(mgr.list_repos().unwrap(), vec!["zootree"]);
 }
 
 #[test]
@@ -606,4 +805,78 @@ fn workspace_from_draft_matches_existing_create_shape() {
     assert_eq!(workspace.repos[0].name, "frontend");
     assert_eq!(workspace.repos[0].target_branch.as_deref(), Some("main"));
     assert_eq!(workspace.events[0].action, "created");
+}
+
+#[test]
+fn persist_selected_pending_repos_writes_selected_repo_config() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let global = GlobalConfig::default();
+    let mut draft = CreateDraft::new("auth cleanup", "open-reef", &global);
+    draft.repos = vec![RepoDraftEntry::pending_registration(
+        "zootree",
+        "feature/current",
+        true,
+        "/repo/zootree",
+    )];
+
+    persist_selected_pending_repos(&mgr, &mut draft).unwrap();
+
+    let config = mgr.load_repo_config("zootree").unwrap();
+    assert_eq!(config.path, "/repo/zootree");
+    assert!(config.default_target_branch.is_none());
+    assert!(config.copy_files.is_empty());
+    assert!(config.lazygit.is_none());
+    assert!(config.zellij.is_none());
+    assert_eq!(draft.repos[0].source, RepoDraftSource::Registered);
+}
+
+#[test]
+fn persist_selected_pending_repos_ignores_deselected_pending_repo() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let global = GlobalConfig::default();
+    let mut draft = CreateDraft::new("auth cleanup", "open-reef", &global);
+    draft.repos = vec![RepoDraftEntry::pending_registration(
+        "zootree",
+        "feature/current",
+        false,
+        "/repo/zootree",
+    )];
+
+    persist_selected_pending_repos(&mgr, &mut draft).unwrap();
+
+    assert!(mgr.list_repos().unwrap().is_empty());
+    assert!(draft.repos[0].is_pending_registration());
+    let workspace = workspace_from_draft(&draft, "2026-06-29T10:00:00+08:00", None);
+    assert!(workspace.repos.is_empty());
+}
+
+#[test]
+fn persist_selected_pending_repos_resolves_submit_time_name_collision() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config("zootree", &repo_config("/repo/other", None))
+        .unwrap();
+    let global = GlobalConfig::default();
+    let mut draft = CreateDraft::new("auth cleanup", "open-reef", &global);
+    draft.repos = vec![RepoDraftEntry::pending_registration(
+        "zootree",
+        "feature/current",
+        true,
+        "/repo/zootree",
+    )];
+
+    persist_selected_pending_repos(&mgr, &mut draft).unwrap();
+
+    assert_eq!(draft.repos[0].name, "zootree-2");
+    assert_eq!(draft.repos[0].source, RepoDraftSource::Registered);
+    assert!(mgr.load_repo_config("zootree").is_ok());
+    let new_config = mgr.load_repo_config("zootree-2").unwrap();
+    assert_eq!(new_config.path, "/repo/zootree");
+    let workspace = workspace_from_draft(&draft, "2026-06-29T10:00:00+08:00", None);
+    assert_eq!(workspace.repos[0].name, "zootree-2");
 }

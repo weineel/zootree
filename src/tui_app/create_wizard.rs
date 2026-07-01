@@ -59,6 +59,20 @@ pub enum CreateWizardOutcome {
     Cancelled,
 }
 
+pub fn repo_list_label(
+    repo: &crate::cli::create_flow::RepoDraftEntry,
+    selected: bool,
+    focused: bool,
+) -> String {
+    let cursor = if focused { ">" } else { " " };
+    let selected = if selected { "[x]" } else { "[ ]" };
+    format!("{cursor} {selected} {}", repo.display_name())
+}
+
+pub fn review_repo_label(repo: &crate::cli::create_flow::RepoDraftEntry) -> String {
+    format!("- {} -> {}", repo.display_name(), repo.target_branch)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WizardTextKind {
     SingleLine,
@@ -945,13 +959,11 @@ impl CreateWizardApp {
                 .take(repo_capacity)
             {
                 let repo = &self.draft.repos[raw_idx];
-                let cursor = if visible_idx == self.repo_cursor {
-                    ">"
-                } else {
-                    " "
-                };
-                let selected = if repo.selected { "[x]" } else { "[ ]" };
-                lines.push(Line::from(format!("{cursor} {selected} {}", repo.name)));
+                lines.push(Line::from(repo_list_label(
+                    repo,
+                    repo.selected,
+                    visible_idx == self.repo_cursor,
+                )));
             }
         }
         lines.extend(error_lines);
@@ -979,13 +991,11 @@ impl CreateWizardApp {
                 .enumerate()
                 .map(|(visible_idx, raw_idx)| {
                     let repo = &self.draft.repos[raw_idx];
-                    let cursor = if visible_idx == self.repo_cursor {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    let selected = if repo.selected { "[x]" } else { "[ ]" };
-                    Line::from(format!("{cursor} {selected} {}", repo.name))
+                    Line::from(repo_list_label(
+                        repo,
+                        repo.selected,
+                        visible_idx == self.repo_cursor,
+                    ))
                 })
                 .fold(
                     vec![
@@ -1039,10 +1049,7 @@ impl CreateWizardApp {
                 lines.push(Line::from(""));
                 lines.push(Line::from("Selected repos:"));
                 for repo in self.draft.selected_repos() {
-                    lines.push(Line::from(format!(
-                        "- {} -> {}",
-                        repo.name, repo.target_branch
-                    )));
+                    lines.push(Line::from(review_repo_label(repo)));
                 }
                 lines
             }
