@@ -170,7 +170,7 @@ zootree done [name]                  # Finish a workspace
   --push                             # Push branches
   --force                            # Force execution
 
-zootree cancel [name]                # Cancel a workspace
+zootree cancel [name]                # Cancel an active workspace (pending or in-progress)
   --no-clean                         # Skip cleanup
   --force                            # Force execution
 ```

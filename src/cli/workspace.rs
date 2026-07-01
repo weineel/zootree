@@ -568,6 +568,33 @@ fn render_list_cards(items: &[ListWorkspaceItem]) -> String {
     out
 }
 
+const CANCELABLE_STATUSES: &[WorkspaceStatus] =
+    &[WorkspaceStatus::Pending, WorkspaceStatus::InProgress];
+
+fn cancel_candidate_statuses() -> &'static [WorkspaceStatus] {
+    CANCELABLE_STATUSES
+}
+
+fn is_cancelable_status(status: &WorkspaceStatus) -> bool {
+    CANCELABLE_STATUSES.contains(status)
+}
+
+fn archive_canceled_workspace(
+    config_mgr: &ConfigManager,
+    from_status: &WorkspaceStatus,
+    workspace: &mut WorkspaceConfig,
+) -> Result<()> {
+    let now = Local::now().to_rfc3339();
+    workspace.events.push(Event {
+        action: "canceled".into(),
+        timestamp: now,
+        detail: None,
+    });
+    config_mgr.save_workspace(from_status, workspace)?;
+    config_mgr.move_workspace(&workspace.name, from_status, &WorkspaceStatus::Canceled)?;
+    Ok(())
+}
+
 pub fn handle_open(args: &OpenArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     let global = config_mgr.load_global_config()?;
@@ -1107,22 +1134,28 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            let in_progress = config_mgr.list_workspaces(Some(&[WorkspaceStatus::InProgress]))?;
-            if in_progress.is_empty() {
-                anyhow::bail!("no in_progress workspaces");
+            let active = config_mgr.list_workspaces(Some(cancel_candidate_statuses()))?;
+            if active.is_empty() {
+                anyhow::bail!("no active workspaces");
             }
-            let names: Vec<String> = in_progress
+            let names: Vec<String> = active
                 .iter()
                 .map(|w| format!("{} - {}", w.name, w.title))
                 .collect();
             let idx = tui::select_one("Select workspace to cancel", &names)?;
-            in_progress[idx].name.clone()
+            active[idx].name.clone()
         }
     };
 
     let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !matches!(status, WorkspaceStatus::InProgress) {
-        anyhow::bail!("workspace '{}' is not in_progress", name);
+    if !is_cancelable_status(&status) {
+        anyhow::bail!("workspace '{}' is not active", name);
+    }
+
+    if matches!(status, WorkspaceStatus::Pending) {
+        archive_canceled_workspace(&config_mgr, &status, &mut workspace)?;
+        println!("workspace '{}' canceled", name);
+        return Ok(());
     }
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
@@ -1211,18 +1244,7 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     }
 
     // Archive
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "canceled".into(),
-        timestamp: now,
-        detail: None,
-    });
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
-    config_mgr.move_workspace(
-        &name,
-        &WorkspaceStatus::InProgress,
-        &WorkspaceStatus::Canceled,
-    )?;
+    archive_canceled_workspace(&config_mgr, &status, &mut workspace)?;
 
     // Kill zellij session
     let session_name = match workspace.zellij.session_mode.as_deref() {
@@ -1414,6 +1436,76 @@ mod tests {
             out,
             "empty-repos  [done]  zootree/empty-repos\n  title: No repos\n  repos: (none)\n"
         );
+    }
+
+    #[test]
+    fn cancel_candidate_statuses_are_pending_and_in_progress() {
+        assert_eq!(
+            cancel_candidate_statuses(),
+            &[WorkspaceStatus::Pending, WorkspaceStatus::InProgress]
+        );
+    }
+
+    #[test]
+    fn is_cancelable_status_accepts_only_active_statuses() {
+        assert!(is_cancelable_status(&WorkspaceStatus::Pending));
+        assert!(is_cancelable_status(&WorkspaceStatus::InProgress));
+        assert!(!is_cancelable_status(&WorkspaceStatus::Done));
+        assert!(!is_cancelable_status(&WorkspaceStatus::Canceled));
+    }
+
+    fn test_workspace(name: &str) -> WorkspaceConfig {
+        WorkspaceConfig {
+            title: format!("{} title", name),
+            name: name.into(),
+            description: String::new(),
+            branch: format!("zootree/{}", name),
+            workspace_dir: format!("/tmp/{}", name),
+            created_at: "2026-06-29T10:00:00+08:00".into(),
+            agent_cli: None,
+            zellij: ZellijConfig::default(),
+            repos: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn archive_canceled_workspace_moves_pending_to_canceled_with_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
+        config_mgr.ensure_dirs().unwrap();
+        let mut workspace = test_workspace("pending-cancel");
+        config_mgr
+            .save_workspace(&WorkspaceStatus::Pending, &workspace)
+            .unwrap();
+
+        archive_canceled_workspace(&config_mgr, &WorkspaceStatus::Pending, &mut workspace).unwrap();
+
+        assert!(!config_mgr
+            .base_dir
+            .join("workspaces/pending/pending-cancel.toml")
+            .exists());
+        assert!(config_mgr
+            .base_dir
+            .join("workspaces/archived/canceled/pending-cancel.toml")
+            .exists());
+        let (status, archived) = config_mgr.load_workspace("pending-cancel").unwrap();
+        assert_eq!(status, WorkspaceStatus::Canceled);
+        assert_eq!(
+            archived.events.last().map(|event| event.action.as_str()),
+            Some("canceled")
+        );
+    }
+
+    #[test]
+    fn terminal_statuses_are_rejected_before_cancel_archive() {
+        for status in [WorkspaceStatus::Done, WorkspaceStatus::Canceled] {
+            assert!(
+                !is_cancelable_status(&status),
+                "terminal status should not be cancelable: {:?}",
+                status
+            );
+        }
     }
 
     #[test]

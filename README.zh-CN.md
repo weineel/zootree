@@ -167,7 +167,7 @@ zootree done [name]                  # 完成工作空间
   --push                             # 推送
   --force                            # 强制执行
 
-zootree cancel [name]                # 取消工作空间
+zootree cancel [name]                # 取消 active 工作空间（pending 或 in-progress）
   --no-clean                         # 不清理
   --force                            # 强制执行
 ```
