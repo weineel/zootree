@@ -10,6 +10,8 @@ on:
 jobs:
   publish-crates:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
