@@ -327,3 +327,23 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 - Git
 - Zellij
 - LazyGit (可选)
+
+## 发布
+
+发布由本地 `cargo-release` 命令触发。本地命令会更新 `Cargo.toml`
+版本号、创建 release commit、创建 `vX.Y.Z` tag，并把 commit 和 tag 推送到
+远端。tag 推上去之后，会触发由 `cargo-dist` 生成的 GitHub Actions release
+pipeline。
+
+发布 patch 版本时执行：
+
+```bash
+cargo release patch --execute
+```
+
+如果要发布 minor 或 major 版本，使用同样流程：
+
+```bash
+cargo release minor --execute
+cargo release major --execute
+```
