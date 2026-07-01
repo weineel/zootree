@@ -19,3 +19,4 @@ install-updater = false
 tap = "weineel/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew", "./publish-crates"]
+github-custom-job-permissions = { "publish-crates" = { contents = "read", id-token = "write", packages = "write" } }
