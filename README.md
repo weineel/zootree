@@ -61,7 +61,7 @@ Restart your shell (or `source` the rc file) to activate.
 - `zootree start <TAB>` — pending workspaces
 - `zootree open <TAB>` / `zootree done <TAB>` — in-progress workspaces
 - `zootree cancel <TAB>` — pending or in-progress workspaces
-- `zootree repo edit <TAB>` / `zootree repo remove <TAB>` — registered repos
+- `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — registered repos
 - `zootree template save --from <TAB>` — any workspace
 - `zootree create --template <TAB>` — saved templates
 - `zootree create --repos <TAB>` — registered repos (comma-separated)
@@ -141,7 +141,7 @@ zootree done --push
 ```bash
 zootree repo add <path>              # Add a repository
 zootree repo list                    # List repositories
-zootree repo remove <name>           # Remove a repository
+zootree repo remove|delete <name>    # Remove a repository
 ```
 
 ### Workspaces

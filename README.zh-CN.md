@@ -59,7 +59,7 @@ zootree 支持 5 种 shell 的补全：bash、zsh、fish、PowerShell、elvish�
 - `zootree start <TAB>` — pending 状态的 workspace
 - `zootree open <TAB>` / `zootree done <TAB>` — in-progress 状态的 workspace
 - `zootree cancel <TAB>` — pending 或 in-progress 状态的 workspace
-- `zootree repo edit <TAB>` / `zootree repo remove <TAB>` — 已注册的 repo
+- `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — 已注册的 repo
 - `zootree template save --from <TAB>` — 任意 workspace
 - `zootree create --template <TAB>` — 已保存的 template
 - `zootree create --repos <TAB>` — 已注册的 repo（逗号分隔列表）
@@ -138,7 +138,7 @@ zootree done --push
 ```bash
 zootree repo add <path>              # 添加仓库
 zootree repo list                    # 列出仓库
-zootree repo remove <name>           # 移除仓库
+zootree repo remove|delete <name>    # 移除仓库
 ```
 
 ### 工作空间

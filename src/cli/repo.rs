@@ -34,7 +34,7 @@ pub enum RepoCommands {
         )]
         name: Option<String>,
     },
-    #[command(about = "Unregister a repository")]
+    #[command(about = "Unregister a repository", visible_alias = "delete")]
     Remove {
         #[arg(
             help = "Name of the repo to remove (interactive if omitted)",
