@@ -30,6 +30,15 @@ fn draft() -> CreateDraft {
     draft
 }
 
+fn long_description_draft() -> CreateDraft {
+    let mut draft = draft();
+    draft.description = (0..30)
+        .map(|idx| format!("desc-line-{idx:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    draft
+}
+
 fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
     let mut out = String::new();
     for y in 0..buf.area.height {
@@ -48,6 +57,18 @@ fn render_to_string(app: &mut CreateWizardApp, width: u16, height: u16) -> Strin
         .draw(|frame| <CreateWizardApp as App>::render(app, frame))
         .unwrap();
     buffer_to_string(terminal.backend().buffer())
+}
+
+fn render_columns(out: &str, start: usize, end: usize) -> String {
+    out.lines()
+        .map(|line| {
+            line.chars()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn jump_to_page(app: &mut CreateWizardApp, page: CreateWizardPage) {
@@ -1255,7 +1276,7 @@ fn low_height_text_page_keeps_errors_visible_before_context() {
 }
 
 #[test]
-fn review_help_does_not_advertise_missing_movement() {
+fn review_help_advertises_review_and_draft_scroll() {
     let global = GlobalConfig::default();
     let mut app = CreateWizardApp::new(draft(), global, Vec::new());
     app.set_step(CreateStep::Review);
@@ -1264,8 +1285,12 @@ fn review_help_does_not_advertise_missing_movement() {
 
     assert!(out.contains("enter submit"), "missing review help:\n{out}");
     assert!(
-        !out.contains("j/k move") && !out.contains("up/down"),
-        "stale review movement help:\n{out}"
+        out.contains("review: up/down/j/k/pg/home/end"),
+        "missing review scroll help:\n{out}"
+    );
+    assert!(
+        out.contains("draft: alt+same"),
+        "missing draft scroll help:\n{out}"
     );
 }
 
@@ -1450,6 +1475,119 @@ fn after_create_step_defers_default_agent_missing_to_run_agent_page() {
     assert!(!app
         .errors()
         .contains(&CreateDraftError::DefaultAgentMissing));
+}
+
+#[test]
+fn review_end_scrolls_long_review_content_into_view() {
+    let global = GlobalConfig::default();
+    let mut app = CreateWizardApp::new(long_description_draft(), global, Vec::new());
+    app.set_step(CreateStep::Review);
+
+    let before = render_to_string(&mut app, 120, 12);
+    let before_review = render_columns(&before, 0, 74);
+    assert!(
+        !before_review.contains("desc-line-29"),
+        "last description line should start below the review viewport:\n{before}"
+    );
+
+    app.on_event(key(KeyCode::End)).unwrap();
+
+    let after = render_to_string(&mut app, 120, 12);
+    let after_review = render_columns(&after, 0, 74);
+    assert!(
+        after_review.contains("desc-line-29"),
+        "End should reveal the last description line in review content:\n{after}"
+    );
+}
+
+#[test]
+fn review_page_down_scrolls_review_without_submitting() {
+    let global = GlobalConfig::default();
+    let mut app = CreateWizardApp::new(long_description_draft(), global, Vec::new());
+    app.set_step(CreateStep::Review);
+
+    let before = render_to_string(&mut app, 120, 12);
+    let before_review = render_columns(&before, 0, 74);
+    assert!(
+        !before_review.contains("desc-line-08"),
+        "mid description line should start below the review viewport:\n{before}"
+    );
+
+    app.on_event(key(KeyCode::PageDown)).unwrap();
+
+    assert_eq!(app.step(), CreateStep::Review);
+    assert!(!app.should_quit());
+    assert_eq!(app.outcome(), None);
+
+    let after = render_to_string(&mut app, 120, 12);
+    let after_review = render_columns(&after, 0, 74);
+    assert!(
+        after_review.contains("desc-line-08"),
+        "PageDown should reveal later review content without submitting:\n{after}"
+    );
+
+    app.on_event(key(KeyCode::Enter)).unwrap();
+
+    assert!(app.should_quit());
+    match app.outcome() {
+        Some(CreateWizardOutcome::Submit(output)) => {
+            assert_eq!(output.draft.title, "auth cleanup");
+        }
+        other => panic!("expected submitted output after Enter, got {:?}", other),
+    }
+}
+
+#[test]
+fn alt_end_scrolls_long_draft_summary_into_view() {
+    let global = GlobalConfig::default();
+    let mut app = CreateWizardApp::new(long_description_draft(), global, Vec::new());
+    app.set_step(CreateStep::Review);
+
+    let before = render_to_string(&mut app, 120, 12);
+    let before_draft = render_columns(&before, 74, 120);
+    assert!(
+        !before_draft.contains("desc-line-29"),
+        "last description line should start below the draft viewport:\n{before}"
+    );
+
+    app.on_event(key_mod(KeyCode::End, KeyModifiers::ALT))
+        .unwrap();
+
+    let after = render_to_string(&mut app, 120, 12);
+    let after_draft = render_columns(&after, 74, 120);
+    assert!(
+        after_draft.contains("desc-line-29"),
+        "Alt+End should reveal the last description line in the draft summary:\n{after}"
+    );
+}
+
+#[test]
+fn alt_down_scrolls_draft_summary_without_scrolling_review() {
+    let global = GlobalConfig::default();
+    let mut app = CreateWizardApp::new(long_description_draft(), global, Vec::new());
+    app.set_step(CreateStep::Review);
+
+    let before = render_to_string(&mut app, 120, 12);
+    let before_draft = render_columns(&before, 74, 120);
+    assert!(
+        !before_draft.contains("desc-line-07"),
+        "mid description line should start below the draft viewport:\n{before}"
+    );
+
+    app.on_event(key_mod(KeyCode::Down, KeyModifiers::ALT))
+        .unwrap();
+
+    let after = render_to_string(&mut app, 120, 12);
+    let after_review = render_columns(&after, 0, 74);
+    let after_draft = render_columns(&after, 74, 120);
+    assert!(
+        after_draft.contains("desc-line-07"),
+        "Alt+Down should reveal later draft summary content:\n{after}"
+    );
+    assert!(
+        !after_review.contains("desc-line-07"),
+        "Alt+Down should not scroll review content:\n{after}"
+    );
 }
 
 #[test]
