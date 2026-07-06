@@ -1,6 +1,6 @@
 [package]
 name = "zootree"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 description = "A multi-repo workspace management tool with worktree, zellij, and lazygit integration"
 license = "MIT"
