@@ -9,6 +9,8 @@ use crate::config::global::GlobalConfig;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{complete_workspace, WorkspaceFilter};
+use crate::core::repo_status::missing_registered_repo_names;
+use crate::core::worktree_status::repo_worktree_statuses;
 use crate::tui;
 use crate::tui_app::info::{format_rfc3339_to_minute, last_n, status_label};
 
@@ -67,7 +69,11 @@ pub fn handle_info(args: &InfoArgs) -> Result<()> {
     }
 
     let global = config_mgr.load_global_config().unwrap_or_default();
-    print!("{}", render_once(&status, &workspace, &global));
+    let missing_repos = missing_registered_repo_names(&config_mgr, &workspace.repos);
+    print!(
+        "{}",
+        render_once_with_missing_repos(&status, &workspace, &global, &missing_repos)
+    );
     Ok(())
 }
 
@@ -77,6 +83,15 @@ pub fn render_once(
     status: &WorkspaceStatus,
     ws: &WorkspaceConfig,
     global: &GlobalConfig,
+) -> String {
+    render_once_with_missing_repos(status, ws, global, &[])
+}
+
+pub fn render_once_with_missing_repos(
+    status: &WorkspaceStatus,
+    ws: &WorkspaceConfig,
+    global: &GlobalConfig,
+    missing_repos: &[String],
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Workspace: {} ({})", ws.title, ws.name);
@@ -125,9 +140,31 @@ pub fn render_once(
     if ws.repos.is_empty() {
         let _ = writeln!(out, "  (none)");
     } else {
+        let worktrees = if matches!(status, WorkspaceStatus::InProgress) {
+            let ws_dir = shellexpand::tilde(&ws.workspace_dir).into_owned();
+            repo_worktree_statuses(ws, &ws_dir)
+        } else {
+            Vec::new()
+        };
+
         for r in &ws.repos {
             let target = r.target_branch.as_deref().unwrap_or("*");
-            let _ = writeln!(out, "  - {:<15} -> {}", r.name, target);
+            let repo_missing = missing_repos.contains(&r.name);
+            if let Some(worktree) = worktrees.iter().find(|status| status.repo_name == r.name) {
+                let missing = if worktree.exists && !repo_missing {
+                    ""
+                } else {
+                    " (missing)"
+                };
+                let _ = writeln!(
+                    out,
+                    "  - {:<15} -> {}  {}{}",
+                    r.name, target, worktree.worktree_path, missing
+                );
+            } else {
+                let missing = if repo_missing { " (missing)" } else { "" };
+                let _ = writeln!(out, "  - {:<15} -> {}{}", r.name, target, missing);
+            }
         }
     }
     if !ws.events.is_empty() {

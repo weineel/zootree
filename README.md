@@ -103,6 +103,10 @@ zootree repo add ~/projects/myrepo
 zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
 ```
 
+If the derived or explicit repo name already exists, `repo add` keeps the
+existing repo config and registers the new repo with the next available suffix
+such as `myrepo-2`, `myrepo-3`, and so on.
+
 ### 3. Create a workspace
 
 ```bash

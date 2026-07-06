@@ -1,4 +1,4 @@
-use zootree::cli::info::render_once;
+use zootree::cli::info::{render_once, render_once_with_missing_repos};
 use zootree::config::global::{GlobalConfig, ZellijConfig};
 use zootree::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 
@@ -271,4 +271,73 @@ fn render_once_omits_alias_section_on_parse_error() {
         "should not show Alias section on parse error:\n{}",
         out
     );
+}
+
+#[test]
+fn render_once_marks_missing_in_progress_repo_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("frontend")).unwrap();
+    let mut ws = base_ws();
+    ws.workspace_dir = tmp.path().to_string_lossy().into_owned();
+    ws.repos = vec![
+        RepoEntry {
+            name: "frontend".into(),
+            target_branch: Some("main".into()),
+        },
+        RepoEntry {
+            name: "backend".into(),
+            target_branch: Some("main".into()),
+        },
+    ];
+
+    let out = render_once(&WorkspaceStatus::InProgress, &ws, &GlobalConfig::default());
+
+    assert!(out.contains("frontend"), "{out}");
+    assert!(
+        out.contains(&format!("{}/frontend", ws.workspace_dir)),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{}/backend (missing)", ws.workspace_dir)),
+        "{out}"
+    );
+}
+
+#[test]
+fn render_once_marks_missing_registered_repo_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("zootree-2")).unwrap();
+    let mut ws = base_ws();
+    ws.workspace_dir = tmp.path().to_string_lossy().into_owned();
+    ws.repos = vec![RepoEntry {
+        name: "zootree-2".into(),
+        target_branch: Some("zootree/safe-fire".into()),
+    }];
+
+    let out = render_once_with_missing_repos(
+        &WorkspaceStatus::InProgress,
+        &ws,
+        &GlobalConfig::default(),
+        &["zootree-2".to_string()],
+    );
+
+    assert!(
+        out.contains(&format!("{}/zootree-2 (missing)", ws.workspace_dir)),
+        "{out}"
+    );
+}
+
+#[test]
+fn render_once_omits_worktree_paths_for_non_in_progress_workspace() {
+    let mut ws = base_ws();
+    ws.workspace_dir = "/tmp/demo".into();
+    ws.repos = vec![RepoEntry {
+        name: "frontend".into(),
+        target_branch: Some("main".into()),
+    }];
+
+    let out = render_once(&WorkspaceStatus::Pending, &ws, &GlobalConfig::default());
+
+    assert!(out.contains("  - frontend"), "{out}");
+    assert!(!out.contains("/tmp/demo/frontend"), "{out}");
 }

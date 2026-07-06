@@ -100,6 +100,9 @@ zootree repo add ~/projects/myrepo
 zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
 ```
 
+如果推导出的仓库名或 `--name` 指定的仓库名已经存在，`repo add` 不会覆盖原配置，
+而是使用下一个可用后缀注册新仓库，例如 `myrepo-2`、`myrepo-3`。
+
 ### 3. 创建工作空间
 
 ```bash

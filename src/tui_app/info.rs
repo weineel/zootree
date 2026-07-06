@@ -7,6 +7,8 @@ use chrono::{DateTime, Local};
 
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
+use crate::core::repo_status::missing_registered_repo_names;
+use crate::core::worktree_status::{repo_worktree_statuses, RepoWorktreeStatus};
 
 pub struct InfoApp {
     pub(crate) name: String,
@@ -26,6 +28,8 @@ pub(crate) struct InfoState {
     pub loaded_at: DateTime<Local>,
     pub agent_cli: Option<String>,
     pub agent_cli_alias: BTreeMap<String, String>,
+    pub missing_repos: Vec<String>,
+    pub worktrees: Vec<RepoWorktreeStatus>,
 }
 
 impl InfoApp {
@@ -51,12 +55,22 @@ impl InfoApp {
                 let global = self.config_mgr.load_global_config().ok();
                 let agent_cli = global.as_ref().and_then(|g| g.agent_cli.clone());
                 let agent_cli_alias = global.map(|g| g.agent_cli_alias).unwrap_or_default();
+                let missing_repos =
+                    missing_registered_repo_names(&self.config_mgr, &workspace.repos);
+                let worktrees = if matches!(status, WorkspaceStatus::InProgress) {
+                    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+                    repo_worktree_statuses(&workspace, &ws_dir)
+                } else {
+                    Vec::new()
+                };
                 self.state = Some(InfoState {
                     status,
                     workspace,
                     loaded_at: Local::now(),
                     agent_cli,
                     agent_cli_alias,
+                    missing_repos,
+                    worktrees,
                 });
                 self.last_error = None;
             }
@@ -196,7 +210,14 @@ impl InfoApp {
 
         let ws = &state.workspace;
         let agent_cli = ws.agent_cli.as_deref().or(state.agent_cli.as_deref());
-        let body_lines = build_body_lines(ws, agent_cli, &state.agent_cli_alias, area.width);
+        let body_lines = build_body_lines(
+            ws,
+            agent_cli,
+            &state.agent_cli_alias,
+            &state.missing_repos,
+            &state.worktrees,
+            area.width,
+        );
         self.last_body_height = area.height.max(1);
         let max_scroll = body_lines
             .len()
@@ -349,6 +370,8 @@ fn build_body_lines(
     ws: &WorkspaceConfig,
     agent_cli: Option<&str>,
     alias_map: &BTreeMap<String, String>,
+    missing_repos: &[String],
+    worktrees: &[RepoWorktreeStatus],
     area_width: u16,
 ) -> Vec<Line<'static>> {
     let wrap_width = usize::from(area_width.max(1));
@@ -367,8 +390,20 @@ fn build_body_lines(
     } else {
         for repo in &ws.repos {
             let target = repo.target_branch.as_deref().unwrap_or("*");
-            let worktree = format!("{}/{}", ws.workspace_dir, repo.name);
-            let row = format!("  {:<15} {:<15} {}", repo.name, target, worktree);
+            let worktree_status = worktrees
+                .iter()
+                .find(|status| status.repo_name == repo.name);
+            let worktree = worktree_status
+                .map(|status| status.worktree_path.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}/{}", ws.workspace_dir, repo.name));
+            let missing_worktree = worktree_status.is_some_and(|status| !status.exists);
+            let missing = if missing_repos.contains(&repo.name) || missing_worktree {
+                " (missing)"
+            } else {
+                ""
+            };
+            let row = format!("  {:<15} {:<15} {}{}", repo.name, target, worktree, missing);
             for wrapped in textwrap::wrap(&row, wrap_width) {
                 lines.push(Line::from(wrapped.into_owned()));
             }
@@ -410,7 +445,9 @@ fn status_color(s: &WorkspaceStatus) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::global::ZellijConfig;
+    use crate::config::global::{HooksConfig, ZellijConfig};
+    use crate::config::repo::RepoConfig;
+    use crate::config::workspace::RepoEntry;
 
     fn sample_workspace(name: &str) -> WorkspaceConfig {
         WorkspaceConfig {
@@ -424,6 +461,17 @@ mod tests {
             zellij: ZellijConfig::default(),
             repos: vec![],
             events: vec![],
+        }
+    }
+
+    fn repo_config(path: &str) -> RepoConfig {
+        RepoConfig {
+            path: path.into(),
+            default_target_branch: None,
+            copy_files: Vec::new(),
+            hooks: HooksConfig::default(),
+            lazygit: None,
+            zellij: None,
         }
     }
 
@@ -553,7 +601,6 @@ mod tests {
 
     #[test]
     fn render_shows_repos_row() {
-        use crate::config::workspace::RepoEntry;
         let tmp = tempfile::tempdir().unwrap();
         let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
         mgr.ensure_dirs().unwrap();
@@ -570,6 +617,66 @@ mod tests {
         let out = render_to_string(&mut app, 100, 20);
         assert!(out.contains("frontend"), "missing repo name:\n{}", out);
         assert!(out.contains("main"), "missing target branch:\n{}", out);
+    }
+
+    #[test]
+    fn render_marks_missing_registered_repo_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let mut ws = sample_workspace("demo");
+        ws.workspace_dir = tmp.path().join("demo").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&ws.workspace_dir).unwrap();
+        std::fs::create_dir(std::path::Path::new(&ws.workspace_dir).join("zootree-2")).unwrap();
+        ws.repos = vec![RepoEntry {
+            name: "zootree-2".into(),
+            target_branch: Some("zootree/safe-fire".into()),
+        }];
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+        mgr.save_repo_config(
+            "zootree-2",
+            &repo_config(&tmp.path().join("deleted-zootree").to_string_lossy()),
+        )
+        .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+        let out = render_to_string(&mut app, 120, 20);
+
+        assert!(
+            out.contains(&format!("{}/zootree-2 (missing)", ws.workspace_dir)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_marks_missing_repo_worktree_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        let repo_path = tmp.path().join("registered-zootree");
+        std::fs::create_dir(&repo_path).unwrap();
+        let mut ws = sample_workspace("demo");
+        ws.workspace_dir = tmp.path().join("demo").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&ws.workspace_dir).unwrap();
+        ws.repos = vec![RepoEntry {
+            name: "zootree".into(),
+            target_branch: Some("main".into()),
+        }];
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+            .unwrap();
+        mgr.save_repo_config("zootree", &repo_config(&repo_path.to_string_lossy()))
+            .unwrap();
+
+        let mgr2 = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let mut app = InfoApp::new("demo".into(), mgr2, false, Duration::from_secs(5));
+        let out = render_to_string(&mut app, 120, 20);
+
+        assert!(
+            out.contains(&format!("{}/zootree (missing)", ws.workspace_dir)),
+            "{out}"
+        );
     }
 
     fn make_in_progress_app(tmp: &tempfile::TempDir, name: &str) -> InfoApp {

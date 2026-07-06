@@ -36,6 +36,9 @@ src/
 │   ├── zellij.rs    # ZellijOps: session 管理
 │   ├── copy_files.rs # 文件复制逻辑
 │   ├── name_gen.rs  # 工作空间名称生成器
+│   ├── repo_names.rs # repo 名称冲突处理
+│   ├── repo_status.rs # 注册 repo 配置路径存在性检查
+│   ├── worktree_status.rs # workspace repo worktree 路径存在性检查
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template)
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环

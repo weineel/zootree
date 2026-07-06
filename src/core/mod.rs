@@ -4,4 +4,7 @@ pub mod git;
 pub mod hook;
 pub mod layout;
 pub mod name_gen;
+pub mod repo_names;
+pub mod repo_status;
+pub mod worktree_status;
 pub mod zellij;

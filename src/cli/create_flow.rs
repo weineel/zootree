@@ -6,8 +6,8 @@ use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig};
 use crate::config::ConfigManager;
 use crate::core::git::GitOps;
 use crate::core::name_gen::NameGenerator;
+use crate::core::repo_names::unique_repo_name;
 use crate::runner::CommandRunner;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,22 +237,6 @@ fn repo_name_from_path(path: &Path) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "repo".into())
-}
-
-fn unique_repo_name(config_mgr: &ConfigManager, base: &str) -> anyhow::Result<String> {
-    let existing: HashSet<String> = config_mgr.list_repos()?.into_iter().collect();
-    if !existing.contains(base) {
-        return Ok(base.to_string());
-    }
-
-    for i in 2.. {
-        let candidate = format!("{}-{}", base, i);
-        if !existing.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    unreachable!("unbounded repo name search should always return")
 }
 
 fn registered_repo_for_path(

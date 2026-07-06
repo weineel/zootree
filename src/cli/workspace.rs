@@ -15,6 +15,10 @@ use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
 use crate::core::layout::{LayoutRenderer, LayoutVar};
+use crate::core::repo_status::missing_registered_repo_names;
+use crate::core::worktree_status::{
+    format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
+};
 use crate::core::zellij::ZellijOps;
 use crate::runner::RealRunner;
 use crate::tui;
@@ -102,6 +106,8 @@ fn template_repos_to_entries_input(
 struct ListWorkspaceItem {
     status: WorkspaceStatus,
     workspace: WorkspaceConfig,
+    worktrees: Vec<RepoWorktreeStatus>,
+    missing_repos: Vec<String>,
 }
 
 fn selected_agent_cli_value(
@@ -391,9 +397,18 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     let mut items = Vec::with_capacity(workspaces.len());
     for ws in workspaces {
         let (status, _) = config_mgr.load_workspace(&ws.name)?;
+        let worktrees = if matches!(status, WorkspaceStatus::InProgress) {
+            let ws_dir = shellexpand::tilde(&ws.workspace_dir).into_owned();
+            repo_worktree_statuses(&ws, &ws_dir)
+        } else {
+            Vec::new()
+        };
+        let missing_repos = missing_registered_repo_names(&config_mgr, &ws.repos);
         items.push(ListWorkspaceItem {
             status,
             workspace: ws,
+            worktrees,
+            missing_repos,
         });
     }
 
@@ -416,16 +431,35 @@ fn format_status(status: &WorkspaceStatus) -> &'static str {
     }
 }
 
-fn format_repo_targets(repos: &[RepoEntry]) -> String {
+fn format_repo_targets(repos: &[RepoEntry], missing_repos: &[String]) -> String {
     if repos.is_empty() {
         return "(none)".into();
     }
 
     repos
         .iter()
-        .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
+        .map(|r| {
+            let target = r.target_branch.as_deref().unwrap_or("*");
+            if missing_repos.contains(&r.name) {
+                format!("{}:{} (missing)", r.name, target)
+            } else {
+                format!("{}:{}", r.name, target)
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_missing_worktree_names(worktrees: &[RepoWorktreeStatus]) -> Option<String> {
+    let names = missing_worktrees(worktrees)
+        .iter()
+        .map(|status| status.repo_name.as_str())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
 }
 
 fn render_list_oneline(items: &[ListWorkspaceItem]) -> String {
@@ -434,12 +468,15 @@ fn render_list_oneline(items: &[ListWorkspaceItem]) -> String {
     for item in items {
         let ws = &item.workspace;
         let status_str = format_status(&item.status);
-        let repos_str = format_repo_targets(&ws.repos);
+        let repos_str = format_repo_targets(&ws.repos, &item.missing_repos);
 
         if matches!(item.status, WorkspaceStatus::InProgress) {
+            let missing = format_missing_worktree_names(&item.worktrees)
+                .map(|names| format!(" [missing: {}]", names))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  {} ({}) - {} [{}] {}\n",
-                ws.name, status_str, ws.title, repos_str, ws.workspace_dir
+                "  {} ({}) - {} [{}] {}{}\n",
+                ws.name, status_str, ws.title, repos_str, ws.workspace_dir, missing
             ));
         } else {
             out.push_str(&format!(
@@ -468,10 +505,16 @@ fn render_list_cards(items: &[ListWorkspaceItem]) -> String {
             ws.branch
         ));
         out.push_str(&format!("  title: {}\n", ws.title));
-        out.push_str(&format!("  repos: {}\n", format_repo_targets(&ws.repos)));
+        out.push_str(&format!(
+            "  repos: {}\n",
+            format_repo_targets(&ws.repos, &item.missing_repos)
+        ));
 
         if matches!(item.status, WorkspaceStatus::InProgress) {
             out.push_str(&format!("  dir:   {}\n", ws.workspace_dir));
+            if let Some(names) = format_missing_worktree_names(&item.worktrees) {
+                out.push_str(&format!("  missing worktrees: {}\n", names));
+            }
         }
     }
 
@@ -530,6 +573,8 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
     if !matches!(status, WorkspaceStatus::InProgress) {
         anyhow::bail!("workspace '{}' is not in_progress", name);
     }
+
+    ensure_required_worktrees_exist(&workspace)?;
 
     launch_zellij(
         &config_mgr,
@@ -838,6 +883,51 @@ fn warn_or_bail(force: bool, err: anyhow::Error, context: &str) -> Result<()> {
     }
 }
 
+fn expanded_workspace_dir(workspace: &WorkspaceConfig) -> String {
+    shellexpand::tilde(&workspace.workspace_dir).into_owned()
+}
+
+fn ensure_required_worktrees_exist(workspace: &WorkspaceConfig) -> Result<()> {
+    let ws_dir = expanded_workspace_dir(workspace);
+    let statuses = repo_worktree_statuses(workspace, &ws_dir);
+    if missing_worktrees(&statuses).is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}",
+            format_missing_worktrees_error(&workspace.name, &statuses)
+        )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CancelRepoWorktreeDecision {
+    Proceed,
+    SkipMissing {
+        repo_name: String,
+        worktree_path: String,
+    },
+}
+
+fn cancel_repo_worktree_decision(
+    repo_entry: &RepoEntry,
+    worktree_path: &str,
+    worktree_statuses: &[RepoWorktreeStatus],
+) -> CancelRepoWorktreeDecision {
+    let worktree = worktree_statuses
+        .iter()
+        .find(|status| status.repo_name == repo_entry.name);
+
+    if worktree.is_some_and(|status| !status.exists) {
+        CancelRepoWorktreeDecision::SkipMissing {
+            repo_name: repo_entry.name.clone(),
+            worktree_path: worktree_path.into(),
+        }
+    } else {
+        CancelRepoWorktreeDecision::Proceed
+    }
+}
+
 pub fn handle_done(args: &DoneArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     let global = config_mgr.load_global_config()?;
@@ -867,7 +957,7 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         anyhow::bail!("workspace '{}' is not in_progress", name);
     }
 
-    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+    let ws_dir = expanded_workspace_dir(&workspace);
 
     if args.dry_run {
         println!("dry run for workspace '{}':", name);
@@ -885,6 +975,8 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
         return Ok(());
     }
+
+    ensure_required_worktrees_exist(&workspace)?;
 
     // pre_done hook
     if !args.skip_hooks {
@@ -1068,14 +1160,17 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         return Ok(());
     }
 
-    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+    let ws_dir = expanded_workspace_dir(&workspace);
+    let worktree_statuses = repo_worktree_statuses(&workspace, &ws_dir);
 
     // Confirm if uncommitted changes exist
     if !args.force {
         for repo_entry in &workspace.repos {
             let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-            if Path::new(&worktree_path).exists()
-                && git.has_uncommitted_changes(&worktree_path)?
+            if matches!(
+                cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses),
+                CancelRepoWorktreeDecision::Proceed
+            ) && git.has_uncommitted_changes(&worktree_path)?
                 && !tui::confirm(
                     &format!(
                         "repo '{}' has uncommitted changes. Continue?",
@@ -1108,9 +1203,22 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 
     if !args.no_clean {
         for repo_entry in &workspace.repos {
+            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
+            match cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses) {
+                CancelRepoWorktreeDecision::Proceed => {}
+                CancelRepoWorktreeDecision::SkipMissing {
+                    repo_name,
+                    worktree_path,
+                } => {
+                    println!(
+                        "  warning: missing worktree: {} ({})",
+                        repo_name, worktree_path
+                    );
+                    continue;
+                }
+            }
             let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
             let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
 
             // pre_remove hook
             let hook = repo_config
@@ -1204,6 +1312,8 @@ mod tests {
                 repos,
                 events: Vec::new(),
             },
+            worktrees: Vec::new(),
+            missing_repos: Vec::new(),
         }
     }
 
@@ -1211,6 +1321,25 @@ mod tests {
         RepoEntry {
             name: name.into(),
             target_branch: target_branch.map(str::to_string),
+        }
+    }
+
+    fn repo_config(path: &str) -> crate::config::repo::RepoConfig {
+        crate::config::repo::RepoConfig {
+            path: path.into(),
+            default_target_branch: None,
+            copy_files: Vec::new(),
+            hooks: crate::config::global::HooksConfig::default(),
+            lazygit: None,
+            zellij: None,
+        }
+    }
+
+    fn missing_worktree(repo_name: &str, worktree_path: &str) -> RepoWorktreeStatus {
+        RepoWorktreeStatus {
+            repo_name: repo_name.into(),
+            worktree_path: worktree_path.into(),
+            exists: false,
         }
     }
 
@@ -1250,6 +1379,40 @@ mod tests {
             out,
             "  pure-vine (in_progress) - List output redesign [zootree:main] /Users/lijufeng/zootree-workspaces/pure-vine\n  calm-river (pending) - Pending work [frontend:*]\n"
         );
+    }
+
+    #[test]
+    fn render_list_cards_shows_missing_worktrees_for_in_progress_workspace() {
+        let mut item = list_workspace(
+            WorkspaceStatus::InProgress,
+            "live-clay",
+            "Fix worktree checks",
+            "zootree/live-clay",
+            "/tmp/live-clay",
+            vec![repo("zootree", Some("main")), repo("docs", Some("main"))],
+        );
+        item.worktrees = vec![missing_worktree("docs", "/tmp/live-clay/docs")];
+
+        let out = render_list_cards(&[item]);
+
+        assert!(out.contains("  missing worktrees: docs"), "{out}");
+    }
+
+    #[test]
+    fn render_list_oneline_shows_missing_worktrees_for_in_progress_workspace() {
+        let mut item = list_workspace(
+            WorkspaceStatus::InProgress,
+            "live-clay",
+            "Fix worktree checks",
+            "zootree/live-clay",
+            "/tmp/live-clay",
+            vec![repo("zootree", Some("main")), repo("docs", Some("main"))],
+        );
+        item.worktrees = vec![missing_worktree("docs", "/tmp/live-clay/docs")];
+
+        let out = render_list_oneline(&[item]);
+
+        assert!(out.contains("/tmp/live-clay [missing: docs]"), "{out}");
     }
 
     #[test]
@@ -1339,6 +1502,75 @@ mod tests {
     }
 
     #[test]
+    fn render_list_cards_marks_missing_registered_repo() {
+        let mut item = list_workspace(
+            WorkspaceStatus::Pending,
+            "calm-leaf",
+            "ggg",
+            "zootree/calm-leaf",
+            "/tmp/calm-leaf",
+            vec![repo("zootree-2", Some("zootree/true-stone"))],
+        );
+        item.missing_repos = vec!["zootree-2".into()];
+
+        let out = render_list_cards(&[item]);
+
+        assert!(
+            out.contains("  repos: zootree-2:zootree/true-stone (missing)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_list_oneline_marks_missing_registered_repo() {
+        let mut item = list_workspace(
+            WorkspaceStatus::Pending,
+            "calm-leaf",
+            "ggg",
+            "zootree/calm-leaf",
+            "/tmp/calm-leaf",
+            vec![repo("zootree-2", Some("zootree/true-stone"))],
+        );
+        item.missing_repos = vec!["zootree-2".into()];
+
+        let out = render_list_oneline(&[item]);
+
+        assert!(
+            out.contains("[zootree-2:zootree/true-stone (missing)]"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn missing_registered_repo_names_marks_absent_config_or_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
+        config_mgr.ensure_dirs().unwrap();
+        let existing_path = tmp.path().join("existing-repo");
+        std::fs::create_dir(&existing_path).unwrap();
+        config_mgr
+            .save_repo_config("existing", &repo_config(&existing_path.to_string_lossy()))
+            .unwrap();
+        config_mgr
+            .save_repo_config(
+                "deleted",
+                &repo_config(&tmp.path().join("deleted-repo").to_string_lossy()),
+            )
+            .unwrap();
+
+        let missing = missing_registered_repo_names(
+            &config_mgr,
+            &[
+                repo("existing", None),
+                repo("deleted", None),
+                repo("absent", None),
+            ],
+        );
+
+        assert_eq!(missing, vec!["deleted".to_string(), "absent".to_string()]);
+    }
+
+    #[test]
     fn cancel_candidate_statuses_are_pending_and_in_progress() {
         assert_eq!(
             cancel_candidate_statuses(),
@@ -1352,6 +1584,38 @@ mod tests {
         assert!(is_cancelable_status(&WorkspaceStatus::InProgress));
         assert!(!is_cancelable_status(&WorkspaceStatus::Done));
         assert!(!is_cancelable_status(&WorkspaceStatus::Canceled));
+    }
+
+    #[test]
+    fn cancel_repo_worktree_decision_skips_missing_worktree() {
+        let repo_entry = repo("zootree", Some("main"));
+        let worktree_path = "/tmp/live-clay/zootree";
+        let statuses = vec![missing_worktree("zootree", worktree_path)];
+
+        let decision = cancel_repo_worktree_decision(&repo_entry, worktree_path, &statuses);
+
+        assert_eq!(
+            decision,
+            CancelRepoWorktreeDecision::SkipMissing {
+                repo_name: "zootree".into(),
+                worktree_path: worktree_path.into(),
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_repo_worktree_decision_proceeds_for_existing_worktree() {
+        let repo_entry = repo("zootree", Some("main"));
+        let worktree_path = "/tmp/live-clay/zootree";
+        let statuses = vec![RepoWorktreeStatus {
+            repo_name: "zootree".into(),
+            worktree_path: worktree_path.into(),
+            exists: true,
+        }];
+
+        let decision = cancel_repo_worktree_decision(&repo_entry, worktree_path, &statuses);
+
+        assert_eq!(decision, CancelRepoWorktreeDecision::Proceed);
     }
 
     fn test_workspace(name: &str) -> WorkspaceConfig {
@@ -1425,6 +1689,42 @@ mod tests {
             msg.contains("use --force to proceed anyway"),
             "got: {}",
             msg
+        );
+    }
+
+    #[test]
+    fn ensure_required_worktrees_exist_allows_existing_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("zootree")).unwrap();
+        let ws = test_workspace("live-clay");
+        let mut ws = WorkspaceConfig {
+            workspace_dir: tmp.path().to_string_lossy().into_owned(),
+            repos: vec![repo("zootree", Some("main"))],
+            ..ws
+        };
+
+        let result = ensure_required_worktrees_exist(&ws);
+
+        assert!(result.is_ok());
+        ws.repos.clear();
+    }
+
+    #[test]
+    fn ensure_required_worktrees_exist_reports_missing_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = test_workspace("live-clay");
+        let ws = WorkspaceConfig {
+            workspace_dir: tmp.path().to_string_lossy().into_owned(),
+            repos: vec![repo("zootree", Some("main"))],
+            ..ws
+        };
+
+        let err = ensure_required_worktrees_exist(&ws).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("workspace 'live-clay' is missing worktrees: zootree"),
+            "{err:#}"
         );
     }
 
