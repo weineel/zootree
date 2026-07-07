@@ -8,7 +8,7 @@ use zootree::cli::create_flow::{
     CreateWizardOutput, CurrentRepoCandidate, RepoDraftEntry, RepoDraftSource,
 };
 use zootree::cli::workspace::CreateArgs;
-use zootree::config::global::GlobalConfig;
+use zootree::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
 use zootree::config::repo::RepoConfig;
 use zootree::config::template::TemplateConfig;
 use zootree::config::ConfigManager;
@@ -37,7 +37,6 @@ fn repo_config(path: &str, default_target_branch: Option<&str>) -> RepoConfig {
         copy_files: Vec::new(),
         hooks: Default::default(),
         lazygit: None,
-        zellij: None,
     }
 }
 
@@ -246,7 +245,7 @@ fn draft_from_args_template_only_touches_template_repos() {
         "recently",
         &TemplateConfig {
             repos: vec!["frontend".into()],
-            zellij: Default::default(),
+            multiplexer: Default::default(),
         },
     )
     .unwrap();
@@ -275,6 +274,44 @@ fn draft_from_args_template_only_touches_template_repos() {
 }
 
 #[test]
+fn draft_from_args_template_carries_multiplexer_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config("frontend", &repo_config("/repo/frontend", Some("main")))
+        .unwrap();
+    let multiplexer = MultiplexerConfig {
+        kind: MultiplexerKind::Cmux,
+        ..Default::default()
+    };
+    mgr.save_template(
+        "recently",
+        &TemplateConfig {
+            repos: vec!["frontend".into()],
+            multiplexer: multiplexer.clone(),
+        },
+    )
+    .unwrap();
+    let runner = MockRunner::new();
+    let global = GlobalConfig::default();
+    let args = create_args_with(Some("auth cleanup"), None, Some("recently"));
+
+    let draft = draft_from_args(&args, &mgr, &runner, &global, None, &[]).unwrap();
+    let workspace = workspace_from_draft(
+        &draft,
+        "2026-06-23T10:00:00+08:00",
+        None,
+        draft
+            .multiplexer
+            .clone()
+            .unwrap_or_else(|| global.multiplexer.clone()),
+    );
+
+    assert_eq!(draft.multiplexer, Some(multiplexer.clone()));
+    assert_eq!(workspace.multiplexer, multiplexer);
+}
+
+#[test]
 fn draft_from_args_missing_title_template_includes_all_repos_with_template_selected() {
     let tmp = TempDir::new().unwrap();
     let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
@@ -289,7 +326,7 @@ fn draft_from_args_missing_title_template_includes_all_repos_with_template_selec
         "recently",
         &TemplateConfig {
             repos: vec!["frontend".into(), "docs".into()],
-            zellij: Default::default(),
+            multiplexer: Default::default(),
         },
     )
     .unwrap();
@@ -787,11 +824,16 @@ fn workspace_from_draft_matches_existing_create_shape() {
         run_agent: Some("codex".into()),
     };
     let output = CreateWizardOutput { draft };
+    let multiplexer = MultiplexerConfig {
+        kind: MultiplexerKind::Cmux,
+        ..Default::default()
+    };
 
     let workspace = workspace_from_draft(
         &output.draft,
         "2026-06-23T10:00:00+08:00",
         Some("codex".into()),
+        multiplexer.clone(),
     );
 
     assert_eq!(workspace.title, "auth cleanup");
@@ -800,7 +842,8 @@ fn workspace_from_draft_matches_existing_create_shape() {
     assert_eq!(workspace.branch, "zt/open-reef");
     assert_eq!(workspace.workspace_dir, "/tmp/zootree-workspaces/open-reef");
     assert_eq!(workspace.agent_cli.as_deref(), Some("codex"));
-    assert_eq!(workspace.zellij.session_mode.as_deref(), Some("standalone"));
+    assert_eq!(workspace.multiplexer, multiplexer);
+    assert!(workspace.multiplexer_state.is_empty());
     assert_eq!(workspace.repos.len(), 1);
     assert_eq!(workspace.repos[0].name, "frontend");
     assert_eq!(workspace.repos[0].target_branch.as_deref(), Some("main"));
@@ -828,7 +871,6 @@ fn persist_selected_pending_repos_writes_selected_repo_config() {
     assert!(config.default_target_branch.is_none());
     assert!(config.copy_files.is_empty());
     assert!(config.lazygit.is_none());
-    assert!(config.zellij.is_none());
     assert_eq!(draft.repos[0].source, RepoDraftSource::Registered);
 }
 
@@ -850,7 +892,12 @@ fn persist_selected_pending_repos_ignores_deselected_pending_repo() {
 
     assert!(mgr.list_repos().unwrap().is_empty());
     assert!(draft.repos[0].is_pending_registration());
-    let workspace = workspace_from_draft(&draft, "2026-06-29T10:00:00+08:00", None);
+    let workspace = workspace_from_draft(
+        &draft,
+        "2026-06-29T10:00:00+08:00",
+        None,
+        MultiplexerConfig::default(),
+    );
     assert!(workspace.repos.is_empty());
 }
 
@@ -877,6 +924,11 @@ fn persist_selected_pending_repos_resolves_submit_time_name_collision() {
     assert!(mgr.load_repo_config("zootree").is_ok());
     let new_config = mgr.load_repo_config("zootree-2").unwrap();
     assert_eq!(new_config.path, "/repo/zootree");
-    let workspace = workspace_from_draft(&draft, "2026-06-29T10:00:00+08:00", None);
+    let workspace = workspace_from_draft(
+        &draft,
+        "2026-06-29T10:00:00+08:00",
+        None,
+        MultiplexerConfig::default(),
+    );
     assert_eq!(workspace.repos[0].name, "zootree-2");
 }

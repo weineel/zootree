@@ -35,30 +35,75 @@ impl Default for LogConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ZellijConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub layout: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_name: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiplexerKind {
+    Zellij,
+    Cmux,
 }
 
-impl Default for ZellijConfig {
+impl Default for MultiplexerKind {
+    fn default() -> Self {
+        Self::Zellij
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ZellijMultiplexerConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+}
+
+impl Default for ZellijMultiplexerConfig {
     fn default() -> Self {
         Self {
             layout: Some("default".into()),
-            session_mode: None,
-            session_name: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CmuxMultiplexerConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+}
+
+impl Default for CmuxMultiplexerConfig {
+    fn default() -> Self {
+        Self {
+            layout: Some("default".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiplexerConfig {
+    #[serde(default)]
+    pub kind: MultiplexerKind,
+    #[serde(default)]
+    pub zellij: ZellijMultiplexerConfig,
+    #[serde(default)]
+    pub cmux: CmuxMultiplexerConfig,
+}
+
+impl Default for MultiplexerConfig {
+    fn default() -> Self {
+        Self {
+            kind: MultiplexerKind::Zellij,
+            zellij: ZellijMultiplexerConfig::default(),
+            cmux: CmuxMultiplexerConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
     #[serde(default)]
-    pub zellij: ZellijConfig,
+    pub multiplexer: MultiplexerConfig,
     #[serde(default = "default_workspace_root")]
     pub workspace_root: String,
     #[serde(default = "default_branch_prefix")]
@@ -85,7 +130,7 @@ fn default_branch_prefix() -> String {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
             workspace_root: default_workspace_root(),
             branch_prefix: default_branch_prefix(),
             copy_files: Vec::new(),

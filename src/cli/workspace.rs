@@ -3,10 +3,11 @@ use crate::cli::create_flow::{
     persist_selected_pending_repos, resolve_agent_cli_for_draft, workspace_from_draft,
     AfterCreateMode, CreateDraftError, CreateWizardOutput,
 };
-use crate::config::global::GlobalConfig;
+use crate::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
+use crate::core::cmux_layout::{default_cmux_layout, render_cmux_layout, CmuxLayoutVar};
 use crate::core::completers::{
     complete_agent_cli_alias, complete_repos_list, complete_template, complete_workspace,
     WorkspaceFilter,
@@ -15,11 +16,15 @@ use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
 use crate::core::layout::{LayoutRenderer, LayoutVar};
+use crate::core::multiplexer::{
+    cmux::CmuxMultiplexer,
+    zellij::{is_inside_zellij, ZellijMultiplexer},
+    MultiplexerIdentity, MultiplexerLaunch, TerminalMultiplexer,
+};
 use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::worktree_status::{
     format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
 };
-use crate::core::zellij::ZellijOps;
 use crate::runner::RealRunner;
 use crate::tui;
 use crate::tui_app::create_wizard::run_create_wizard;
@@ -28,10 +33,6 @@ use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
 use std::path::Path;
-
-#[cfg(test)]
-#[allow(unused_imports)]
-use crate::config::global::ZellijConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -154,7 +155,17 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     };
     persist_selected_pending_repos(&config_mgr, &mut output.draft)?;
     let agent_cli = resolve_agent_cli_for_draft(&output.draft.after_create, &global)?;
-    let workspace = workspace_from_draft(&output.draft, Local::now().to_rfc3339(), agent_cli);
+    let multiplexer = output
+        .draft
+        .multiplexer
+        .clone()
+        .unwrap_or_else(|| global.multiplexer.clone());
+    let workspace = workspace_from_draft(
+        &output.draft,
+        Local::now().to_rfc3339(),
+        agent_cli,
+        multiplexer,
+    );
     let name = workspace.name.clone();
 
     config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace)?;
@@ -216,7 +227,7 @@ fn format_draft_errors(errors: &[CreateDraftError]) -> String {
 fn save_recently_template(config_mgr: &ConfigManager, workspace: &WorkspaceConfig) -> Result<()> {
     let recently = TemplateConfig {
         repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-        zellij: workspace.zellij.clone(),
+        multiplexer: workspace.multiplexer.clone(),
     };
     config_mgr.save_template("recently", &recently)
 }
@@ -225,7 +236,7 @@ fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()
     if mode.should_start() {
         let start_args = StartArgs {
             name: Some(name.to_string()),
-            no_zellij: false,
+            no_multiplexer: false,
             run_agent: mode.run_agent_arg(),
         };
         handle_start(&start_args)?;
@@ -364,14 +375,13 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
 
     println!("workspace '{}' started", name);
 
-    if !args.no_zellij {
-        launch_zellij(
+    if !args.no_multiplexer {
+        launch_multiplexer(
             &config_mgr,
             &global,
             &workspace,
             &runner,
             args.run_agent.clone(),
-            crate::core::zellij::is_inside_zellij(),
         )?;
     }
 
@@ -576,14 +586,7 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
 
     ensure_required_worktrees_exist(&workspace)?;
 
-    launch_zellij(
-        &config_mgr,
-        &global,
-        &workspace,
-        &runner,
-        None,
-        crate::core::zellij::is_inside_zellij(),
-    )?;
+    launch_multiplexer(&config_mgr, &global, &workspace, &runner, None)?;
     Ok(())
 }
 
@@ -595,62 +598,50 @@ fn write_default_layout(base_dir: &Path) -> String {
     content
 }
 
-pub fn dispatch_launch<R: crate::runner::CommandRunner>(
-    zellij: &ZellijOps<'_, R>,
-    workspace_name: &str,
-    session_name: &str,
-    layout_file: &std::path::Path,
-    in_zellij: bool,
-) -> Result<()> {
-    let session_exists = zellij.session_exists(session_name)?;
-    let plan = crate::core::zellij::plan_launch(in_zellij, session_exists);
-
-    match plan {
-        crate::core::zellij::LaunchPlan::ForegroundCreate => {
-            zellij.start_session(session_name, layout_file)?;
-        }
-        crate::core::zellij::LaunchPlan::ForegroundAttach => {
-            zellij.attach_session(session_name)?;
-        }
-        crate::core::zellij::LaunchPlan::BackgroundCreate => {
-            zellij.start_session_background(session_name, layout_file)?;
-            println!(
-                "zellij session '{}' is running in background.",
-                session_name
-            );
-            println!(
-                "Run `zootree open {}` (outside zellij) to attach.",
-                workspace_name
-            );
-        }
-        crate::core::zellij::LaunchPlan::AlreadyRunningHint => {
-            println!("zellij session '{}' already exists.", session_name);
-            println!(
-                "Run `zootree open {}` (outside zellij) to attach.",
-                workspace_name
-            );
-        }
+fn selected_multiplexer_config(
+    workspace: &WorkspaceConfig,
+    _global: &GlobalConfig,
+) -> MultiplexerConfig {
+    let mut config = workspace.multiplexer.clone();
+    if let Some(kind) = &workspace.multiplexer_state.kind {
+        config.kind = kind.clone();
     }
-
-    Ok(())
+    config
 }
 
-fn launch_zellij(
-    config_mgr: &ConfigManager,
-    global: &crate::config::global::GlobalConfig,
-    workspace: &WorkspaceConfig,
-    runner: &RealRunner,
-    run_agent: Option<Option<String>>,
-    in_zellij: bool,
-) -> Result<()> {
-    let zellij = ZellijOps::new(runner);
+fn multiplexer_display_name(workspace: &WorkspaceConfig) -> String {
+    format!("zootree-{}", workspace.name)
+}
 
-    let layout_name = workspace
-        .zellij
-        .layout
-        .as_deref()
-        .or(global.zellij.layout.as_deref())
-        .unwrap_or("default");
+fn multiplexer_identity(workspace: &WorkspaceConfig) -> MultiplexerIdentity {
+    MultiplexerIdentity {
+        workspace_name: workspace.name.clone(),
+        display_name: multiplexer_display_name(workspace),
+        cmux_workspace: workspace.multiplexer_state.cmux_workspace.clone(),
+    }
+}
+
+fn prepare_multiplexer_launch(
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
+    workspace: &WorkspaceConfig,
+    run_agent: Option<Option<String>>,
+) -> Result<MultiplexerLaunch> {
+    let multiplexer = selected_multiplexer_config(workspace, global);
+    match multiplexer.kind {
+        MultiplexerKind::Zellij => prepare_zellij_launch(config_mgr, global, workspace, run_agent),
+        MultiplexerKind::Cmux => prepare_cmux_launch(config_mgr, global, workspace, run_agent),
+    }
+}
+
+fn prepare_zellij_launch(
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
+    workspace: &WorkspaceConfig,
+    run_agent: Option<Option<String>>,
+) -> Result<MultiplexerLaunch> {
+    let multiplexer = selected_multiplexer_config(workspace, global);
+    let layout_name = multiplexer.zellij.layout.as_deref().unwrap_or("default");
 
     let template_content = if layout_name == "default" {
         write_default_layout(&config_mgr.base_dir)
@@ -662,52 +653,23 @@ fn launch_zellij(
         if layout_path.exists() {
             std::fs::read_to_string(&layout_path)?
         } else {
-            write_default_layout(&config_mgr.base_dir)
+            anyhow::bail!(
+                "zellij layout '{}' not found at {}",
+                layout_name,
+                layout_path.display()
+            );
         }
     };
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
-
-    let agent_cli_tpl: Option<String> = match run_agent.as_ref() {
-        None => None,
-        Some(value) => {
-            let raw: String = match value.as_deref() {
-                Some(s) if !s.is_empty() => s.to_string(),
-                _ => global.agent_cli.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
-                    )
-                })?,
-            };
-            let resolved = crate::core::layout::resolve_agent_cli(&raw, &global.agent_cli_alias);
-            Some(resolved.to_string())
-        }
-    };
-
-    let (overview_kdl, repo_kdl_for_first) = match agent_cli_tpl.as_deref() {
-        None => (String::new(), String::new()),
-        Some(tpl) => {
-            let prompt = crate::core::layout::build_prompt(workspace);
-            let kdl = crate::core::layout::build_agent_cli_kdl(tpl, &prompt)?;
-            if workspace.repos.len() == 1 {
-                (String::new(), kdl)
-            } else {
-                (kdl, String::new())
-            }
-        }
-    };
+    let agent_cli_tpl = resolve_run_agent_template(global, run_agent.as_ref())?;
+    let (overview_kdl, repo_kdl_for_first) =
+        build_zellij_agent_fragments(workspace, agent_cli_tpl.as_deref())?;
 
     let mut vars = Vec::new();
     for (i, repo_entry) in workspace.repos.iter().enumerate() {
         let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
         let lazygit_config = repo_config.lazygit.map(|lg| lg.config).unwrap_or_default();
-
-        let repo_agent_cli = if i == 0 {
-            repo_kdl_for_first.clone()
-        } else {
-            String::new()
-        };
-
         vars.push(LayoutVar {
             repo_name: repo_entry.name.clone(),
             worktree_path: format!("{}/{}", ws_dir, repo_entry.name),
@@ -716,12 +678,15 @@ fn launch_zellij(
             workspace_dir: ws_dir.clone(),
             lazygit_config,
             overview_agent_cli: overview_kdl.clone(),
-            repo_agent_cli,
+            repo_agent_cli: if i == 0 {
+                repo_kdl_for_first.clone()
+            } else {
+                String::new()
+            },
         });
     }
 
     let rendered = LayoutRenderer::render(&template_content, &vars);
-
     if run_agent.is_some()
         && !template_content.contains("$overview_agent_cli")
         && !template_content.contains("$repo_agent_cli")
@@ -737,22 +702,185 @@ fn launch_zellij(
     let layout_file = layout_dir.join("recently.kdl");
     std::fs::write(&layout_file, &rendered)?;
 
-    let session_name = match workspace.zellij.session_mode.as_deref() {
-        Some("shared") => workspace
-            .zellij
-            .session_name
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("shared mode requires session_name"))?,
-        _ => format!("zootree-{}", workspace.name),
+    Ok(MultiplexerLaunch {
+        workspace_name: workspace.name.clone(),
+        display_name: multiplexer_display_name(workspace),
+        workspace_dir: ws_dir.into(),
+        layout_name: layout_name.into(),
+        rendered_layout: rendered,
+        layout_file,
+    })
+}
+
+fn resolve_run_agent_template(
+    global: &GlobalConfig,
+    run_agent: Option<&Option<String>>,
+) -> Result<Option<String>> {
+    match run_agent {
+        None => Ok(None),
+        Some(value) => {
+            let raw = match value.as_deref() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => global.agent_cli.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
+                    )
+                })?,
+            };
+            Ok(Some(
+                crate::core::layout::resolve_agent_cli(&raw, &global.agent_cli_alias).to_string(),
+            ))
+        }
+    }
+}
+
+fn build_zellij_agent_fragments(
+    workspace: &WorkspaceConfig,
+    agent_cli_tpl: Option<&str>,
+) -> Result<(String, String)> {
+    match agent_cli_tpl {
+        None => Ok((String::new(), String::new())),
+        Some(tpl) => {
+            let prompt = crate::core::layout::build_prompt(workspace);
+            let kdl = crate::core::layout::build_agent_cli_kdl(tpl, &prompt)?;
+            if workspace.repos.len() == 1 {
+                Ok((String::new(), kdl))
+            } else {
+                Ok((kdl, String::new()))
+            }
+        }
+    }
+}
+
+fn write_default_cmux_layout(base_dir: &Path) -> String {
+    let content = default_cmux_layout().to_string();
+    let path = base_dir.join("layouts").join("default.cmux.json");
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let _ = std::fs::write(&path, &content);
+    content
+}
+
+fn prepare_cmux_launch(
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
+    workspace: &WorkspaceConfig,
+    run_agent: Option<Option<String>>,
+) -> Result<MultiplexerLaunch> {
+    let multiplexer = selected_multiplexer_config(workspace, global);
+    let layout_name = multiplexer.cmux.layout.as_deref().unwrap_or("default");
+    let template_content = if layout_name == "default" {
+        write_default_cmux_layout(&config_mgr.base_dir)
+    } else {
+        let layout_path = config_mgr
+            .base_dir
+            .join("layouts")
+            .join(format!("{}.cmux.json", layout_name));
+        if layout_path.exists() {
+            std::fs::read_to_string(&layout_path)?
+        } else {
+            anyhow::bail!(
+                "cmux layout '{}' not found at {}",
+                layout_name,
+                layout_path.display()
+            );
+        }
     };
 
-    dispatch_launch(
-        &zellij,
-        &workspace.name,
-        &session_name,
-        &layout_file,
-        in_zellij,
-    )?;
+    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+    let agent_cli_tpl = resolve_run_agent_template(global, run_agent.as_ref())?;
+    let prompt = crate::core::layout::build_prompt(workspace);
+    let agent_command = match agent_cli_tpl.as_deref() {
+        Some(tpl) => crate::core::layout::build_agent_cli_command(tpl, &prompt)?,
+        None => String::new(),
+    };
+
+    let mut vars = Vec::new();
+    for (i, repo_entry) in workspace.repos.iter().enumerate() {
+        let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
+        let lazygit_config = repo_config.lazygit.map(|lg| lg.config).unwrap_or_default();
+        let single_repo = workspace.repos.len() == 1;
+        vars.push(CmuxLayoutVar {
+            repo_name: repo_entry.name.clone(),
+            worktree_path: format!("{}/{}", ws_dir, repo_entry.name),
+            branch: workspace.branch.clone(),
+            workspace_name: workspace.name.clone(),
+            workspace_dir: ws_dir.clone(),
+            lazygit_config,
+            overview_agent_command: if !single_repo {
+                agent_command.clone()
+            } else {
+                String::new()
+            },
+            repo_agent_command: if single_repo && i == 0 {
+                agent_command.clone()
+            } else {
+                String::new()
+            },
+        });
+    }
+
+    let rendered = render_cmux_layout(&template_content, &vars)?;
+    let layout_dir = config_mgr.base_dir.join("layouts");
+    std::fs::create_dir_all(&layout_dir)?;
+    let layout_file = layout_dir.join("recently.cmux.json");
+    std::fs::write(&layout_file, &rendered)?;
+
+    Ok(MultiplexerLaunch {
+        workspace_name: workspace.name.clone(),
+        display_name: multiplexer_display_name(workspace),
+        workspace_dir: ws_dir.into(),
+        layout_name: layout_name.into(),
+        rendered_layout: rendered,
+        layout_file,
+    })
+}
+
+fn launch_multiplexer(
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
+    workspace: &WorkspaceConfig,
+    runner: &RealRunner,
+    run_agent: Option<Option<String>>,
+) -> Result<()> {
+    let config = selected_multiplexer_config(workspace, global);
+    let launch = prepare_multiplexer_launch(config_mgr, global, workspace, run_agent)?;
+    let identity = multiplexer_identity(workspace);
+    match config.kind {
+        MultiplexerKind::Zellij => {
+            let zellij = ZellijMultiplexer::new(runner, is_inside_zellij());
+            zellij.launch(&launch)?;
+        }
+        MultiplexerKind::Cmux => {
+            let cmux = CmuxMultiplexer::new(runner);
+            let cmux_workspace = cmux.launch_or_open_and_capture_workspace(&launch, &identity)?;
+            if let Some(cmux_workspace) = cmux_workspace {
+                let mut updated = workspace.clone();
+                updated.multiplexer_state.kind = Some(MultiplexerKind::Cmux);
+                updated.multiplexer_state.cmux_workspace = Some(cmux_workspace);
+                config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn close_multiplexer(
+    global: &GlobalConfig,
+    workspace: &WorkspaceConfig,
+    runner: &RealRunner,
+) -> Result<()> {
+    let config = selected_multiplexer_config(workspace, global);
+    let identity = multiplexer_identity(workspace);
+    match config.kind {
+        MultiplexerKind::Zellij => {
+            let zellij = ZellijMultiplexer::new(runner, is_inside_zellij());
+            zellij.close(&identity)?;
+        }
+        MultiplexerKind::Cmux => {
+            let cmux = CmuxMultiplexer::new(runner);
+            cmux.close(&identity)?;
+        }
+    }
     Ok(())
 }
 
@@ -814,8 +942,11 @@ pub struct StartArgs {
         add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Pending))
     )]
     pub name: Option<String>,
-    #[arg(long, help = "Skip launching zellij session after start")]
-    pub no_zellij: bool,
+    #[arg(
+        long,
+        help = "Skip launching the configured terminal multiplexer after start"
+    )]
+    pub no_multiplexer: bool,
     #[arg(
         long,
         num_args = 0..=1,
@@ -934,7 +1065,6 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
     let runner = RealRunner;
     let git = GitOps::new(&runner);
     let hook_engine = HookEngine::new(&runner);
-    let zellij = ZellijOps::new(&runner);
 
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -1110,15 +1240,12 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
     config_mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace)?;
     config_mgr.move_workspace(&name, &WorkspaceStatus::InProgress, &WorkspaceStatus::Done)?;
 
-    // Kill zellij session
-    let session_name = match workspace.zellij.session_mode.as_deref() {
-        Some("shared") => workspace.zellij.session_name.clone(),
-        _ => Some(format!("zootree-{}", workspace.name)),
-    };
-    if let Some(sn) = &session_name {
-        if let Err(e) = zellij.kill_session(sn) {
-            tracing::warn!("failed to kill zellij session '{}': {}", sn, e);
-        }
+    if let Err(e) = close_multiplexer(&global, &workspace, &runner) {
+        tracing::warn!(
+            "failed to close terminal multiplexer for workspace '{}': {}",
+            workspace.name,
+            e
+        );
     }
 
     println!("workspace '{}' completed", name);
@@ -1131,7 +1258,6 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     let runner = RealRunner;
     let git = GitOps::new(&runner);
     let hook_engine = HookEngine::new(&runner);
-    let zellij = ZellijOps::new(&runner);
 
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -1264,15 +1390,12 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     // Archive
     archive_canceled_workspace(&config_mgr, &status, &mut workspace)?;
 
-    // Kill zellij session
-    let session_name = match workspace.zellij.session_mode.as_deref() {
-        Some("shared") => workspace.zellij.session_name.clone(),
-        _ => Some(format!("zootree-{}", workspace.name)),
-    };
-    if let Some(sn) = &session_name {
-        if let Err(e) = zellij.kill_session(sn) {
-            tracing::warn!("failed to kill zellij session '{}': {}", sn, e);
-        }
+    if let Err(e) = close_multiplexer(&global, &workspace, &runner) {
+        tracing::warn!(
+            "failed to close terminal multiplexer for workspace '{}': {}",
+            workspace.name,
+            e
+        );
     }
 
     println!("workspace '{}' canceled", name);
@@ -1288,6 +1411,12 @@ mod tests {
     struct TestListCli {
         #[command(flatten)]
         args: ListArgs,
+    }
+
+    #[derive(Parser)]
+    struct TestStartCli {
+        #[command(flatten)]
+        args: StartArgs,
     }
 
     fn list_workspace(
@@ -1308,7 +1437,8 @@ mod tests {
                 workspace_dir: workspace_dir.into(),
                 created_at: "2026-06-23T10:00:00+08:00".into(),
                 agent_cli: None,
-                zellij: ZellijConfig::default(),
+                multiplexer: MultiplexerConfig::default(),
+                multiplexer_state: Default::default(),
                 repos,
                 events: Vec::new(),
             },
@@ -1331,7 +1461,6 @@ mod tests {
             copy_files: Vec::new(),
             hooks: crate::config::global::HooksConfig::default(),
             lazygit: None,
-            zellij: None,
         }
     }
 
@@ -1350,6 +1479,19 @@ mod tests {
 
         assert_eq!(parsed.args.status, vec![WorkspaceStatus::InProgress]);
         assert!(parsed.args.oneline);
+    }
+
+    #[test]
+    fn start_args_accept_no_multiplexer() {
+        let cli = TestStartCli::parse_from(["test", "--no-multiplexer", "fair-fox"]);
+        assert!(cli.args.no_multiplexer);
+        assert_eq!(cli.args.name.as_deref(), Some("fair-fox"));
+    }
+
+    #[test]
+    fn start_args_reject_disable_zellij_flag() {
+        let result = TestStartCli::try_parse_from(["test", "--no-zellij", "fair-fox"]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1627,7 +1769,8 @@ mod tests {
             workspace_dir: format!("/tmp/{}", name),
             created_at: "2026-06-29T10:00:00+08:00".into(),
             agent_cli: None,
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
+            multiplexer_state: Default::default(),
             repos: Vec::new(),
             events: Vec::new(),
         }

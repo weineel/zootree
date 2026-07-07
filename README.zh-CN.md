@@ -1,6 +1,6 @@
 # zootree
 
-多仓库协作开发工作空间管理工具。基于 Git Worktree + Zellij + LazyGit 实现。
+多仓库协作开发工作空间管理工具。基于 Git Worktree + 终端复用器（默认 Zellij，可配置 cmux）+ LazyGit 实现。
 
 [English](README.md)
 
@@ -8,7 +8,7 @@
 
 - **多仓库管理** - 同时在多个仓库的同一分支上工作
 - **工作空间** - 创建、管理和清理工作空间
-- **Zellij 集成** - 自动启动布局好的终端环境
+- **终端复用器集成** - 自动启动布局好的 Zellij 或 cmux 终端环境
 - **Hook 机制** - 自定义钩子支持 (simple/file/inline)
 - **文件复制** - 自动复制配置文件到 worktree
 - **模板系统** - 保存和复用工作空间配置
@@ -155,7 +155,7 @@ zootree create [options]             # 创建工作空间
   --template <name>                  # 使用模板
 
 zootree start [name]                 # 启动工作空间
-  --no-zellij                        # 不启动 Zellij
+  --no-multiplexer                   # 不启动已配置的终端复用器
   --run-agent [alias|command]        # 启动 coding agent（详见「配置 → Agent CLI」）
 
 zootree list                         # 以紧凑卡片形式列出工作空间
@@ -198,7 +198,8 @@ zootree 从 `~/.config/zootree/` 读取配置。速查表：
 |---|---|
 | `config.toml` | 全局默认值：workspace 根目录、分支前缀、文件复制、hooks、agent CLI |
 | `repos/<name>.toml` | 单仓库覆盖：path、目标分支、复制文件、hooks、lazygit 配置 |
-| `layouts/<name>.kdl` | 自定义 zellij 布局，供 `[zellij].layout` 引用 |
+| `layouts/<name>.kdl` | 自定义 Zellij KDL 布局，供 `[multiplexer.zellij].layout` 引用 |
+| `layouts/<name>.cmux.json` | 自定义 cmux JSON 布局，供 `[multiplexer.cmux].layout` 引用 |
 | `[hooks]` 小节 | workspace/repo 生命周期事件触发的 shell 命令 |
 | `agent_cli` / `agent_cli_alias` | `zootree start --run-agent` 启动的 coding agent 命令模板 |
 
@@ -210,7 +211,13 @@ branch_prefix = "zootree"
 copy_files = [".env"]
 agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
-[zellij]
+[multiplexer]
+kind = "zellij"
+
+[multiplexer.zellij]
+layout = "default"
+
+[multiplexer.cmux]
 layout = "default"
 
 [hooks]
@@ -223,6 +230,8 @@ pre_remove = "echo removed"
 [log]
 max_files = 5
 ```
+
+在 `[multiplexer]` 中设置 `kind = "cmux"` 可从默认 zellij 切换为 cmux。
 
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 
@@ -259,7 +268,7 @@ Hook 可用环境变量：
 - `ZOOTREE_WORKTREE_PATH` - worktree 路径
 - `ZOOTREE_WORKSPACE_DIR` - 工作空间目录
 
-### 布局模板 (~/.config/zootree/layouts/<name>.kdl)
+### Zellij 布局模板 (~/.config/zootree/layouts/<name>.kdl)
 
 ```kdl
 layout {
@@ -277,9 +286,49 @@ layout {
 - `@WORKSPACE_NAME@` - 工作空间名
 - `@WORKSPACE_DIR@` - 工作空间目录
 
+### cmux 布局模板 (~/.config/zootree/layouts/<name>.cmux.json)
+
+自定义 cmux JSON 布局由 `[multiplexer.cmux].layout` 选择。
+
+```json
+{
+  "direction": "horizontal",
+  "children": [
+    {
+      "pane": {
+        "surfaces": [
+          {
+            "type": "terminal",
+            "command": "zootree info $workspace_name --watch",
+            "cwd": "$workspace_dir"
+          }
+        ]
+      }
+    },
+    {
+      "zootree_repeat_per_repo": {
+        "pane": {
+          "surfaces": [
+            {
+              "type": "terminal",
+              "command": "lazygit -p $worktree_path",
+              "cwd": "$worktree_path"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+可用变量：`$workspace_name`、`$workspace_dir`、`$repo_name`、`$worktree_path`、`$branch`、`$lazygit_config`、`$overview_agent_command`、`$repo_agent_command`。
+
+使用 `zootree_repeat_per_repo` 可让 cmux JSON 块按 repo 重复展开。
+
 ### Agent CLI
 
-`agent_cli` 是在 zellij pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
+`agent_cli` 是在终端复用器 pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
 
 渲染后的命令在以下 pane 中执行：
 
@@ -328,7 +377,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 ## 依赖
 
 - Git
-- Zellij
+- Zellij 或 cmux
 - LazyGit (可选)
 
 ## 发布

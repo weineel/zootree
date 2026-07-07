@@ -18,7 +18,7 @@ src/
 │   ├── mod.rs       # Cli struct + Commands enum (clap derive)
 │   ├── repo.rs      # repo add/list/edit/remove
 │   ├── workspace.rs # create/start/list/open/done/cancel
-│   ├── template.rs  # template list/show/delete
+│   ├── template.rs  # template list/save
 │   ├── prune.rs     # prune 清理
 │   ├── completions.rs # 生成 shell 补全脚本 (completions 子命令)
 │   └── info.rs      # info [name] [--watch]
@@ -33,7 +33,11 @@ src/
 │   ├── git.rs       # GitOps: worktree/merge/push 等 git 操作
 │   ├── hook.rs      # HookEngine + HookContext
 │   ├── layout.rs    # LayoutRenderer: KDL 模板变量替换
-│   ├── zellij.rs    # ZellijOps: session 管理
+│   ├── multiplexer/
+│   │   ├── mod.rs      # TerminalMultiplexer trait + shared launch types
+│   │   ├── zellij.rs   # zellij standalone session implementation
+│   │   └── cmux.rs     # cmux workspace implementation
+│   ├── cmux_layout.rs  # cmux JSON layout renderer
 │   ├── copy_files.rs # 文件复制逻辑
 │   ├── name_gen.rs  # 工作空间名称生成器
 │   ├── repo_names.rs # repo 名称冲突处理
@@ -67,6 +71,25 @@ pub struct MockRunner {     // 测试用
 ```
 
 所有 `core/` 模块的函数接受 `&R: CommandRunner` 泛型参数。
+
+### TerminalMultiplexer 抽象
+
+终端复用器通过 `src/core/multiplexer/mod.rs` 中的 `TerminalMultiplexer` trait 对外暴露：
+
+```rust
+pub trait TerminalMultiplexer {
+    fn kind(&self) -> MultiplexerKind;
+    fn launch(&self, launch: &MultiplexerLaunch) -> Result<LaunchOutcome>;
+    fn open(
+        &self,
+        launch: &MultiplexerLaunch,
+        identity: &MultiplexerIdentity,
+    ) -> Result<LaunchOutcome>;
+    fn close(&self, identity: &MultiplexerIdentity) -> Result<()>;
+}
+```
+
+`src/core/multiplexer/zellij.rs` 中的 `ZellijMultiplexer` 保留原 zellij 行为：外部 zellij 时前台创建/attach，内部 zellij 时后台创建或提示已存在，关闭使用 `delete-session --force`。
 
 ### ConfigManager 模式
 
@@ -129,7 +152,7 @@ Commands::Status(args) => zootree::cli::workspace::handle_status(&args)?,
 
 ### 测试模式
 
-所有涉及 git/zellij/shell 的操作使用 `MockRunner`：
+所有涉及 git、zellij、cmux 或 shell 的操作使用 `MockRunner`：
 
 ```rust
 use zootree::runner::MockRunner;
@@ -181,7 +204,7 @@ fn test_something() {
 - **序列化**: 所有配置 struct 都 derive `Serialize + Deserialize + Debug + Clone + PartialEq`
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`
 - **untagged enum**: `HookValue` 使用 `#[serde(untagged)]` 支持三种格式
-- **zellij 分组**: 所有 zellij 相关配置统一在 `ZellijConfig` 中（`src/config/global.rs`），字段 Optional，用 `#[serde(default)]` 嵌入各配置 struct
+- **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`，cmux 使用 `layouts/<name>.cmux.json`
 - **shellexpand**: 所有用户输入的路径在使用前都要 `shellexpand::tilde()` 展开 `~`
 
 ## 常见开发任务

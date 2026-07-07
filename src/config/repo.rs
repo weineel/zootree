@@ -1,4 +1,4 @@
-use super::global::{HooksConfig, ZellijConfig};
+use super::global::HooksConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -7,6 +7,7 @@ pub struct LazyGitConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     pub path: String,
     pub default_target_branch: Option<String>,
@@ -15,6 +16,4 @@ pub struct RepoConfig {
     #[serde(default)]
     pub hooks: HooksConfig,
     pub lazygit: Option<LazyGitConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zellij: Option<ZellijConfig>,
 }

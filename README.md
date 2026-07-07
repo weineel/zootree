@@ -1,6 +1,6 @@
 # zootree
 
-A multi-repo workspace management tool. Built on Git Worktree + Zellij + LazyGit.
+A multi-repo workspace management tool. Built on Git Worktree + a terminal multiplexer (Zellij by default, cmux configurable) + LazyGit.
 
 [中文文档](README.zh-CN.md)
 
@@ -8,7 +8,7 @@ A multi-repo workspace management tool. Built on Git Worktree + Zellij + LazyGit
 
 - **Multi-repo management** - Work on the same branch across multiple repositories simultaneously
 - **Workspaces** - Create, manage, and clean up workspaces
-- **Zellij integration** - Automatically launch a well-organized terminal environment
+- **Terminal multiplexer integration** - Automatically launch a well-organized Zellij or cmux terminal environment
 - **Hook system** - Custom hooks support (simple/file/inline)
 - **File copying** - Automatically copy config files to worktrees
 - **Template system** - Save and reuse workspace configurations
@@ -159,7 +159,7 @@ zootree create [options]             # Create a workspace
   --template <name>                  # Use a template
 
 zootree start [name]                 # Start a workspace
-  --no-zellij                        # Don't launch Zellij
+  --no-multiplexer                   # Don't launch the configured terminal multiplexer
   --run-agent [alias|command]        # Launch a coding agent (see Configuration → Agent CLI)
 
 zootree list                         # List workspaces as compact cards
@@ -202,7 +202,8 @@ zootree reads configuration from `~/.config/zootree/`. Quick map:
 |---|---|
 | `config.toml` | Global defaults: workspace root, branch prefix, file copying, hooks, agent CLI |
 | `repos/<name>.toml` | Per-repo overrides: path, target branch, copy files, hooks, lazygit config |
-| `layouts/<name>.kdl` | Custom zellij layouts referenced from `[zellij].layout` |
+| `layouts/<name>.kdl` | Custom Zellij KDL layout files referenced from `[multiplexer.zellij].layout` |
+| `layouts/<name>.cmux.json` | Custom cmux JSON layouts referenced from `[multiplexer.cmux].layout` |
 | `[hooks]` blocks | Shell commands run at workspace/repo lifecycle events |
 | `agent_cli` / `agent_cli_alias` | Coding agent template launched by `zootree start --run-agent` |
 
@@ -214,7 +215,13 @@ branch_prefix = "zootree"
 copy_files = [".env"]
 agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
-[zellij]
+[multiplexer]
+kind = "zellij"
+
+[multiplexer.zellij]
+layout = "default"
+
+[multiplexer.cmux]
 layout = "default"
 
 [hooks]
@@ -227,6 +234,8 @@ pre_remove = "echo removed"
 [log]
 max_files = 5
 ```
+
+Set `kind = "cmux"` in `[multiplexer]` to launch workspaces with cmux instead of the default zellij.
 
 ### Repo config (~/.config/zootree/repos/<name>.toml)
 
@@ -263,7 +272,7 @@ Available environment variables in hooks:
 - `ZOOTREE_WORKTREE_PATH` - Worktree path
 - `ZOOTREE_WORKSPACE_DIR` - Workspace directory
 
-### Layout templates (~/.config/zootree/layouts/<name>.kdl)
+### Zellij layout templates (~/.config/zootree/layouts/<name>.kdl)
 
 ```kdl
 layout {
@@ -281,9 +290,49 @@ Available variables:
 - `@WORKSPACE_NAME@` - Workspace name
 - `@WORKSPACE_DIR@` - Workspace directory
 
+### cmux layout templates (~/.config/zootree/layouts/<name>.cmux.json)
+
+Custom cmux JSON layouts are selected by `[multiplexer.cmux].layout`.
+
+```json
+{
+  "direction": "horizontal",
+  "children": [
+    {
+      "pane": {
+        "surfaces": [
+          {
+            "type": "terminal",
+            "command": "zootree info $workspace_name --watch",
+            "cwd": "$workspace_dir"
+          }
+        ]
+      }
+    },
+    {
+      "zootree_repeat_per_repo": {
+        "pane": {
+          "surfaces": [
+            {
+              "type": "terminal",
+              "command": "lazygit -p $worktree_path",
+              "cwd": "$worktree_path"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+Available variables: `$workspace_name`, `$workspace_dir`, `$repo_name`, `$worktree_path`, `$branch`, `$lazygit_config`, `$overview_agent_command`, `$repo_agent_command`.
+
+Use `zootree_repeat_per_repo` to repeat a cmux JSON block once per repo.
+
 ### Agent CLI
 
-`agent_cli` is a command template for launching a coding agent in a zellij pane. The template is parsed with shell-style word splitting, and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`.
+`agent_cli` is a command template for launching a coding agent in a terminal multiplexer pane. The template is parsed with shell-style word splitting, and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`.
 
 The rendered command runs in:
 
@@ -332,7 +381,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # literal command
 ## Dependencies
 
 - Git
-- Zellij
+- Zellij or cmux
 - LazyGit (optional)
 
 ## Release

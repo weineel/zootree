@@ -3,7 +3,7 @@ pub mod repo;
 pub mod template;
 pub mod workspace;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub struct ConfigManager {
@@ -167,11 +167,15 @@ impl ConfigManager {
             if dir.exists() {
                 for entry in std::fs::read_dir(&dir)? {
                     let entry = entry?;
-                    if entry.path().extension().is_some_and(|e| e == "toml") {
-                        let content = std::fs::read_to_string(entry.path())?;
-                        if let Ok(config) = toml::from_str(&content) {
-                            workspaces.push(config);
-                        }
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "toml") {
+                        let content = std::fs::read_to_string(&path).with_context(|| {
+                            format!("failed to read workspace config {}", path.display())
+                        })?;
+                        let config = toml::from_str(&content).with_context(|| {
+                            format!("failed to parse workspace config {}", path.display())
+                        })?;
+                        workspaces.push(config);
                     }
                 }
             }

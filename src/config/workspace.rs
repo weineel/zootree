@@ -1,4 +1,4 @@
-use super::global::ZellijConfig;
+use super::global::{MultiplexerConfig, MultiplexerKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
@@ -23,7 +23,17 @@ pub struct Event {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiplexerState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<MultiplexerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmux_workspace: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     pub title: String,
     pub name: String,
@@ -35,9 +45,17 @@ pub struct WorkspaceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_cli: Option<String>,
     #[serde(default)]
-    pub zellij: ZellijConfig,
+    pub multiplexer: MultiplexerConfig,
+    #[serde(default, skip_serializing_if = "MultiplexerState::is_empty")]
+    pub multiplexer_state: MultiplexerState,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
     #[serde(default)]
     pub events: Vec<Event>,
+}
+
+impl MultiplexerState {
+    pub fn is_empty(&self) -> bool {
+        self.kind.is_none() && self.cmux_workspace.is_none()
+    }
 }

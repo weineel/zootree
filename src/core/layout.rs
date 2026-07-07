@@ -187,6 +187,22 @@ pub fn build_agent_cli_kdl(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<
     }
 }
 
+pub fn build_agent_cli_command(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<String> {
+    let tokens = shlex::split(agent_cli_tpl)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse agent_cli: {}", agent_cli_tpl))?;
+    if tokens.is_empty() {
+        anyhow::bail!("agent_cli is empty");
+    }
+
+    let substituted: Vec<String> = tokens
+        .into_iter()
+        .map(|t| t.replace("$prompt", prompt))
+        .collect();
+
+    shlex::try_join(substituted.iter().map(String::as_str))
+        .map_err(|e| anyhow::anyhow!("failed to join agent_cli: {}", e))
+}
+
 /// Resolve an agent_cli value against the alias map (single level).
 ///
 /// If `value` is a key in `alias_map`, returns the alias's template; otherwise

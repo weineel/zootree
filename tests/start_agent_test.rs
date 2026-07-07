@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use zootree::config::global::ZellijConfig;
+use zootree::config::global::MultiplexerConfig;
 use zootree::config::workspace::{RepoEntry, WorkspaceConfig};
 use zootree::core::layout::{build_agent_cli_kdl, build_prompt, LayoutRenderer, LayoutVar};
 
@@ -12,7 +12,8 @@ fn make_workspace(repos: Vec<&str>) -> WorkspaceConfig {
         workspace_dir: "/ws/calm-river".into(),
         created_at: "2026-05-12T00:00:00+08:00".into(),
         agent_cli: None,
-        zellij: ZellijConfig::default(),
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: Default::default(),
         repos: repos
             .into_iter()
             .map(|n| RepoEntry {

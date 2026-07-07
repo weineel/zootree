@@ -4,9 +4,19 @@ use tempfile::TempDir;
 use zootree::cli::workspace::{build_repo_entries, parse_repos_arg};
 use zootree::config::global::GlobalConfig;
 use zootree::config::global::HookValue;
+use zootree::config::global::{MultiplexerConfig, MultiplexerKind};
 use zootree::config::repo::RepoConfig;
+use zootree::config::workspace::{MultiplexerState, WorkspaceConfig, WorkspaceStatus};
 use zootree::config::ConfigManager;
 use zootree::runner::MockRunner;
+
+fn assert_unknown_field_error(error: toml::de::Error, field: &str) {
+    let message = error.to_string();
+    assert!(
+        message.contains("unknown field") || message.contains(field),
+        "unexpected error: {message}"
+    );
+}
 
 #[test]
 fn test_parse_global_config_full() {
@@ -16,7 +26,10 @@ branch_prefix = "zootree"
 copy_files = [".env"]
 agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
-[zellij]
+[multiplexer]
+kind = "zellij"
+
+[multiplexer.zellij]
 layout = "default"
 
 [hooks]
@@ -26,7 +39,8 @@ post_create = "echo hello"
 max_files = 5
 "#;
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.zellij.layout, Some("default".into()));
+    assert_eq!(config.multiplexer.kind, MultiplexerKind::Zellij);
+    assert_eq!(config.multiplexer.zellij.layout, Some("default".into()));
     assert_eq!(config.workspace_root, "~/zootree-workspaces");
     assert_eq!(config.branch_prefix, "zootree");
     assert_eq!(config.copy_files, vec![".env"]);
@@ -47,10 +61,41 @@ max_files = 5
 fn test_parse_global_config_defaults() {
     let toml_str = "";
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.zellij.layout, Some("default".into()));
+    assert_eq!(config.multiplexer.kind, MultiplexerKind::Zellij);
+    assert_eq!(config.multiplexer.zellij.layout, Some("default".into()));
     assert_eq!(config.branch_prefix, "zootree");
     assert!(config.copy_files.is_empty());
     assert!(config.agent_cli.is_none());
+}
+
+#[test]
+fn parse_global_config_defaults_to_zellij_multiplexer() {
+    let config: GlobalConfig = toml::from_str("").unwrap();
+    let multiplexer: MultiplexerConfig = config.multiplexer;
+
+    assert_eq!(multiplexer.kind, MultiplexerKind::Zellij);
+    assert_eq!(multiplexer.zellij.layout.as_deref(), Some("default"));
+    assert_eq!(multiplexer.cmux.layout.as_deref(), Some("default"));
+}
+
+#[test]
+fn parse_global_config_with_cmux_multiplexer() {
+    let toml_str = r#"
+workspace_root = "~/zootree-workspaces"
+branch_prefix = "zootree"
+
+[multiplexer]
+kind = "cmux"
+
+[multiplexer.cmux]
+layout = "daily"
+"#;
+
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+
+    assert_eq!(config.multiplexer.kind, MultiplexerKind::Cmux);
+    assert_eq!(config.multiplexer.cmux.layout.as_deref(), Some("daily"));
+    assert_eq!(config.multiplexer.zellij.layout.as_deref(), Some("default"));
 }
 
 #[test]
@@ -103,8 +148,6 @@ path = "~/projects/backend"
     assert!(config.copy_files.is_empty());
 }
 
-use zootree::config::workspace::WorkspaceConfig;
-
 #[test]
 fn test_parse_workspace_config() {
     let toml_str = r#"
@@ -153,18 +196,304 @@ agent_cli = "codexd_brainstorming"
 }
 
 #[test]
+fn parse_workspace_config_with_multiplexer_state() {
+    let toml_str = r#"
+title = "用户认证功能"
+name = "calm-river"
+description = "前后端联调 OAuth2 登录"
+branch = "zootree/calm-river"
+workspace_dir = "~/zootree-workspaces/calm-river"
+created_at = "2026-04-28T10:30:00+08:00"
+
+[multiplexer]
+kind = "cmux"
+
+[multiplexer.cmux]
+layout = "wide"
+
+[multiplexer_state]
+kind = "cmux"
+cmux_workspace = "workspace:3"
+"#;
+
+    let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
+
+    assert_eq!(config.multiplexer.kind, MultiplexerKind::Cmux);
+    assert_eq!(config.multiplexer.cmux.layout.as_deref(), Some("wide"));
+    assert_eq!(config.multiplexer_state.kind, Some(MultiplexerKind::Cmux));
+    assert_eq!(
+        config.multiplexer_state.cmux_workspace.as_deref(),
+        Some("workspace:3")
+    );
+}
+
+#[test]
+fn old_zellij_global_config_is_rejected() {
+    let toml_str = r#"
+[zellij]
+layout = "custom"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<GlobalConfig>(toml_str).unwrap_err(),
+        "zellij",
+    );
+}
+
+#[test]
+fn old_zellij_workspace_config_is_rejected() {
+    let toml_str = r#"
+title = "用户认证功能"
+name = "calm-river"
+description = "前后端联调 OAuth2 登录"
+branch = "zootree/calm-river"
+workspace_dir = "~/zootree-workspaces/calm-river"
+created_at = "2026-04-28T10:30:00+08:00"
+
+[zellij]
+layout = "custom"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<WorkspaceConfig>(toml_str).unwrap_err(),
+        "zellij",
+    );
+}
+
+#[test]
+fn list_workspaces_fails_fast_on_legacy_zellij_workspace_config() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let path = tmp.path().join("workspaces/pending/calm-river.toml");
+    std::fs::write(
+        &path,
+        r#"
+title = "用户认证功能"
+name = "calm-river"
+description = ""
+branch = "zootree/calm-river"
+workspace_dir = "~/zootree-workspaces/calm-river"
+created_at = "2026-04-28T10:30:00+08:00"
+
+[zellij]
+layout = "custom"
+"#,
+    )
+    .unwrap();
+
+    let err = mgr
+        .list_workspaces(Some(&[WorkspaceStatus::Pending]))
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("failed to parse workspace config") && msg.contains("calm-river.toml"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn old_zellij_repo_config_is_rejected() {
+    let toml_str = r#"
+path = "~/projects/frontend"
+
+[zellij]
+layout = "custom"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<RepoConfig>(toml_str).unwrap_err(),
+        "zellij",
+    );
+}
+
+#[test]
+fn repo_multiplexer_config_is_rejected() {
+    let toml_str = r#"
+path = "~/projects/frontend"
+
+[multiplexer]
+kind = "cmux"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<RepoConfig>(toml_str).unwrap_err(),
+        "multiplexer",
+    );
+}
+
+#[test]
+fn old_zellij_template_config_is_rejected() {
+    let toml_str = r#"
+repos = ["frontend"]
+
+[zellij]
+layout = "custom"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<zootree::config::template::TemplateConfig>(toml_str).unwrap_err(),
+        "zellij",
+    );
+}
+
+#[test]
+fn unknown_multiplexer_field_is_rejected() {
+    let toml_str = r#"
+[multiplexer]
+kind = "zellij"
+session_name = "shared-session"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<GlobalConfig>(toml_str).unwrap_err(),
+        "session_name",
+    );
+}
+
+#[test]
+fn zellij_session_mode_is_rejected() {
+    let toml_str = r#"
+[multiplexer]
+kind = "zellij"
+
+[multiplexer.zellij]
+layout = "default"
+session_mode = "shared"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<GlobalConfig>(toml_str).unwrap_err(),
+        "session_mode",
+    );
+}
+
+#[test]
+fn zellij_session_name_is_rejected() {
+    let toml_str = r#"
+[multiplexer]
+kind = "zellij"
+
+[multiplexer.zellij]
+layout = "default"
+session_name = "shared-session"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<GlobalConfig>(toml_str).unwrap_err(),
+        "session_name",
+    );
+}
+
+#[test]
+fn cmux_unknown_field_is_rejected() {
+    let toml_str = r#"
+[multiplexer]
+kind = "cmux"
+
+[multiplexer.cmux]
+layout = "default"
+workspace = "workspace:3"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<GlobalConfig>(toml_str).unwrap_err(),
+        "workspace",
+    );
+}
+
+#[test]
+fn multiplexer_state_unknown_field_is_rejected() {
+    let toml_str = r#"
+title = "用户认证功能"
+name = "calm-river"
+description = "前后端联调 OAuth2 登录"
+branch = "zootree/calm-river"
+workspace_dir = "~/zootree-workspaces/calm-river"
+created_at = "2026-04-28T10:30:00+08:00"
+
+[multiplexer_state]
+kind = "cmux"
+zellij_session = "old-session"
+"#;
+    assert_unknown_field_error(
+        toml::from_str::<WorkspaceConfig>(toml_str).unwrap_err(),
+        "zellij_session",
+    );
+}
+
+#[test]
 fn test_parse_template_config() {
     let toml_str = r#"
 repos = ["frontend", "backend", "shared-lib"]
 
-[zellij]
+[multiplexer]
+kind = "zellij"
+
+[multiplexer.zellij]
 layout = "default"
-session_mode = "standalone"
 "#;
     let config: zootree::config::template::TemplateConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.repos, vec!["frontend", "backend", "shared-lib"]);
-    assert_eq!(config.zellij.layout, Some("default".into()));
-    assert_eq!(config.zellij.session_mode, Some("standalone".into()));
+    assert_eq!(config.multiplexer.kind, MultiplexerKind::Zellij);
+    assert_eq!(config.multiplexer.zellij.layout, Some("default".into()));
+}
+
+#[test]
+fn empty_multiplexer_state_is_not_serialized() {
+    let config = WorkspaceConfig {
+        title: "用户认证功能".into(),
+        name: "calm-river".into(),
+        description: "前后端联调 OAuth2 登录".into(),
+        branch: "zootree/calm-river".into(),
+        workspace_dir: "~/zootree-workspaces/calm-river".into(),
+        created_at: "2026-04-28T10:30:00+08:00".into(),
+        agent_cli: None,
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: MultiplexerState::default(),
+        repos: Vec::new(),
+        events: Vec::new(),
+    };
+
+    let serialized = toml::to_string(&config).unwrap();
+
+    assert!(
+        !serialized.contains("[multiplexer_state]"),
+        "empty multiplexer_state should be skipped, got: {serialized}"
+    );
+}
+
+#[test]
+fn cmux_workspace_state_serializes_and_round_trips() {
+    let config = WorkspaceConfig {
+        title: "用户认证功能".into(),
+        name: "calm-river".into(),
+        description: "前后端联调 OAuth2 登录".into(),
+        branch: "zootree/calm-river".into(),
+        workspace_dir: "~/zootree-workspaces/calm-river".into(),
+        created_at: "2026-04-28T10:30:00+08:00".into(),
+        agent_cli: None,
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: MultiplexerState {
+            kind: Some(MultiplexerKind::Cmux),
+            cmux_workspace: Some("workspace:3".into()),
+        },
+        repos: Vec::new(),
+        events: Vec::new(),
+    };
+
+    let serialized = toml::to_string(&config).unwrap();
+
+    assert!(
+        serialized.contains("[multiplexer_state]"),
+        "non-empty multiplexer_state should be serialized, got: {serialized}"
+    );
+    assert!(
+        serialized.contains("cmux_workspace = \"workspace:3\""),
+        "cmux workspace should be serialized, got: {serialized}"
+    );
+
+    let round_tripped: WorkspaceConfig = toml::from_str(&serialized).unwrap();
+
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_workspace.as_deref(),
+        Some("workspace:3")
+    );
+    assert_eq!(
+        round_tripped.multiplexer_state.kind,
+        Some(MultiplexerKind::Cmux)
+    );
 }
 
 #[test]
@@ -207,7 +536,6 @@ fn build_repo_entries_prefers_explicit_branch() {
             copy_files: Vec::new(),
             hooks: Default::default(),
             lazygit: None,
-            zellij: None,
         },
     )
     .unwrap();
@@ -238,7 +566,6 @@ fn build_repo_entries_uses_repo_default_branch() {
             copy_files: Vec::new(),
             hooks: Default::default(),
             lazygit: None,
-            zellij: None,
         },
     )
     .unwrap();
@@ -263,7 +590,6 @@ fn build_repo_entries_falls_back_to_current_branch() {
             copy_files: Vec::new(),
             hooks: Default::default(),
             lazygit: None,
-            zellij: None,
         },
     )
     .unwrap();

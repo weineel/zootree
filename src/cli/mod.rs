@@ -33,9 +33,11 @@ pub enum Commands {
     Create(workspace::CreateArgs),
     #[command(about = "List workspaces")]
     List(workspace::ListArgs),
-    #[command(about = "Start a pending workspace (create worktrees and launch zellij)")]
+    #[command(
+        about = "Start a pending workspace (create worktrees and launch terminal multiplexer)"
+    )]
     Start(workspace::StartArgs),
-    #[command(about = "Open an in-progress workspace in zellij")]
+    #[command(about = "Open an in-progress workspace in terminal multiplexer")]
     Open(workspace::OpenArgs),
     #[command(about = "Show detailed info about a workspace")]
     Info(info::InfoArgs),

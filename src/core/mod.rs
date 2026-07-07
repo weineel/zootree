@@ -1,10 +1,11 @@
+pub mod cmux_layout;
 pub mod completers;
 pub mod copy_files;
 pub mod git;
 pub mod hook;
 pub mod layout;
+pub mod multiplexer;
 pub mod name_gen;
 pub mod repo_names;
 pub mod repo_status;
 pub mod worktree_status;
-pub mod zellij;

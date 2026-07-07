@@ -50,7 +50,7 @@ pub fn format_missing_worktrees_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::global::ZellijConfig;
+    use crate::config::global::MultiplexerConfig;
     use crate::config::workspace::{RepoEntry, WorkspaceConfig};
 
     fn workspace(workspace_dir: &str) -> WorkspaceConfig {
@@ -62,7 +62,8 @@ mod tests {
             workspace_dir: workspace_dir.into(),
             created_at: "2026-07-02T10:00:00+08:00".into(),
             agent_cli: None,
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
+            multiplexer_state: Default::default(),
             repos: vec![
                 RepoEntry {
                     name: "frontend".into(),

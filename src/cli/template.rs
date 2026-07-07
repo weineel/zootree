@@ -49,7 +49,7 @@ pub fn handle_template_command(cmd: &TemplateCommands) -> Result<()> {
             let (_, workspace) = config_mgr.load_workspace(from)?;
             let tmpl = TemplateConfig {
                 repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-                zellij: workspace.zellij.clone(),
+                multiplexer: workspace.multiplexer.clone(),
             };
             config_mgr.save_template(name, &tmpl)?;
             println!("template '{}' saved from workspace '{}'", name, from);

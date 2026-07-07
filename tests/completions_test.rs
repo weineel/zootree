@@ -1,7 +1,7 @@
 use chrono::Local;
 use std::ffi::OsStr;
 use tempfile::TempDir;
-use zootree::config::global::{GlobalConfig, HooksConfig, ZellijConfig};
+use zootree::config::global::{GlobalConfig, HooksConfig, MultiplexerConfig};
 use zootree::config::repo::RepoConfig;
 use zootree::config::template::TemplateConfig;
 use zootree::config::workspace::{WorkspaceConfig, WorkspaceStatus};
@@ -20,10 +20,8 @@ fn make_workspace(name: &str, title: &str) -> WorkspaceConfig {
         workspace_dir: format!("/tmp/{}", name),
         created_at: Local::now().to_rfc3339(),
         agent_cli: None,
-        zellij: ZellijConfig {
-            session_mode: Some("standalone".into()),
-            ..Default::default()
-        },
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: Default::default(),
         repos: Vec::new(),
         events: Vec::new(),
     }
@@ -153,7 +151,6 @@ fn make_repo(path: &str) -> RepoConfig {
         copy_files: Vec::new(),
         hooks: HooksConfig::default(),
         lazygit: None,
-        zellij: None,
     }
 }
 
@@ -199,7 +196,7 @@ fn template_completer_lists_all_with_repos_help() {
         "web",
         &TemplateConfig {
             repos: vec!["frontend".into(), "backend".into()],
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
         },
     )
     .unwrap();
@@ -221,7 +218,7 @@ fn template_completer_filters_by_prefix() {
         "web",
         &TemplateConfig {
             repos: vec!["a".into()],
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
         },
     )
     .unwrap();
@@ -229,7 +226,7 @@ fn template_completer_filters_by_prefix() {
         "mobile",
         &TemplateConfig {
             repos: vec!["b".into()],
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
         },
     )
     .unwrap();

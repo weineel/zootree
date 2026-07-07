@@ -1,6 +1,5 @@
 use crate::cli::workspace::CreateArgs;
-use crate::config::global::ZellijConfig;
-use crate::config::global::{GlobalConfig, HooksConfig};
+use crate::config::global::{GlobalConfig, HooksConfig, MultiplexerConfig};
 use crate::config::repo::RepoConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig};
 use crate::config::ConfigManager;
@@ -105,6 +104,7 @@ pub struct CreateDraft {
     pub branch: String,
     pub branch_was_edited: bool,
     pub workspace_dir: String,
+    pub multiplexer: Option<MultiplexerConfig>,
     pub repos: Vec<RepoDraftEntry>,
     pub after_create: AfterCreateMode,
 }
@@ -118,6 +118,7 @@ impl CreateDraft {
             branch: default_branch(global, &name),
             branch_was_edited: false,
             workspace_dir: default_workspace_dir(global, &name),
+            multiplexer: None,
             name,
             repos: Vec::new(),
             after_create: AfterCreateMode::CreateOnly,
@@ -319,6 +320,7 @@ pub fn draft_from_args<R: CommandRunner>(
         )?;
     } else if let Some(template_name) = &args.template {
         let template = config_mgr.load_template(template_name)?;
+        draft.multiplexer = Some(template.multiplexer.clone());
         if template.repos.is_empty() {
             anyhow::bail!("template '{}' has no repos", template_name);
         }
@@ -372,6 +374,7 @@ pub fn workspace_from_draft(
     draft: &CreateDraft,
     created_at: impl Into<String>,
     agent_cli: Option<String>,
+    multiplexer: MultiplexerConfig,
 ) -> WorkspaceConfig {
     let created_at = created_at.into();
     WorkspaceConfig {
@@ -382,10 +385,8 @@ pub fn workspace_from_draft(
         workspace_dir: draft.workspace_dir.clone(),
         created_at: created_at.clone(),
         agent_cli,
-        zellij: ZellijConfig {
-            session_mode: Some("standalone".into()),
-            ..Default::default()
-        },
+        multiplexer,
+        multiplexer_state: Default::default(),
         repos: draft
             .repos
             .iter()
@@ -490,7 +491,6 @@ pub fn persist_selected_pending_repos(
             copy_files: Vec::new(),
             hooks: HooksConfig::default(),
             lazygit: None,
-            zellij: None,
         };
         config_mgr.save_repo_config(&repo.name, &repo_config)?;
         repo.source = RepoDraftSource::Registered;

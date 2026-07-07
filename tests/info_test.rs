@@ -1,5 +1,5 @@
 use zootree::cli::info::{render_once, render_once_with_missing_repos};
-use zootree::config::global::{GlobalConfig, ZellijConfig};
+use zootree::config::global::{GlobalConfig, MultiplexerConfig};
 use zootree::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 
 fn base_ws() -> WorkspaceConfig {
@@ -11,7 +11,8 @@ fn base_ws() -> WorkspaceConfig {
         workspace_dir: "/tmp/demo".into(),
         created_at: "2026-05-10T14:22:00+08:00".into(),
         agent_cli: None,
-        zellij: ZellijConfig::default(),
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: Default::default(),
         repos: vec![],
         events: vec![],
     }

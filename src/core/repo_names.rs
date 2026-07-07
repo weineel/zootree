@@ -33,7 +33,6 @@ mod tests {
             copy_files: Vec::new(),
             hooks: HooksConfig::default(),
             lazygit: None,
-            zellij: None,
         }
     }
 

@@ -445,7 +445,7 @@ fn status_color(s: &WorkspaceStatus) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::global::{HooksConfig, ZellijConfig};
+    use crate::config::global::{HooksConfig, MultiplexerConfig};
     use crate::config::repo::RepoConfig;
     use crate::config::workspace::RepoEntry;
 
@@ -458,7 +458,8 @@ mod tests {
             workspace_dir: format!("/tmp/{}", name),
             created_at: "2026-05-10T14:22:00+08:00".into(),
             agent_cli: None,
-            zellij: ZellijConfig::default(),
+            multiplexer: MultiplexerConfig::default(),
+            multiplexer_state: Default::default(),
             repos: vec![],
             events: vec![],
         }
@@ -471,7 +472,6 @@ mod tests {
             copy_files: Vec::new(),
             hooks: HooksConfig::default(),
             lazygit: None,
-            zellij: None,
         }
     }
 

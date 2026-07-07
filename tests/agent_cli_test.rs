@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use zootree::config::global::ZellijConfig;
+use zootree::config::global::MultiplexerConfig;
 use zootree::config::workspace::WorkspaceConfig;
 use zootree::core::layout::{build_prompt, resolve_agent_cli};
 
@@ -12,7 +12,8 @@ fn make_workspace(title: &str, description: &str) -> WorkspaceConfig {
         workspace_dir: "/tmp/ws".into(),
         created_at: "2026-05-12T00:00:00+08:00".into(),
         agent_cli: None,
-        zellij: ZellijConfig::default(),
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: Default::default(),
         repos: Vec::new(),
         events: Vec::new(),
     }
@@ -96,7 +97,7 @@ fn build_agent_cli_display_returns_err_on_empty_template() {
     );
 }
 
-use zootree::core::layout::build_agent_cli_kdl;
+use zootree::core::layout::{build_agent_cli_command, build_agent_cli_kdl};
 
 #[test]
 fn build_agent_cli_kdl_basic_with_prompt() {
@@ -165,6 +166,32 @@ fn build_agent_cli_kdl_empty_template_errors() {
 #[test]
 fn build_agent_cli_kdl_unclosed_quote_errors() {
     let err = build_agent_cli_kdl(r#"claude "unclosed"#, "any").unwrap_err();
+    let msg = format!("{:#}", err);
+    assert!(msg.contains("failed to parse agent_cli"), "got: {}", msg);
+}
+
+#[test]
+fn build_agent_cli_command_shell_quotes_prompt() {
+    let command = build_agent_cli_command("claude -- $prompt", "hello world").unwrap();
+    assert_eq!(command, "claude -- 'hello world'");
+}
+
+#[test]
+fn build_agent_cli_command_handles_multiline_prompt() {
+    let command = build_agent_cli_command("claude -- $prompt", "line1\nline2").unwrap();
+    assert!(command.contains("line1\nline2"), "got: {:?}", command);
+}
+
+#[test]
+fn build_agent_cli_command_empty_template_errors() {
+    let err = build_agent_cli_command("   ", "any").unwrap_err();
+    let msg = format!("{:#}", err);
+    assert!(msg.contains("agent_cli is empty"), "got: {}", msg);
+}
+
+#[test]
+fn build_agent_cli_command_unclosed_quote_errors() {
+    let err = build_agent_cli_command(r#"claude "unclosed"#, "any").unwrap_err();
     let msg = format!("{:#}", err);
     assert!(msg.contains("failed to parse agent_cli"), "got: {}", msg);
 }
