@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub struct MultiplexerLaunch {
     pub workspace_name: String,
     pub display_name: String,
+    pub description: String,
     pub workspace_dir: PathBuf,
     pub layout_name: String,
     pub rendered_layout: String,

@@ -91,6 +91,8 @@ impl<'a, R: CommandRunner> CmuxMultiplexer<'a, R> {
             "create".into(),
             "--name".into(),
             launch.display_name.clone(),
+            "--description".into(),
+            launch.description.clone(),
             "--cwd".into(),
             launch.workspace_dir.to_string_lossy().into_owned(),
             "--layout".into(),

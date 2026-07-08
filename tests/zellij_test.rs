@@ -19,6 +19,7 @@ fn launch() -> MultiplexerLaunch {
     MultiplexerLaunch {
         workspace_name: "fair-fox".into(),
         display_name: "zootree-fair-fox".into(),
+        description: "Fix cmux sidebar copy".into(),
         workspace_dir: "/tmp/fair-fox".into(),
         layout_name: "default".into(),
         rendered_layout: "layout {}".into(),

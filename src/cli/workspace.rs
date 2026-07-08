@@ -705,6 +705,7 @@ fn prepare_zellij_launch(
     Ok(MultiplexerLaunch {
         workspace_name: workspace.name.clone(),
         display_name: multiplexer_display_name(workspace),
+        description: workspace.title.clone(),
         workspace_dir: ws_dir.into(),
         layout_name: layout_name.into(),
         rendered_layout: rendered,
@@ -828,6 +829,7 @@ fn prepare_cmux_launch(
     Ok(MultiplexerLaunch {
         workspace_name: workspace.name.clone(),
         display_name: multiplexer_display_name(workspace),
+        description: workspace.title.clone(),
         workspace_dir: ws_dir.into(),
         layout_name: layout_name.into(),
         rendered_layout: rendered,
