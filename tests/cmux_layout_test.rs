@@ -165,6 +165,11 @@ fn anchor_layout_runs_info_and_multi_repo_agent() {
     assert!(commands.contains(&"zootree info fair-fox --watch".to_string()));
     assert!(commands.contains(&"codex --prompt 'Fix login'".to_string()));
     assert!(cwds.contains(&"/tmp/fair-fox".to_string()));
+    let right_surfaces = anchor_right_surfaces(&value);
+    assert_eq!(right_surfaces.len(), 1);
+    assert_eq!(right_surfaces[0]["name"], "agent");
+    assert_eq!(right_surfaces[0]["command"], "codex --prompt 'Fix login'");
+    assert_eq!(right_surfaces[0]["cwd"], "/tmp/fair-fox");
     assert_no_empty_command(&value);
     assert_no_unresolved_vars(&value);
     assert_valid_cmux_split_tree(&value);
@@ -213,6 +218,11 @@ fn anchor_layout_without_multi_repo_agent_uses_shell_on_right() {
     assert!(commands.contains(&"zootree info fair-fox --watch".to_string()));
     assert!(!commands.iter().any(|command| command.contains("codex")));
     assert!(cwds.contains(&"/tmp/fair-fox".to_string()));
+    let right_surfaces = anchor_right_surfaces(&value);
+    assert_eq!(right_surfaces.len(), 1);
+    assert_eq!(right_surfaces[0]["name"], "shell");
+    assert!(right_surfaces[0].get("command").is_none());
+    assert_eq!(right_surfaces[0]["cwd"], "/tmp/fair-fox");
     assert_no_empty_command(&value);
 }
 
@@ -358,6 +368,12 @@ fn repo_right_bottom_surfaces(value: &Value) -> &Vec<Value> {
     value["children"][1]["children"][1]["pane"]["surfaces"]
         .as_array()
         .expect("right bottom surfaces")
+}
+
+fn anchor_right_surfaces(value: &Value) -> &Vec<Value> {
+    value["children"][1]["pane"]["surfaces"]
+        .as_array()
+        .expect("anchor right surfaces")
 }
 
 fn assert_no_empty_command(value: &Value) {

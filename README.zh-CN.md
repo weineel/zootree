@@ -307,7 +307,7 @@ layout {
 
 - group name 使用 zootree workspace title。
 - group anchor 左侧运行 `zootree info <workspace> --watch`。
-- 多 repo 且使用 `--run-agent` 时，agent 运行在 group anchor 右侧。
+- group anchor 右侧只有一个 terminal：多 repo 且使用 `--run-agent` 时运行 agent；不加 `--run-agent` 时是普通 shell。
 - group 内每个 repo 一个 workspace。
 - 每个 repo workspace 左侧运行 `lazygit -p <worktree_path>`，右侧是 shell。
 - 单 repo 且使用 `--run-agent` 时，agent 运行在该 repo workspace 的右下 terminal。

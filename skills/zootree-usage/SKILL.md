@@ -209,7 +209,7 @@ max_size = "10MB"
 
 未配置 `[multiplexer].kind` 时 zootree 保持兼容默认值 `zellij`；新配置推荐显式设置为 `cmux`。
 
-cmux 模式会为一个 zootree workspace 创建一个 cmux workspace group。group name 使用 workspace title；group anchor 用于 `zootree info` 和多 repo agent；group 内每个 repo 一个 workspace，repo workspace 左侧运行 lazygit、右侧运行 shell。单 repo 的 `--run-agent` 运行在 repo workspace 右下 terminal。当前 cmux group 模式只支持 `layout = "default"`。
+cmux 模式会为一个 zootree workspace 创建一个 cmux workspace group。group name 使用 workspace title；group anchor 左侧运行 `zootree info`，右侧只有一个 terminal：多 repo 且使用 `--run-agent` 时运行 agent，不加 `--run-agent` 时是普通 shell；group 内每个 repo 一个 workspace，repo workspace 左侧运行 lazygit、右侧运行 shell。单 repo 的 `--run-agent` 运行在 repo workspace 右下 terminal。当前 cmux group 模式只支持 `layout = "default"`。
 
 ### agent_cli 与别名
 

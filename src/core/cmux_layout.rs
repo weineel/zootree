@@ -88,11 +88,6 @@ pub fn default_cmux_anchor_layout() -> &'static str {
             "name": "agent",
             "command": "$agent_command",
             "cwd": "$workspace_dir"
-          },
-          {
-            "type": "terminal",
-            "name": "shell",
-            "cwd": "$workspace_dir"
           }
         ]
       }
@@ -173,6 +168,7 @@ pub fn render_cmux_anchor_layout(
     expand_value(&mut value, repos, Some(vars))?;
     replace_anchor_info_command(&mut value, vars, &info_command);
     replace_extra_vars(&mut value, agent_command.unwrap_or(""), "", &info_command)?;
+    replace_empty_agent_with_shell(&mut value);
     prune_empty(&mut value);
     normalize_layout_tree(&mut value);
     Ok(serde_json::to_string(&value)?)
@@ -193,7 +189,7 @@ pub fn render_cmux_repo_layout(
         &lazygit_command,
         "",
     )?;
-    replace_empty_repo_agent_with_shell(&mut value);
+    replace_empty_agent_with_shell(&mut value);
     prune_empty(&mut value);
     normalize_layout_tree(&mut value);
     Ok(serde_json::to_string(&value)?)
@@ -340,7 +336,7 @@ fn replace_extra_vars(
     Ok(())
 }
 
-fn replace_empty_repo_agent_with_shell(value: &mut Value) {
+fn replace_empty_agent_with_shell(value: &mut Value) {
     match value {
         Value::Object(map) => {
             let is_empty_agent_surface = map.get("name").and_then(Value::as_str) == Some("agent")
@@ -350,12 +346,12 @@ fn replace_empty_repo_agent_with_shell(value: &mut Value) {
                 map.remove("command");
             }
             for child in map.values_mut() {
-                replace_empty_repo_agent_with_shell(child);
+                replace_empty_agent_with_shell(child);
             }
         }
         Value::Array(items) => {
             for item in items {
-                replace_empty_repo_agent_with_shell(item);
+                replace_empty_agent_with_shell(item);
             }
         }
         _ => {}

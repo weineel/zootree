@@ -312,7 +312,7 @@ When `[multiplexer] kind = "cmux"`, zootree creates one cmux workspace group per
 
 - The group name is the zootree workspace title.
 - The group anchor runs `zootree info <workspace> --watch` on the left.
-- With multiple repos, `--run-agent` runs in the group anchor on the right.
+- The group anchor's right side is a single terminal: with multiple repos, `--run-agent` runs the agent there; without `--run-agent`, it is a regular shell.
 - The group contains one workspace per repo.
 - Each repo workspace runs `lazygit -p <worktree_path>` on the left and shells on the right.
 - With a single repo, `--run-agent` runs in that repo workspace's bottom-right terminal.
