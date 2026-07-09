@@ -8,7 +8,7 @@ description: >
 
 # zootree 使用指南
 
-zootree 是基于 Git Worktree + 终端复用器（默认 Zellij，可配置 cmux）+ LazyGit 的多仓库协作工作空间管理工具。
+zootree 是基于 Git Worktree + 终端复用器（推荐 cmux，Zellij 作为兼容默认值）+ LazyGit 的多仓库协作工作空间管理工具。
 
 ## 核心概念
 
@@ -40,7 +40,7 @@ zootree create \
   --name experimental-file-preview \
   --branch zootree/experimental-file-preview \
   --repos f-hiro:feature/PBI-123456 \
-  --run-agent codexd_brainstorming
+  --run-agent claude-safe
 ```
 
 如果只需要创建 pending workspace，不启动 agent：
@@ -55,11 +55,33 @@ zootree create \
 
 ## 安装
 
+CI/CD 配置会发布 GitHub Release shell installer、Homebrew formula 和 crates.io package。普通用户优先使用预编译安装方式，开发当前 checkout 时才用 `cargo install --path .`。
+
+推荐安装 zootree CLI：
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/weineel/zootree/releases/latest/download/zootree-installer.sh | sh
+```
+
+macOS / Homebrew：
+
+```bash
+brew install weineel/tap/zootree
+```
+
+Rust / crates.io：
+
+```bash
+cargo install zootree --locked
+```
+
+本地源码 checkout：
+
 ```bash
 cargo install --path .
 ```
 
-前置依赖: Git、Zellij 或 cmux、LazyGit（可选）
+前置依赖: Git、cmux（推荐）或 Zellij、LazyGit（可选）
 
 ## 命令参考
 
@@ -91,7 +113,7 @@ zootree repo remove myrepo
 zootree create --title "新功能开发" --name new-feature --repos frontend:feature/abc,backend:feature/abc
 
 # 创建并启动默认 brainstorming agent
-zootree create --title "新功能开发" --name new-feature --repos frontend:feature/abc --run-agent codexd_brainstorming
+zootree create --title "新功能开发" --name new-feature --repos frontend:feature/abc --run-agent claude-safe
 
 # 指定分支名、名称或使用模板
 zootree create --title "新功能开发" --branch my-feature --name my-ws --template my-template
@@ -104,7 +126,7 @@ zootree create --title "新功能开发" --branch my-feature --name my-ws --temp
 zootree start my-workspace
 
 # 指定名称并启动 agent；--run-agent 放在 workspace name 后面
-zootree start my-workspace --run-agent codexd_brainstorming
+zootree start my-workspace --run-agent claude-safe
 ```
 
 **查看** - 列出工作空间
@@ -165,7 +187,7 @@ branch_prefix = "zootree"
 copy_files = [".env"]
 
 [multiplexer]
-kind = "zellij"
+kind = "cmux"
 
 [multiplexer.zellij]
 layout = "default"
@@ -184,6 +206,8 @@ pre_remove = "echo removing"
 max_files = 5
 max_size = "10MB"
 ```
+
+未配置 `[multiplexer].kind` 时 zootree 保持兼容默认值 `zellij`；新配置推荐显式设置为 `cmux`。
 
 cmux 模式会为一个 zootree workspace 创建一个 cmux workspace group。group name 使用 workspace title；group anchor 用于 `zootree info` 和多 repo agent；group 内每个 repo 一个 workspace，repo workspace 左侧运行 lazygit、右侧运行 shell。单 repo 的 `--run-agent` 运行在 repo workspace 右下 terminal。当前 cmux group 模式只支持 `layout = "default"`。
 
@@ -304,7 +328,7 @@ zootree repo add ~/projects/frontend --default-target-branch develop
 zootree repo add ~/projects/backend --default-target-branch develop
 
 # 3. 创建工作空间
-zootree create --title "feat(PBI-123456): 用户登录功能" --name user-login --repos frontend:feature/login,backend:feature/login --run-agent codexd_brainstorming
+zootree create --title "feat(PBI-123456): 用户登录功能" --name user-login --repos frontend:feature/login,backend:feature/login --run-agent claude-safe
 
 # 4. 查看工作空间
 zootree info user-login
@@ -318,6 +342,6 @@ zootree done user-login --push
 ## 故障排查
 
 - **worktree 创建失败**: 检查分支名是否冲突，用 `zootree prune` 清理孤立 worktree
-- **终端复用器未启动**: 确认已配置的 `zellij` 或 `cmux` 在 PATH 中，或使用 `--no-multiplexer` 跳过
+- **终端复用器未启动**: 确认已配置的 `cmux`（推荐）或 `zellij` 在 PATH 中，或使用 `--no-multiplexer` 跳过
 - **Hook 执行失败**: 检查脚本语法，设置详细日志 `--verbose` 查看错误
 - **日志位置**: `~/.config/zootree/logs/zootree.log`

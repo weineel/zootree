@@ -1,6 +1,6 @@
 # zootree
 
-多仓库协作开发工作空间管理工具。基于 Git Worktree + 终端复用器（默认 Zellij，可配置 cmux）+ LazyGit 实现。
+多仓库协作开发工作空间管理工具。基于 Git Worktree + 终端复用器（推荐 cmux，Zellij 作为兼容默认值）+ LazyGit 实现。
 
 [English](README.md)
 
@@ -8,17 +8,20 @@
 
 - **多仓库管理** - 同时在多个仓库的同一分支上工作
 - **工作空间** - 创建、管理和清理工作空间
-- **终端复用器集成** - 自动启动布局好的 Zellij 或 cmux 终端环境
+- **终端复用器集成** - 自动启动布局好的 cmux 或 Zellij 终端环境
 - **Hook 机制** - 自定义钩子支持 (simple/file/inline)
 - **文件复制** - 自动复制配置文件到 worktree
 - **模板系统** - 保存和复用工作空间配置
 
 ## 安装
 
-### 通过 shell 脚本安装预编译二进制
+CI/CD release 流程由 `cargo-dist` 生成，会发布 GitHub Release 产物、更新
+Homebrew tap，并发布 crate 到 crates.io。
+
+### 推荐：通过 shell installer 安装预编译二进制
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/weineel/zootree/releases/download/v0.0.1/zootree-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/weineel/zootree/releases/latest/download/zootree-installer.sh | sh
 ```
 
 ### 通过 Homebrew 安装预编译二进制
@@ -27,10 +30,22 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/weineel/zootree/release
 brew install weineel/tap/zootree
 ```
 
-### 从源码安装
+### 通过 crates.io 安装
+
+```bash
+cargo install zootree --locked
+```
+
+### 从本地 checkout 安装
 
 ```bash
 cargo install --path .
+```
+
+### 安装 skill
+
+```bash
+npx skills install weineel/zootree
 ```
 
 ## Shell 补全
@@ -212,7 +227,7 @@ copy_files = [".env"]
 agent_cli = "claude --dangerously-skip-permissions -- $prompt"
 
 [multiplexer]
-kind = "zellij"
+kind = "cmux"
 
 [multiplexer.zellij]
 layout = "default"
@@ -231,7 +246,7 @@ pre_remove = "echo removed"
 max_files = 5
 ```
 
-在 `[multiplexer]` 中设置 `kind = "cmux"` 可从默认 zellij 切换为 cmux。
+cmux 是新配置推荐的终端复用器；如果省略 `[multiplexer].kind`，zootree 保持兼容默认值 `zellij`。
 
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 
@@ -355,7 +370,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 ## 依赖
 
 - Git
-- Zellij 或 cmux
+- cmux（推荐）或 Zellij
 - LazyGit (可选)
 
 ## 发布
