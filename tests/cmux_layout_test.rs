@@ -232,6 +232,11 @@ fn repo_layout_runs_lazygit_and_single_repo_agent() {
     assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api".to_string()));
     assert!(commands.contains(&"codex --prompt 'Fix login'".to_string()));
     assert!(cwds.iter().any(|cwd| cwd == "/tmp/fair-fox/api"));
+    let bottom_surfaces = repo_right_bottom_surfaces(&value);
+    assert_eq!(bottom_surfaces.len(), 1);
+    assert_eq!(bottom_surfaces[0]["name"], "agent");
+    assert_eq!(bottom_surfaces[0]["command"], "codex --prompt 'Fix login'");
+    assert_eq!(bottom_surfaces[0]["cwd"], "/tmp/fair-fox/api");
     assert_no_empty_command(&value);
     assert_no_unresolved_vars(&value);
     assert_valid_cmux_split_tree(&value);
@@ -246,7 +251,39 @@ fn repo_layout_without_agent_keeps_shell_bottom() {
 
     assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api".to_string()));
     assert!(!commands.iter().any(|command| command.contains("codex")));
+    let bottom_surfaces = repo_right_bottom_surfaces(&value);
+    assert_eq!(bottom_surfaces.len(), 1);
+    assert_eq!(bottom_surfaces[0]["name"], "shell");
+    assert!(bottom_surfaces[0].get("command").is_none());
+    assert_eq!(bottom_surfaces[0]["cwd"], "/tmp/fair-fox/api");
     assert_no_empty_command(&value);
+}
+
+#[test]
+fn repo_layout_without_agent_turns_agent_placeholder_into_shell() {
+    let repo = vars().remove(0);
+    let template = r#"{
+  "pane": {
+    "surfaces": [
+      {
+        "type": "terminal",
+        "name": "agent",
+        "command": "$agent_command",
+        "cwd": "$worktree_path"
+      }
+    ]
+  }
+}"#;
+
+    let rendered = render_cmux_repo_layout(template, &repo, None).unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let surfaces = value["pane"]["surfaces"].as_array().expect("surfaces");
+
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0]["type"], "terminal");
+    assert_eq!(surfaces[0]["name"], "shell");
+    assert_eq!(surfaces[0]["cwd"], "/tmp/fair-fox/api");
+    assert!(surfaces[0].get("command").is_none());
 }
 
 #[test]
@@ -315,6 +352,12 @@ fn collect_string_field_into(value: &Value, field: &str, values: &mut Vec<String
         }
         _ => {}
     }
+}
+
+fn repo_right_bottom_surfaces(value: &Value) -> &Vec<Value> {
+    value["children"][1]["children"][1]["pane"]["surfaces"]
+        .as_array()
+        .expect("right bottom surfaces")
 }
 
 fn assert_no_empty_command(value: &Value) {

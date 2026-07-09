@@ -142,11 +142,6 @@ pub fn default_cmux_repo_layout() -> &'static str {
                 "name": "agent",
                 "command": "$agent_command",
                 "cwd": "$worktree_path"
-              },
-              {
-                "type": "terminal",
-                "name": "shell",
-                "cwd": "$worktree_path"
               }
             ]
           }
@@ -198,6 +193,7 @@ pub fn render_cmux_repo_layout(
         &lazygit_command,
         "",
     )?;
+    replace_empty_repo_agent_with_shell(&mut value);
     prune_empty(&mut value);
     normalize_layout_tree(&mut value);
     Ok(serde_json::to_string(&value)?)
@@ -342,6 +338,28 @@ fn replace_extra_vars(
         _ => {}
     }
     Ok(())
+}
+
+fn replace_empty_repo_agent_with_shell(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let is_empty_agent_surface = map.get("name").and_then(Value::as_str) == Some("agent")
+                && map.get("command").and_then(Value::as_str) == Some("");
+            if is_empty_agent_surface {
+                map.insert("name".into(), Value::String("shell".into()));
+                map.remove("command");
+            }
+            for child in map.values_mut() {
+                replace_empty_repo_agent_with_shell(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_empty_repo_agent_with_shell(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn prune_empty(value: &mut Value) -> bool {
