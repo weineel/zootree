@@ -4,7 +4,7 @@ description: >
   帮助用户安装、配置和使用 zootree 多仓库协作工作空间管理工具。
   当用户提到 zootree、workspace 工作空间、worktree、多仓库管理、终端复用器布局、
   zellij/cmux、lazygit 集成、或需要创建/启动/完成/取消工作空间时，使用此 skill。
-  也适用于配置 zootree 的 config.toml、Hook 脚本、KDL 或 cmux JSON 布局模板等场景。
+  也适用于配置 zootree 的 config.toml、Hook 脚本、Zellij KDL 布局或 cmux group 布局等场景。
 ---
 
 # zootree 使用指南
@@ -153,6 +153,8 @@ max_files = 5
 max_size = "10MB"
 ```
 
+cmux 模式会为一个 zootree workspace 创建一个 cmux workspace group。group name 使用 workspace title；group anchor 用于 `zootree info` 和多 repo agent；group 内每个 repo 一个 workspace，repo workspace 左侧运行 lazygit、右侧运行 shell。单 repo 的 `--run-agent` 运行在 repo workspace 右下 terminal。当前 cmux group 模式只支持 `layout = "default"`。
+
 ### agent_cli 与别名
 
 `agent_cli` 字段既可以是字面量命令模板（含 `$prompt` 占位符），也可以是
@@ -217,10 +219,24 @@ Hook 可用的环境变量：`ZOOTREE_WORKSPACE`、`ZOOTREE_REPO`、`ZOOTREE_BRA
 ### 布局模板 (~/.config/zootree/layouts/<name>.kdl)
 
 ```kdl
+// 自动生成，修改无效，仅作参考和调试用途
 layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
     tab name="overview" {
-        pane command="zootree" {
-            args "list" "--status" "in_progress"
+        pane split_direction="vertical" {
+            pane command="zootree" {
+                args "info" "$workspace_name" "--watch"
+            }
+            pane cwd="$workspace_dir" $overview_agent_cli
         }
     }
 
@@ -230,17 +246,20 @@ layout {
             pane size="60%" command="lazygit" {
                 args "-p" "$worktree_path" "-ucf" "$lazygit_config"
             }
-            pane size="12%" cwd="$worktree_path"
-            pane size="28%" cwd="$worktree_path"
+            pane {
+                pane size="30%" cwd="$worktree_path"
+                pane size="70%" cwd="$worktree_path" $repo_agent_cli
+            }
         }
     }
 }
 ```
 
-可用变量：`$repo_name`、`$worktree_path`、`$branch`、`$workspace_name`、`$workspace_dir`、`$lazygit_config`
+可用变量：`$repo_name`、`$worktree_path`、`$branch`、`$workspace_name`、`$workspace_dir`、`$lazygit_config`、`$overview_agent_cli`、`$repo_agent_cli`
 
 - `// @repeat-per-repo` 标记下的 tab 块会为每个仓库重复展开
 - 如果 lazygit_config 为空，`-ucf "$lazygit_config"` 参数对会自动移除
+- `$overview_agent_cli` 和 `$repo_agent_cli` 是 `--run-agent` 的占位符；zellij 单 repo 使用 repo tab 右下 pane，多 repo 使用 overview tab 最后 pane，未使用的位置会回退为普通 shell
 
 ## 完整工作流示例
 

@@ -62,9 +62,142 @@ pub fn default_cmux_layout() -> &'static str {
 }"#
 }
 
+pub fn default_cmux_anchor_layout() -> &'static str {
+    r#"{
+  "direction": "horizontal",
+  "split": 0.5,
+  "children": [
+    {
+      "pane": {
+        "surfaces": [
+          {
+            "type": "terminal",
+            "name": "info",
+            "command": "$info_command",
+            "cwd": "$workspace_dir",
+            "focus": true
+          }
+        ]
+      }
+    },
+    {
+      "pane": {
+        "surfaces": [
+          {
+            "type": "terminal",
+            "name": "agent",
+            "command": "$agent_command",
+            "cwd": "$workspace_dir"
+          },
+          {
+            "type": "terminal",
+            "name": "shell",
+            "cwd": "$workspace_dir"
+          }
+        ]
+      }
+    }
+  ]
+}"#
+}
+
+pub fn default_cmux_repo_layout() -> &'static str {
+    r#"{
+  "direction": "horizontal",
+  "split": 0.38,
+  "children": [
+    {
+      "pane": {
+        "surfaces": [
+          {
+            "type": "terminal",
+            "name": "lazygit",
+            "command": "$lazygit_command",
+            "cwd": "$worktree_path",
+            "focus": true
+          }
+        ]
+      }
+    },
+    {
+      "direction": "vertical",
+      "split": 0.5,
+      "children": [
+        {
+          "pane": {
+            "surfaces": [
+              {
+                "type": "terminal",
+                "name": "shell",
+                "cwd": "$worktree_path"
+              }
+            ]
+          }
+        },
+        {
+          "pane": {
+            "surfaces": [
+              {
+                "type": "terminal",
+                "name": "agent",
+                "command": "$agent_command",
+                "cwd": "$worktree_path"
+              },
+              {
+                "type": "terminal",
+                "name": "shell",
+                "cwd": "$worktree_path"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}"#
+}
+
 pub fn render_cmux_layout(template: &str, repos: &[CmuxLayoutVar]) -> Result<String> {
     let mut value: Value = serde_json::from_str(template)?;
     expand_value(&mut value, repos, repos.first())?;
+    prune_empty(&mut value);
+    normalize_layout_tree(&mut value);
+    Ok(serde_json::to_string(&value)?)
+}
+
+pub fn render_cmux_anchor_layout(
+    template: &str,
+    repos: &[CmuxLayoutVar],
+    agent_command: Option<&str>,
+) -> Result<String> {
+    let Some(vars) = repos.first() else {
+        anyhow::bail!("cmux anchor layout requires at least one repo");
+    };
+    let info_command = zootree_info_command(&vars.workspace_name)?;
+    let mut value: Value = serde_json::from_str(template)?;
+    expand_value(&mut value, repos, Some(vars))?;
+    replace_anchor_info_command(&mut value, vars, &info_command);
+    replace_extra_vars(&mut value, agent_command.unwrap_or(""), "", &info_command)?;
+    prune_empty(&mut value);
+    normalize_layout_tree(&mut value);
+    Ok(serde_json::to_string(&value)?)
+}
+
+pub fn render_cmux_repo_layout(
+    template: &str,
+    repo: &CmuxLayoutVar,
+    agent_command: Option<&str>,
+) -> Result<String> {
+    let repos = std::slice::from_ref(repo);
+    let mut value: Value = serde_json::from_str(template)?;
+    expand_value(&mut value, repos, Some(repo))?;
+    let lazygit_command = lazygit_command(repo)?;
+    replace_extra_vars(
+        &mut value,
+        agent_command.unwrap_or(""),
+        &lazygit_command,
+        "",
+    )?;
     prune_empty(&mut value);
     normalize_layout_tree(&mut value);
     Ok(serde_json::to_string(&value)?)
@@ -132,6 +265,83 @@ fn replace_vars(input: &str, vars: &CmuxLayoutVar) -> String {
         .replace("$lazygit_config", &vars.lazygit_config)
         .replace("$overview_agent_command", &vars.overview_agent_command)
         .replace("$repo_agent_command", &vars.repo_agent_command)
+}
+
+fn lazygit_command(vars: &CmuxLayoutVar) -> Result<String> {
+    if vars.lazygit_config.is_empty() {
+        Ok(shlex::try_join([
+            "lazygit",
+            "-p",
+            vars.worktree_path.as_str(),
+        ])?)
+    } else {
+        Ok(shlex::try_join([
+            "lazygit",
+            "-p",
+            vars.worktree_path.as_str(),
+            "-ucf",
+            vars.lazygit_config.as_str(),
+        ])?)
+    }
+}
+
+fn zootree_info_command(workspace_name: &str) -> Result<String> {
+    Ok(shlex::try_join([
+        "zootree",
+        "info",
+        workspace_name,
+        "--watch",
+    ])?)
+}
+
+fn replace_anchor_info_command(value: &mut Value, vars: &CmuxLayoutVar, info_command: &str) {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                replace_anchor_info_command(child, vars, info_command);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_anchor_info_command(item, vars, info_command);
+            }
+        }
+        Value::String(s) => {
+            let legacy = format!("zootree info {} --watch", vars.workspace_name);
+            if s == &legacy {
+                *s = info_command.to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn replace_extra_vars(
+    value: &mut Value,
+    agent_command: &str,
+    lazygit_command: &str,
+    info_command: &str,
+) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                replace_extra_vars(child, agent_command, lazygit_command, info_command)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_extra_vars(item, agent_command, lazygit_command, info_command)?;
+            }
+        }
+        Value::String(s) => {
+            *s = s
+                .replace("$agent_command", agent_command)
+                .replace("$lazygit_command", lazygit_command)
+                .replace("$info_command", info_command);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn prune_empty(value: &mut Value) -> bool {

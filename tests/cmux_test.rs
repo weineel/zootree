@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
 use zootree::core::multiplexer::{
-    cmux::CmuxMultiplexer, LaunchOutcome, MultiplexerIdentity, MultiplexerLaunch,
-    TerminalMultiplexer,
+    cmux::{CmuxGroupFocusOutcome, CmuxMultiplexer},
+    CmuxGroupLaunch, CmuxRepoWorkspaceLaunch, LaunchOutcome, MultiplexerIdentity,
+    MultiplexerLaunch, TerminalMultiplexer,
 };
 use zootree::runner::MockRunner;
 
@@ -32,6 +33,33 @@ fn launch() -> MultiplexerLaunch {
         layout_name: "default".into(),
         rendered_layout: r#"{"pane":{"surfaces":[{"type":"terminal"}]}}"#.into(),
         layout_file: "/tmp/default.cmux.json".into(),
+    }
+}
+
+fn group_launch() -> CmuxGroupLaunch {
+    CmuxGroupLaunch {
+        workspace_name: "fair-fox".into(),
+        group_name: "Fix cmux sidebar copy".into(),
+        anchor_name: "zootree-fair-fox".into(),
+        anchor_description: "Fix cmux sidebar copy".into(),
+        anchor_cwd: "/tmp/fair-fox".into(),
+        anchor_layout: r#"{"pane":{"surfaces":[{"type":"terminal","name":"info"}]}}"#.into(),
+        repo_workspaces: vec![
+            CmuxRepoWorkspaceLaunch {
+                repo_name: "api".into(),
+                workspace_name: "zootree-fair-fox-api".into(),
+                description: "api".into(),
+                cwd: "/tmp/fair-fox/api".into(),
+                layout: r#"{"pane":{"surfaces":[{"type":"terminal","name":"api"}]}}"#.into(),
+            },
+            CmuxRepoWorkspaceLaunch {
+                repo_name: "web".into(),
+                workspace_name: "zootree-fair-fox-web".into(),
+                description: "web".into(),
+                cwd: "/tmp/fair-fox/web".into(),
+                layout: r#"{"pane":{"surfaces":[{"type":"terminal","name":"web"}]}}"#.into(),
+            },
+        ],
     }
 }
 
@@ -213,4 +241,435 @@ fn close_without_id_skips_duplicate_exact_name_matches() {
     let calls = runner.take_calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].args, vec!["workspace", "list"]);
+}
+
+#[test]
+fn launch_group_creates_anchor_group_and_repo_workspaces() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"workspace:4\n"));
+    runner.push_response(success_output(b"workspace_group:2\n"));
+    runner.push_response(success_output(
+        br#"{"groups":[{"name":"Fix cmux sidebar copy","ref":"workspace_group:2","anchor_workspace_ref":"workspace:99"}]}"#,
+    ));
+    runner.push_response(success_output(b"workspace:7\n"));
+    runner.push_response(success_output(b""));
+    runner.push_response(success_output(b""));
+    runner.push_response(success_output(b"workspace:5\n"));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let state = cmux
+        .launch_group_and_capture_state(&group_launch())
+        .unwrap();
+
+    assert_eq!(state.group, "workspace_group:2");
+    assert_eq!(state.repo_workspaces.len(), 2);
+    assert_eq!(state.repo_workspaces[0].repo, "api");
+    assert_eq!(state.repo_workspaces[0].workspace, "workspace:4");
+    assert_eq!(state.repo_workspaces[1].repo, "web");
+    assert_eq!(state.repo_workspaces[1].workspace, "workspace:5");
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 7);
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "workspace",
+            "create",
+            "--name",
+            "zootree-fair-fox-api",
+            "--description",
+            "api",
+            "--cwd",
+            "/tmp/fair-fox/api",
+            "--layout",
+            r#"{"pane":{"surfaces":[{"type":"terminal","name":"api"}]}}"#,
+            "--focus",
+            "true"
+        ]
+    );
+    assert_eq!(
+        calls[1].args,
+        vec![
+            "workspace-group",
+            "create",
+            "--name",
+            "Fix cmux sidebar copy",
+            "--from",
+            "workspace:4"
+        ]
+    );
+    assert_eq!(calls[2].args, vec!["workspace-group", "list", "--json"]);
+    assert_eq!(
+        calls[3].args,
+        vec![
+            "workspace",
+            "create",
+            "--name",
+            "zootree-fair-fox",
+            "--description",
+            "Fix cmux sidebar copy",
+            "--cwd",
+            "/tmp/fair-fox",
+            "--layout",
+            r#"{"pane":{"surfaces":[{"type":"terminal","name":"info"}]}}"#,
+            "--focus",
+            "true",
+            "--group",
+            "workspace_group:2",
+            "--group-placement",
+            "top"
+        ]
+    );
+    assert_eq!(
+        calls[4].args,
+        vec![
+            "workspace-group",
+            "set-anchor",
+            "--group",
+            "workspace_group:2",
+            "--workspace",
+            "workspace:7"
+        ]
+    );
+    assert_eq!(calls[5].args, vec!["workspace", "close", "workspace:99"]);
+    assert_eq!(
+        calls[6].args,
+        vec![
+            "workspace",
+            "create",
+            "--name",
+            "zootree-fair-fox-web",
+            "--description",
+            "web",
+            "--cwd",
+            "/tmp/fair-fox/web",
+            "--layout",
+            r#"{"pane":{"surfaces":[{"type":"terminal","name":"web"}]}}"#,
+            "--focus",
+            "false",
+            "--group",
+            "workspace_group:2",
+            "--group-placement",
+            "end"
+        ]
+    );
+}
+
+#[test]
+fn launch_group_group_ref_error_includes_group_name() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"workspace:4\n"));
+    runner.push_response(success_output(b"created group\n"));
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let error = cmux
+        .launch_group_and_capture_state(&group_launch())
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("Fix cmux sidebar copy"));
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[1].args,
+        vec![
+            "workspace-group",
+            "create",
+            "--name",
+            "Fix cmux sidebar copy",
+            "--from",
+            "workspace:4"
+        ]
+    );
+    assert_eq!(calls[2].args, vec!["workspace", "close", "workspace:4"]);
+}
+
+#[test]
+fn launch_group_rolls_back_group_when_repo_workspace_create_fails() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(b"repo create failed"));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let error = cmux
+        .launch_group_and_capture_state(&group_launch())
+        .unwrap_err();
+    let msg = format!("{:#}", error);
+
+    assert!(
+        msg.contains("cmux workspace create failed: repo create failed"),
+        "unexpected error: {msg}"
+    );
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].args[0], "workspace");
+    assert_eq!(calls[0].args[1], "create");
+}
+
+#[test]
+fn launch_group_rolls_back_group_when_second_repo_workspace_create_fails() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"workspace:4\n"));
+    runner.push_response(success_output(b"workspace_group:2\n"));
+    runner.push_response(success_output(
+        br#"{"groups":[{"name":"Fix cmux sidebar copy","ref":"workspace_group:2","anchor_workspace_ref":"workspace:99"}]}"#,
+    ));
+    runner.push_response(success_output(b"workspace:7\n"));
+    runner.push_response(success_output(b""));
+    runner.push_response(success_output(b""));
+    runner.push_response(failure_output(b"second repo create failed"));
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let error = cmux
+        .launch_group_and_capture_state(&group_launch())
+        .unwrap_err();
+    let msg = format!("{:#}", error);
+
+    assert!(
+        msg.contains("cmux workspace create failed: second repo create failed"),
+        "unexpected error: {msg}"
+    );
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 8);
+    assert_eq!(
+        calls[7].args,
+        vec!["workspace-group", "delete", "workspace_group:2"]
+    );
+}
+
+#[test]
+fn parse_workspace_group_ref_finds_group_ref() {
+    let output = success_output(b"created workspace_group:9\n");
+
+    assert_eq!(
+        CmuxMultiplexer::<MockRunner>::parse_workspace_group_ref(&output).as_deref(),
+        Some("workspace_group:9")
+    );
+}
+
+#[test]
+fn parse_unique_group_match_finds_exact_unique_name_from_json() {
+    let stdout = br#"{
+  "groups": [
+    { "ref": "workspace_group:2", "name": "Fix cmux sidebar copy" },
+    { "ref": "workspace_group:3", "name": "Other work" }
+  ],
+  "window_ref": "window:1"
+}"#;
+
+    assert_eq!(
+        CmuxMultiplexer::<MockRunner>::parse_unique_group_match(stdout, "Fix cmux sidebar copy")
+            .as_deref(),
+        Some("workspace_group:2")
+    );
+}
+
+#[test]
+fn parse_unique_group_match_rejects_duplicate_names() {
+    let stdout = br#"{
+  "groups": [
+    { "ref": "workspace_group:2", "name": "Fix cmux sidebar copy" },
+    { "ref": "workspace_group:3", "name": "Fix cmux sidebar copy" }
+  ]
+}"#;
+
+    assert_eq!(
+        CmuxMultiplexer::<MockRunner>::parse_unique_group_match(stdout, "Fix cmux sidebar copy"),
+        None
+    );
+}
+
+#[test]
+fn parse_unique_group_match_rejects_duplicate_name_even_when_one_ref_is_invalid() {
+    let stdout = br#"{
+  "groups": [
+    { "ref": "workspace_group:2", "name": "Fix cmux sidebar copy" },
+    { "ref": "workspace_group:bogus", "name": "Fix cmux sidebar copy" }
+  ]
+}"#;
+
+    assert_eq!(
+        CmuxMultiplexer::<MockRunner>::parse_unique_group_match(stdout, "Fix cmux sidebar copy"),
+        None
+    );
+}
+
+#[test]
+fn focus_group_uses_persisted_group_ref() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let outcome = cmux
+        .focus_group_or_find("Fix cmux sidebar copy", Some("workspace_group:2"))
+        .unwrap();
+
+    assert_eq!(outcome, CmuxGroupFocusOutcome::FocusedExisting);
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].args,
+        vec!["workspace-group", "focus", "workspace_group:2"]
+    );
+}
+
+#[test]
+fn focus_group_falls_back_to_unique_title_match() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(b"group not found"));
+    runner.push_response(success_output(
+        br#"{"groups":[{"ref":"workspace_group:7","name":"Fix cmux sidebar copy"}]}"#,
+    ));
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let found = cmux
+        .focus_group_or_find("Fix cmux sidebar copy", Some("workspace_group:2"))
+        .unwrap();
+
+    assert_eq!(
+        found,
+        CmuxGroupFocusOutcome::FocusedFound("workspace_group:7".into())
+    );
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls[0].args,
+        vec!["workspace-group", "focus", "workspace_group:2"]
+    );
+    assert_eq!(calls[1].args, vec!["workspace-group", "list", "--json"]);
+    assert_eq!(
+        calls[2].args,
+        vec!["workspace-group", "focus", "workspace_group:7"]
+    );
+}
+
+#[test]
+fn focus_group_reports_not_found_after_stale_ref_and_no_unique_title_match() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(b"group not found"));
+    runner.push_response(success_output(
+        br#"{"groups":[
+            {"ref":"workspace_group:7","name":"Other work"}
+        ]}"#,
+    ));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let outcome = cmux
+        .focus_group_or_find("Fix cmux sidebar copy", Some("workspace_group:2"))
+        .unwrap();
+
+    assert_eq!(outcome, CmuxGroupFocusOutcome::NotFound);
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].args,
+        vec!["workspace-group", "focus", "workspace_group:2"]
+    );
+    assert_eq!(calls[1].args, vec!["workspace-group", "list", "--json"]);
+}
+
+#[test]
+fn focus_group_reports_ambiguous_after_stale_ref_and_duplicate_title_match() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(b"group not found"));
+    runner.push_response(success_output(
+        br#"{"groups":[
+            {"ref":"workspace_group:7","name":"Fix cmux sidebar copy"},
+            {"ref":"workspace_group:8","name":"Fix cmux sidebar copy"}
+        ]}"#,
+    ));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    let outcome = cmux
+        .focus_group_or_find("Fix cmux sidebar copy", Some("workspace_group:2"))
+        .unwrap();
+
+    assert_eq!(outcome, CmuxGroupFocusOutcome::Ambiguous);
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].args,
+        vec!["workspace-group", "focus", "workspace_group:2"]
+    );
+    assert_eq!(calls[1].args, vec!["workspace-group", "list", "--json"]);
+}
+
+#[test]
+fn delete_group_uses_persisted_group_ref() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    cmux.delete_group("Fix cmux sidebar copy", Some("workspace_group:2"))
+        .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].args,
+        vec!["workspace-group", "delete", "workspace_group:2"]
+    );
+}
+
+#[test]
+fn delete_group_with_stale_ref_falls_back_to_unique_title_match() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(b"group not found"));
+    runner.push_response(success_output(
+        br#"{"groups":[{"ref":"workspace_group:7","name":"Fix cmux sidebar copy"}]}"#,
+    ));
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    cmux.delete_group("Fix cmux sidebar copy", Some("workspace_group:2"))
+        .unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls[0].args,
+        vec!["workspace-group", "delete", "workspace_group:2"]
+    );
+    assert_eq!(calls[1].args, vec!["workspace-group", "list", "--json"]);
+    assert_eq!(
+        calls[2].args,
+        vec!["workspace-group", "delete", "workspace_group:7"]
+    );
+}
+
+#[test]
+fn delete_group_without_ref_uses_unique_title_match() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(
+        br#"{"groups":[{"ref":"workspace_group:7","name":"Fix cmux sidebar copy"}]}"#,
+    ));
+    runner.push_response(success_output(b""));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    cmux.delete_group("Fix cmux sidebar copy", None).unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls[0].args, vec!["workspace-group", "list", "--json"]);
+    assert_eq!(
+        calls[1].args,
+        vec!["workspace-group", "delete", "workspace_group:7"]
+    );
+}
+
+#[test]
+fn delete_group_without_unique_match_skips_delete() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output(
+        br#"{"groups":[
+            {"ref":"workspace_group:7","name":"Fix cmux sidebar copy"},
+            {"ref":"workspace_group:8","name":"Fix cmux sidebar copy"}
+        ]}"#,
+    ));
+    let cmux = CmuxMultiplexer::new(&runner);
+
+    cmux.delete_group("Fix cmux sidebar copy", None).unwrap();
+
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].args, vec!["workspace-group", "list", "--json"]);
 }

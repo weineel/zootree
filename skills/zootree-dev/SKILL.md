@@ -36,7 +36,7 @@ src/
 │   ├── multiplexer/
 │   │   ├── mod.rs      # TerminalMultiplexer trait + shared launch types
 │   │   ├── zellij.rs   # zellij standalone session implementation
-│   │   └── cmux.rs     # cmux workspace implementation
+│   │   └── cmux.rs     # cmux workspace group implementation
 │   ├── cmux_layout.rs  # cmux JSON layout renderer
 │   ├── copy_files.rs # 文件复制逻辑
 │   ├── name_gen.rs  # 工作空间名称生成器
@@ -90,6 +90,8 @@ pub trait TerminalMultiplexer {
 ```
 
 `src/core/multiplexer/zellij.rs` 中的 `ZellijMultiplexer` 保留原 zellij 行为：外部 zellij 时前台创建/attach，内部 zellij 时后台创建或提示已存在，关闭使用 `delete-session --force`。
+
+`src/core/multiplexer/cmux.rs` 中的 cmux helper 负责 group-aware 行为：一个 zootree workspace 映射到一个 cmux workspace group。第一个 repo workspace 先创建，再通过 `workspace-group create --from <first-repo>` 创建 group；cmux 会自动生成一个默认 header/anchor，所以 zootree 随后创建自己的 anchor workspace、`set-anchor` 到它、并关闭 cmux 自动生成的默认 anchor。后续 repo workspaces 加入同一 group；helper 同时管理 agent 终端位置和保存到 workspace 配置中的运行时引用。
 
 ### ConfigManager 模式
 
@@ -204,7 +206,8 @@ fn test_something() {
 - **序列化**: 所有配置 struct 都 derive `Serialize + Deserialize + Debug + Clone + PartialEq`
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`
 - **untagged enum**: `HookValue` 使用 `#[serde(untagged)]` 支持三种格式
-- **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`，cmux 使用 `layouts/<name>.cmux.json`
+- **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`；Zellij 支持 `layouts/<name>.kdl`，cmux group-aware 模式当前只支持 `layout = "default"`
+- **cmux group state**: cmux mode maps one zootree workspace to one cmux workspace group. `workspace-group create --from <first-repo>` creates a default header/anchor; zootree then creates its own anchor workspace with the `zootree info` layout, uses `workspace-group set-anchor`, and closes the generated default anchor. Runtime refs live in `WorkspaceConfig.multiplexer_state`: `cmux_group` and `cmux_repo_workspaces`. Legacy `cmux_workspace` and `cmux_anchor_workspace` remain readable for older configs but new group-aware saves should not write them.
 - **shellexpand**: 所有用户输入的路径在使用前都要 `shellexpand::tilde()` 展开 `~`
 
 ## 常见开发任务

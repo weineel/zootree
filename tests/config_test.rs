@@ -6,7 +6,9 @@ use zootree::config::global::GlobalConfig;
 use zootree::config::global::HookValue;
 use zootree::config::global::{MultiplexerConfig, MultiplexerKind};
 use zootree::config::repo::RepoConfig;
-use zootree::config::workspace::{MultiplexerState, WorkspaceConfig, WorkspaceStatus};
+use zootree::config::workspace::{
+    CmuxRepoWorkspaceState, MultiplexerState, WorkspaceConfig, WorkspaceStatus,
+};
 use zootree::config::ConfigManager;
 use zootree::runner::MockRunner;
 
@@ -224,6 +226,63 @@ cmux_workspace = "workspace:3"
     assert_eq!(
         config.multiplexer_state.cmux_workspace.as_deref(),
         Some("workspace:3")
+    );
+}
+
+#[test]
+fn parse_workspace_config_with_cmux_group_state() {
+    let toml_str = r#"
+title = "用户认证功能"
+name = "calm-river"
+description = "前后端联调 OAuth2 登录"
+branch = "zootree/calm-river"
+workspace_dir = "~/zootree-workspaces/calm-river"
+created_at = "2026-04-28T10:30:00+08:00"
+
+[multiplexer]
+kind = "cmux"
+
+[multiplexer_state]
+kind = "cmux"
+cmux_group = "workspace_group:2"
+cmux_anchor_workspace = "workspace:4"
+
+[[multiplexer_state.cmux_repo_workspaces]]
+repo = "frontend"
+workspace = "workspace:5"
+
+[[multiplexer_state.cmux_repo_workspaces]]
+repo = "backend"
+workspace = "workspace:6"
+"#;
+
+    let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
+
+    assert_eq!(config.multiplexer_state.kind, Some(MultiplexerKind::Cmux));
+    assert_eq!(
+        config.multiplexer_state.cmux_group.as_deref(),
+        Some("workspace_group:2")
+    );
+    assert_eq!(
+        config.multiplexer_state.cmux_anchor_workspace.as_deref(),
+        Some("workspace:4")
+    );
+    assert_eq!(config.multiplexer_state.cmux_repo_workspaces.len(), 2);
+    assert_eq!(
+        config.multiplexer_state.cmux_repo_workspaces[0].repo,
+        "frontend"
+    );
+    assert_eq!(
+        config.multiplexer_state.cmux_repo_workspaces[0].workspace,
+        "workspace:5"
+    );
+    assert_eq!(
+        config.multiplexer_state.cmux_repo_workspaces[1].repo,
+        "backend"
+    );
+    assert_eq!(
+        config.multiplexer_state.cmux_repo_workspaces[1].workspace,
+        "workspace:6"
     );
 }
 
@@ -468,6 +527,9 @@ fn cmux_workspace_state_serializes_and_round_trips() {
         multiplexer_state: MultiplexerState {
             kind: Some(MultiplexerKind::Cmux),
             cmux_workspace: Some("workspace:3".into()),
+            cmux_group: None,
+            cmux_anchor_workspace: None,
+            cmux_repo_workspaces: Vec::new(),
         },
         repos: Vec::new(),
         events: Vec::new(),
@@ -493,6 +555,82 @@ fn cmux_workspace_state_serializes_and_round_trips() {
     assert_eq!(
         round_tripped.multiplexer_state.kind,
         Some(MultiplexerKind::Cmux)
+    );
+}
+
+#[test]
+fn group_aware_multiplexer_state_is_serialized_without_legacy_workspace_ref() {
+    let config = WorkspaceConfig {
+        title: "Group cmux".into(),
+        name: "calm-river".into(),
+        description: String::new(),
+        branch: "zootree/calm-river".into(),
+        workspace_dir: "~/zootree-workspaces/calm-river".into(),
+        created_at: "2026-04-28T10:30:00+08:00".into(),
+        agent_cli: None,
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: MultiplexerState {
+            kind: Some(MultiplexerKind::Cmux),
+            cmux_workspace: None,
+            cmux_group: Some("workspace_group:2".into()),
+            cmux_anchor_workspace: None,
+            cmux_repo_workspaces: vec![
+                CmuxRepoWorkspaceState {
+                    repo: "frontend".into(),
+                    workspace: "workspace:5".into(),
+                },
+                CmuxRepoWorkspaceState {
+                    repo: "backend".into(),
+                    workspace: "workspace:6".into(),
+                },
+            ],
+        },
+        repos: Vec::new(),
+        events: Vec::new(),
+    };
+
+    let serialized = toml::to_string(&config).unwrap();
+
+    assert!(serialized.contains("cmux_group = \"workspace_group:2\""));
+    assert!(!serialized.contains("cmux_anchor_workspace"));
+    assert!(serialized.contains("[[multiplexer_state.cmux_repo_workspaces]]"));
+    assert!(serialized.contains("repo = \"frontend\""));
+    assert!(serialized.contains("workspace = \"workspace:5\""));
+    assert!(serialized.contains("repo = \"backend\""));
+    assert!(serialized.contains("workspace = \"workspace:6\""));
+    assert!(
+        !serialized.contains("cmux_workspace"),
+        "new group-aware state should not write legacy cmux_workspace: {serialized}"
+    );
+
+    let round_tripped: WorkspaceConfig = toml::from_str(&serialized).unwrap();
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_group.as_deref(),
+        Some("workspace_group:2")
+    );
+    assert!(round_tripped
+        .multiplexer_state
+        .cmux_anchor_workspace
+        .is_none());
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_repo_workspaces.len(),
+        2
+    );
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_repo_workspaces[0].repo,
+        "frontend"
+    );
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_repo_workspaces[0].workspace,
+        "workspace:5"
+    );
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_repo_workspaces[1].repo,
+        "backend"
+    );
+    assert_eq!(
+        round_tripped.multiplexer_state.cmux_repo_workspaces[1].workspace,
+        "workspace:6"
     );
 }
 

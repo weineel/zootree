@@ -2,6 +2,7 @@ pub mod cmux;
 pub mod zellij;
 
 use crate::config::global::MultiplexerKind;
+use crate::config::workspace::CmuxRepoWorkspaceState;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -14,6 +15,32 @@ pub struct MultiplexerLaunch {
     pub layout_name: String,
     pub rendered_layout: String,
     pub layout_file: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmuxRepoWorkspaceLaunch {
+    pub repo_name: String,
+    pub workspace_name: String,
+    pub description: String,
+    pub cwd: PathBuf,
+    pub layout: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmuxGroupLaunch {
+    pub workspace_name: String,
+    pub group_name: String,
+    pub anchor_name: String,
+    pub anchor_description: String,
+    pub anchor_cwd: PathBuf,
+    pub anchor_layout: String,
+    pub repo_workspaces: Vec<CmuxRepoWorkspaceLaunch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmuxCapturedGroupState {
+    pub group: String,
+    pub repo_workspaces: Vec<CmuxRepoWorkspaceState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

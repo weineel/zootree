@@ -1,5 +1,8 @@
 use serde_json::Value;
-use zootree::core::cmux_layout::{default_cmux_layout, render_cmux_layout, CmuxLayoutVar};
+use zootree::core::cmux_layout::{
+    default_cmux_anchor_layout, default_cmux_layout, default_cmux_repo_layout,
+    render_cmux_anchor_layout, render_cmux_layout, render_cmux_repo_layout, CmuxLayoutVar,
+};
 
 fn vars() -> Vec<CmuxLayoutVar> {
     vec![
@@ -145,6 +148,148 @@ fn split_nodes_with_more_than_two_children_are_folded() {
     let value: Value = serde_json::from_str(&rendered).unwrap();
 
     assert_valid_cmux_split_tree(&value);
+}
+
+#[test]
+fn anchor_layout_runs_info_and_multi_repo_agent() {
+    let rendered = render_cmux_anchor_layout(
+        default_cmux_anchor_layout(),
+        &vars(),
+        Some("codex --prompt 'Fix login'"),
+    )
+    .unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+    let cwds = collect_string_field(&value, "cwd");
+
+    assert!(commands.contains(&"zootree info fair-fox --watch".to_string()));
+    assert!(commands.contains(&"codex --prompt 'Fix login'".to_string()));
+    assert!(cwds.contains(&"/tmp/fair-fox".to_string()));
+    assert_no_empty_command(&value);
+    assert_no_unresolved_vars(&value);
+    assert_valid_cmux_split_tree(&value);
+}
+
+#[test]
+fn anchor_layout_shell_quotes_info_workspace_name() {
+    let mut vars = vars();
+    vars[0].workspace_name = "fair fox'; touch /tmp/pwned; echo '".into();
+    vars[1].workspace_name = vars[0].workspace_name.clone();
+    let expected = shlex::try_join([
+        "zootree",
+        "info",
+        vars[0].workspace_name.as_str(),
+        "--watch",
+    ])
+    .unwrap();
+
+    let rendered = render_cmux_anchor_layout(default_cmux_anchor_layout(), &vars, None).unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+
+    assert!(commands.contains(&expected), "commands: {commands:?}");
+    assert_ne!(
+        expected,
+        "zootree info fair fox'; touch /tmp/pwned; echo ' --watch"
+    );
+    assert_eq!(
+        shlex::split(&expected).unwrap(),
+        vec![
+            "zootree",
+            "info",
+            "fair fox'; touch /tmp/pwned; echo '",
+            "--watch"
+        ]
+    );
+}
+
+#[test]
+fn anchor_layout_without_multi_repo_agent_uses_shell_on_right() {
+    let rendered = render_cmux_anchor_layout(default_cmux_anchor_layout(), &vars(), None).unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+    let cwds = collect_string_field(&value, "cwd");
+
+    assert!(commands.contains(&"zootree info fair-fox --watch".to_string()));
+    assert!(!commands.iter().any(|command| command.contains("codex")));
+    assert!(cwds.contains(&"/tmp/fair-fox".to_string()));
+    assert_no_empty_command(&value);
+}
+
+#[test]
+fn repo_layout_runs_lazygit_and_single_repo_agent() {
+    let repo = vars().remove(0);
+    let rendered = render_cmux_repo_layout(
+        default_cmux_repo_layout(),
+        &repo,
+        Some("codex --prompt 'Fix login'"),
+    )
+    .unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+    let cwds = collect_string_field(&value, "cwd");
+
+    assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api".to_string()));
+    assert!(commands.contains(&"codex --prompt 'Fix login'".to_string()));
+    assert!(cwds.iter().any(|cwd| cwd == "/tmp/fair-fox/api"));
+    assert_no_empty_command(&value);
+    assert_no_unresolved_vars(&value);
+    assert_valid_cmux_split_tree(&value);
+}
+
+#[test]
+fn repo_layout_without_agent_keeps_shell_bottom() {
+    let repo = vars().remove(0);
+    let rendered = render_cmux_repo_layout(default_cmux_repo_layout(), &repo, None).unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+
+    assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api".to_string()));
+    assert!(!commands.iter().any(|command| command.contains("codex")));
+    assert_no_empty_command(&value);
+}
+
+#[test]
+fn repo_layout_passes_lazygit_config_when_present() {
+    let mut repo = vars().remove(0);
+    repo.lazygit_config = "/tmp/lazygit.yml".into();
+
+    let rendered = render_cmux_repo_layout(default_cmux_repo_layout(), &repo, None).unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+
+    assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api -ucf /tmp/lazygit.yml".to_string()));
+}
+
+#[test]
+fn repo_layout_quotes_lazygit_paths_with_spaces() {
+    let mut repo = vars().remove(0);
+    repo.worktree_path = "/tmp/fair fox/api service".into();
+    repo.lazygit_config = "/tmp/cmux configs/lazygit user.yml".into();
+    let expected = shlex::try_join([
+        "lazygit",
+        "-p",
+        repo.worktree_path.as_str(),
+        "-ucf",
+        repo.lazygit_config.as_str(),
+    ])
+    .unwrap();
+
+    let rendered = render_cmux_repo_layout(default_cmux_repo_layout(), &repo, None).unwrap();
+    let value: Value = serde_json::from_str(&rendered).unwrap();
+    let commands = collect_string_field(&value, "command");
+
+    assert!(commands.contains(&expected));
+    assert_eq!(
+        shlex::split(&expected).unwrap(),
+        vec![
+            "lazygit",
+            "-p",
+            "/tmp/fair fox/api service",
+            "-ucf",
+            "/tmp/cmux configs/lazygit user.yml"
+        ]
+    );
 }
 
 fn collect_string_field(value: &Value, field: &str) -> Vec<String> {

@@ -199,7 +199,7 @@ zootree 从 `~/.config/zootree/` 读取配置。速查表：
 | `config.toml` | 全局默认值：workspace 根目录、分支前缀、文件复制、hooks、agent CLI |
 | `repos/<name>.toml` | 单仓库覆盖：path、目标分支、复制文件、hooks、lazygit 配置 |
 | `layouts/<name>.kdl` | 自定义 Zellij KDL 布局，供 `[multiplexer.zellij].layout` 引用 |
-| `layouts/<name>.cmux.json` | 自定义 cmux JSON 布局，供 `[multiplexer.cmux].layout` 引用 |
+| `[multiplexer.cmux].layout` | cmux layout 选择器；group-aware cmux 当前只支持 `default` |
 | `[hooks]` 小节 | workspace/repo 生命周期事件触发的 shell 命令 |
 | `agent_cli` / `agent_cli_alias` | `zootree start --run-agent` 启动的 coding agent 命令模板 |
 
@@ -286,54 +286,32 @@ layout {
 - `@WORKSPACE_NAME@` - 工作空间名
 - `@WORKSPACE_DIR@` - 工作空间目录
 
-### cmux 布局模板 (~/.config/zootree/layouts/<name>.cmux.json)
+### cmux group 布局
 
-自定义 cmux JSON 布局由 `[multiplexer.cmux].layout` 选择。
+当 `[multiplexer] kind = "cmux"` 时，zootree 会为每个 zootree workspace 创建一个 cmux workspace group。
 
-```json
-{
-  "direction": "horizontal",
-  "children": [
-    {
-      "pane": {
-        "surfaces": [
-          {
-            "type": "terminal",
-            "command": "zootree info $workspace_name --watch",
-            "cwd": "$workspace_dir"
-          }
-        ]
-      }
-    },
-    {
-      "zootree_repeat_per_repo": {
-        "pane": {
-          "surfaces": [
-            {
-              "type": "terminal",
-              "command": "lazygit -p $worktree_path",
-              "cwd": "$worktree_path"
-            }
-          ]
-        }
-      }
-    }
-  ]
-}
-```
+- group name 使用 zootree workspace title。
+- group anchor 左侧运行 `zootree info <workspace> --watch`。
+- 多 repo 且使用 `--run-agent` 时，agent 运行在 group anchor 右侧。
+- group 内每个 repo 一个 workspace。
+- 每个 repo workspace 左侧运行 `lazygit -p <worktree_path>`，右侧是 shell。
+- 单 repo 且使用 `--run-agent` 时，agent 运行在该 repo workspace 的右下 terminal。
 
-可用变量：`$workspace_name`、`$workspace_dir`、`$repo_name`、`$worktree_path`、`$branch`、`$lazygit_config`、`$overview_agent_command`、`$repo_agent_command`。
-
-使用 `zootree_repeat_per_repo` 可让 cmux JSON 块按 repo 重复展开。
+Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 会返回明确错误，直到后续支持 group-aware 多模板配置。
 
 ### Agent CLI
 
 `agent_cli` 是在终端复用器 pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
 
-渲染后的命令在以下 pane 中执行：
+对于 zellij，渲染后的命令在以下位置执行：
 
-- **1 个 repo** → 该 repo tab 右下 pane
-- **≥2 个 repo** → overview tab 最后一个 pane
+- **1 个 repo** -> repo tab 右下 pane
+- **>=2 个 repo** -> overview tab 最后一个 pane
+
+对于 cmux，渲染后的命令在以下位置执行：
+
+- **1 个 repo** -> repo workspace 右下 terminal
+- **>=2 个 repo** -> group anchor 右侧 terminal
 
 不加 `--run-agent` 时，这些占位 pane 会回退为普通 shell。
 

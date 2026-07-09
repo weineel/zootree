@@ -23,6 +23,13 @@ pub struct Event {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CmuxRepoWorkspaceState {
+    pub repo: String,
+    pub workspace: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MultiplexerState {
@@ -30,6 +37,12 @@ pub struct MultiplexerState {
     pub kind: Option<MultiplexerKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmux_workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmux_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmux_anchor_workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cmux_repo_workspaces: Vec<CmuxRepoWorkspaceState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,6 +69,14 @@ pub struct WorkspaceConfig {
 
 impl MultiplexerState {
     pub fn is_empty(&self) -> bool {
-        self.kind.is_none() && self.cmux_workspace.is_none()
+        self.kind.is_none()
+            && self.cmux_workspace.is_none()
+            && self.cmux_group.is_none()
+            && self.cmux_anchor_workspace.is_none()
+            && self.cmux_repo_workspaces.is_empty()
+    }
+
+    pub fn has_cmux_group_state(&self) -> bool {
+        self.cmux_group.is_some() || self.cmux_anchor_workspace.is_some()
     }
 }

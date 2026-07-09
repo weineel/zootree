@@ -7,7 +7,10 @@ use crate::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
-use crate::core::cmux_layout::{default_cmux_layout, render_cmux_layout, CmuxLayoutVar};
+use crate::core::cmux_layout::{
+    default_cmux_anchor_layout, default_cmux_repo_layout, render_cmux_anchor_layout,
+    render_cmux_repo_layout, CmuxLayoutVar,
+};
 use crate::core::completers::{
     complete_agent_cli_alias, complete_repos_list, complete_template, complete_workspace,
     WorkspaceFilter,
@@ -17,9 +20,10 @@ use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
 use crate::core::layout::{LayoutRenderer, LayoutVar};
 use crate::core::multiplexer::{
-    cmux::CmuxMultiplexer,
+    cmux::{CmuxGroupFocusOutcome, CmuxMultiplexer},
     zellij::{is_inside_zellij, ZellijMultiplexer},
-    MultiplexerIdentity, MultiplexerLaunch, TerminalMultiplexer,
+    CmuxCapturedGroupState, CmuxGroupLaunch, CmuxRepoWorkspaceLaunch, MultiplexerIdentity,
+    MultiplexerLaunch, TerminalMultiplexer,
 };
 use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::worktree_status::{
@@ -613,6 +617,14 @@ fn multiplexer_display_name(workspace: &WorkspaceConfig) -> String {
     format!("zootree-{}", workspace.name)
 }
 
+fn cmux_anchor_workspace_name(workspace: &WorkspaceConfig) -> String {
+    multiplexer_display_name(workspace)
+}
+
+fn cmux_repo_workspace_name(workspace: &WorkspaceConfig, repo_name: &str) -> String {
+    format!("{}-{}", multiplexer_display_name(workspace), repo_name)
+}
+
 fn multiplexer_identity(workspace: &WorkspaceConfig) -> MultiplexerIdentity {
     MultiplexerIdentity {
         workspace_name: workspace.name.clone(),
@@ -621,17 +633,20 @@ fn multiplexer_identity(workspace: &WorkspaceConfig) -> MultiplexerIdentity {
     }
 }
 
-fn prepare_multiplexer_launch(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &WorkspaceConfig,
-    run_agent: Option<Option<String>>,
-) -> Result<MultiplexerLaunch> {
-    let multiplexer = selected_multiplexer_config(workspace, global);
-    match multiplexer.kind {
-        MultiplexerKind::Zellij => prepare_zellij_launch(config_mgr, global, workspace, run_agent),
-        MultiplexerKind::Cmux => prepare_cmux_launch(config_mgr, global, workspace, run_agent),
-    }
+fn apply_cmux_group_state(workspace: &mut WorkspaceConfig, state: CmuxCapturedGroupState) {
+    workspace.multiplexer_state.kind = Some(MultiplexerKind::Cmux);
+    workspace.multiplexer_state.cmux_workspace = None;
+    workspace.multiplexer_state.cmux_group = Some(state.group);
+    workspace.multiplexer_state.cmux_anchor_workspace = None;
+    workspace.multiplexer_state.cmux_repo_workspaces = state.repo_workspaces;
+}
+
+fn apply_found_cmux_group_state(workspace: &mut WorkspaceConfig, group: String) {
+    workspace.multiplexer_state.kind = Some(MultiplexerKind::Cmux);
+    workspace.multiplexer_state.cmux_workspace = None;
+    workspace.multiplexer_state.cmux_group = Some(group);
+    workspace.multiplexer_state.cmux_anchor_workspace = None;
+    workspace.multiplexer_state.cmux_repo_workspaces.clear();
 }
 
 fn prepare_zellij_launch(
@@ -753,53 +768,34 @@ fn build_zellij_agent_fragments(
     }
 }
 
-fn write_default_cmux_layout(base_dir: &Path) -> String {
-    let content = default_cmux_layout().to_string();
-    let path = base_dir.join("layouts").join("default.cmux.json");
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let _ = std::fs::write(&path, &content);
-    content
-}
-
-fn prepare_cmux_launch(
+fn prepare_cmux_group_launch(
     config_mgr: &ConfigManager,
     global: &GlobalConfig,
     workspace: &WorkspaceConfig,
     run_agent: Option<Option<String>>,
-) -> Result<MultiplexerLaunch> {
+) -> Result<CmuxGroupLaunch> {
     let multiplexer = selected_multiplexer_config(workspace, global);
     let layout_name = multiplexer.cmux.layout.as_deref().unwrap_or("default");
-    let template_content = if layout_name == "default" {
-        write_default_cmux_layout(&config_mgr.base_dir)
-    } else {
-        let layout_path = config_mgr
-            .base_dir
-            .join("layouts")
-            .join(format!("{}.cmux.json", layout_name));
-        if layout_path.exists() {
-            std::fs::read_to_string(&layout_path)?
-        } else {
-            anyhow::bail!(
-                "cmux layout '{}' not found at {}",
-                layout_name,
-                layout_path.display()
-            );
-        }
-    };
+    if layout_name != "default" {
+        anyhow::bail!(
+            "group-aware cmux currently supports only layout = \"default\"; workspace '{}' selected '{}'",
+            workspace.name,
+            layout_name
+        );
+    }
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
     let agent_cli_tpl = resolve_run_agent_template(global, run_agent.as_ref())?;
     let prompt = crate::core::layout::build_prompt(workspace);
     let agent_command = match agent_cli_tpl.as_deref() {
-        Some(tpl) => crate::core::layout::build_agent_cli_command(tpl, &prompt)?,
-        None => String::new(),
+        Some(tpl) => Some(crate::core::layout::build_agent_cli_command(tpl, &prompt)?),
+        None => None,
     };
-
+    let single_repo = workspace.repos.len() == 1;
     let mut vars = Vec::new();
-    for (i, repo_entry) in workspace.repos.iter().enumerate() {
+    for repo_entry in &workspace.repos {
         let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
         let lazygit_config = repo_config.lazygit.map(|lg| lg.config).unwrap_or_default();
-        let single_repo = workspace.repos.len() == 1;
         vars.push(CmuxLayoutVar {
             repo_name: repo_entry.name.clone(),
             worktree_path: format!("{}/{}", ws_dir, repo_entry.name),
@@ -807,33 +803,47 @@ fn prepare_cmux_launch(
             workspace_name: workspace.name.clone(),
             workspace_dir: ws_dir.clone(),
             lazygit_config,
-            overview_agent_command: if !single_repo {
-                agent_command.clone()
-            } else {
-                String::new()
-            },
-            repo_agent_command: if single_repo && i == 0 {
-                agent_command.clone()
-            } else {
-                String::new()
-            },
+            overview_agent_command: String::new(),
+            repo_agent_command: String::new(),
         });
     }
 
-    let rendered = render_cmux_layout(&template_content, &vars)?;
-    let layout_dir = config_mgr.base_dir.join("layouts");
-    std::fs::create_dir_all(&layout_dir)?;
-    let layout_file = layout_dir.join("recently.cmux.json");
-    std::fs::write(&layout_file, &rendered)?;
+    let anchor_agent = if single_repo {
+        None
+    } else {
+        agent_command.as_deref()
+    };
+    let repo_agent = if single_repo {
+        agent_command.as_deref()
+    } else {
+        None
+    };
 
-    Ok(MultiplexerLaunch {
+    let anchor_layout =
+        render_cmux_anchor_layout(default_cmux_anchor_layout(), &vars, anchor_agent)?;
+
+    let repo_workspaces = vars
+        .iter()
+        .map(|repo| {
+            let layout = render_cmux_repo_layout(default_cmux_repo_layout(), repo, repo_agent)?;
+            Ok(CmuxRepoWorkspaceLaunch {
+                repo_name: repo.repo_name.clone(),
+                workspace_name: cmux_repo_workspace_name(workspace, &repo.repo_name),
+                description: repo.repo_name.clone(),
+                cwd: repo.worktree_path.clone().into(),
+                layout,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(CmuxGroupLaunch {
         workspace_name: workspace.name.clone(),
-        display_name: multiplexer_display_name(workspace),
-        description: workspace.title.clone(),
-        workspace_dir: ws_dir.into(),
-        layout_name: layout_name.into(),
-        rendered_layout: rendered,
-        layout_file,
+        group_name: workspace.title.clone(),
+        anchor_name: cmux_anchor_workspace_name(workspace),
+        anchor_description: workspace.title.clone(),
+        anchor_cwd: ws_dir.into(),
+        anchor_layout,
+        repo_workspaces,
     })
 }
 
@@ -845,22 +855,39 @@ fn launch_multiplexer(
     run_agent: Option<Option<String>>,
 ) -> Result<()> {
     let config = selected_multiplexer_config(workspace, global);
-    let launch = prepare_multiplexer_launch(config_mgr, global, workspace, run_agent)?;
-    let identity = multiplexer_identity(workspace);
     match config.kind {
         MultiplexerKind::Zellij => {
+            let launch = prepare_zellij_launch(config_mgr, global, workspace, run_agent)?;
             let zellij = ZellijMultiplexer::new(runner, is_inside_zellij());
             zellij.launch(&launch)?;
         }
         MultiplexerKind::Cmux => {
             let cmux = CmuxMultiplexer::new(runner);
-            let cmux_workspace = cmux.launch_or_open_and_capture_workspace(&launch, &identity)?;
-            if let Some(cmux_workspace) = cmux_workspace {
-                let mut updated = workspace.clone();
-                updated.multiplexer_state.kind = Some(MultiplexerKind::Cmux);
-                updated.multiplexer_state.cmux_workspace = Some(cmux_workspace);
-                config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
+            match cmux.focus_group_or_find(
+                &workspace.title,
+                workspace.multiplexer_state.cmux_group.as_deref(),
+            )? {
+                CmuxGroupFocusOutcome::FocusedExisting => return Ok(()),
+                CmuxGroupFocusOutcome::FocusedFound(found_group) => {
+                    let mut updated = workspace.clone();
+                    apply_found_cmux_group_state(&mut updated, found_group);
+                    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
+                    return Ok(());
+                }
+                CmuxGroupFocusOutcome::NotFound => {}
+                CmuxGroupFocusOutcome::Ambiguous => {
+                    anyhow::bail!(
+                        "cmux group '{}' is ambiguous; refusing to create another group",
+                        workspace.title
+                    );
+                }
             }
+
+            let group_launch = prepare_cmux_group_launch(config_mgr, global, workspace, run_agent)?;
+            let captured = cmux.launch_group_and_capture_state(&group_launch)?;
+            let mut updated = workspace.clone();
+            apply_cmux_group_state(&mut updated, captured);
+            config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
         }
     }
     Ok(())
@@ -880,7 +907,10 @@ fn close_multiplexer(
         }
         MultiplexerKind::Cmux => {
             let cmux = CmuxMultiplexer::new(runner);
-            cmux.close(&identity)?;
+            cmux.delete_group(
+                &workspace.title,
+                workspace.multiplexer_state.cmux_group.as_deref(),
+            )?;
         }
     }
     Ok(())
@@ -1407,6 +1437,7 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::workspace::CmuxRepoWorkspaceState;
     use clap::Parser;
 
     #[derive(Parser)]
@@ -1472,6 +1503,186 @@ mod tests {
             worktree_path: worktree_path.into(),
             exists: false,
         }
+    }
+
+    #[test]
+    fn prepare_cmux_group_launch_places_multi_repo_agent_in_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(temp.path().to_path_buf());
+        config_mgr.ensure_dirs().unwrap();
+        config_mgr
+            .save_repo_config("api", &repo_config("/repo/api"))
+            .unwrap();
+        config_mgr
+            .save_repo_config("web", &repo_config("/repo/web"))
+            .unwrap();
+
+        let mut global = GlobalConfig::default();
+        global.agent_cli = Some("codex -- $prompt".into());
+        let mut workspace = list_workspace(
+            WorkspaceStatus::InProgress,
+            "fair-fox",
+            "Fix cmux sidebar copy",
+            "zootree/fair-fox",
+            "/tmp/fair-fox",
+            vec![repo("api", Some("main")), repo("web", Some("main"))],
+        )
+        .workspace;
+        workspace.multiplexer.kind = MultiplexerKind::Cmux;
+
+        let launch =
+            prepare_cmux_group_launch(&config_mgr, &global, &workspace, Some(Some("".into())))
+                .unwrap();
+
+        assert_eq!(launch.group_name, "Fix cmux sidebar copy");
+        assert_eq!(launch.anchor_cwd, std::path::PathBuf::from("/tmp/fair-fox"));
+        assert_eq!(launch.repo_workspaces.len(), 2);
+        assert!(launch
+            .anchor_layout
+            .contains("zootree info fair-fox --watch"));
+        assert!(launch.anchor_layout.contains("codex"));
+        assert!(!launch.repo_workspaces[0].layout.contains("codex"));
+        assert!(!launch.repo_workspaces[1].layout.contains("codex"));
+        assert!(!launch.repo_workspaces[0].layout.contains("zootree info"));
+    }
+
+    #[test]
+    fn prepare_cmux_group_launch_places_single_repo_agent_in_repo_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(temp.path().to_path_buf());
+        config_mgr.ensure_dirs().unwrap();
+        config_mgr
+            .save_repo_config("api", &repo_config("/repo/api"))
+            .unwrap();
+
+        let mut global = GlobalConfig::default();
+        global.agent_cli = Some("codex -- $prompt".into());
+        let mut workspace = list_workspace(
+            WorkspaceStatus::InProgress,
+            "fair-fox",
+            "Fix cmux sidebar copy",
+            "zootree/fair-fox",
+            "/tmp/fair-fox",
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        workspace.multiplexer.kind = MultiplexerKind::Cmux;
+
+        let launch =
+            prepare_cmux_group_launch(&config_mgr, &global, &workspace, Some(Some("".into())))
+                .unwrap();
+
+        assert!(launch
+            .anchor_layout
+            .contains("zootree info fair-fox --watch"));
+        assert!(!launch.anchor_layout.contains("codex"));
+        assert_eq!(launch.repo_workspaces.len(), 1);
+        assert!(launch.repo_workspaces[0].layout.contains("codex"));
+        assert!(launch.repo_workspaces[0]
+            .layout
+            .contains("lazygit -p /tmp/fair-fox/api"));
+    }
+
+    #[test]
+    fn prepare_cmux_group_launch_rejects_non_default_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(temp.path().to_path_buf());
+        config_mgr.ensure_dirs().unwrap();
+        config_mgr
+            .save_repo_config("api", &repo_config("/repo/api"))
+            .unwrap();
+
+        let global = GlobalConfig::default();
+        let mut workspace = list_workspace(
+            WorkspaceStatus::InProgress,
+            "fair-fox",
+            "Fix cmux sidebar copy",
+            "zootree/fair-fox",
+            "/tmp/fair-fox",
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        workspace.multiplexer.kind = MultiplexerKind::Cmux;
+        workspace.multiplexer.cmux.layout = Some("wide".into());
+
+        let err = prepare_cmux_group_launch(&config_mgr, &global, &workspace, None).unwrap_err();
+        let msg = format!("{:#}", err);
+
+        assert!(
+            msg.contains("group-aware cmux currently supports only layout = \"default\""),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_cmux_group_state_replaces_legacy_workspace_ref() {
+        let mut workspace = list_workspace(
+            WorkspaceStatus::InProgress,
+            "fair-fox",
+            "Fix cmux sidebar copy",
+            "zootree/fair-fox",
+            "/tmp/fair-fox",
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        workspace.multiplexer_state.cmux_workspace = Some("workspace:old".into());
+
+        apply_cmux_group_state(
+            &mut workspace,
+            crate::core::multiplexer::CmuxCapturedGroupState {
+                group: "workspace_group:2".into(),
+                repo_workspaces: vec![CmuxRepoWorkspaceState {
+                    repo: "api".into(),
+                    workspace: "workspace:5".into(),
+                }],
+            },
+        );
+
+        assert_eq!(
+            workspace.multiplexer_state.kind,
+            Some(MultiplexerKind::Cmux)
+        );
+        assert_eq!(
+            workspace.multiplexer_state.cmux_group.as_deref(),
+            Some("workspace_group:2")
+        );
+        assert!(workspace.multiplexer_state.cmux_anchor_workspace.is_none());
+        assert!(workspace.multiplexer_state.cmux_workspace.is_none());
+        assert_eq!(workspace.multiplexer_state.cmux_repo_workspaces.len(), 1);
+    }
+
+    #[test]
+    fn apply_found_cmux_group_state_clears_stale_workspace_refs() {
+        let mut workspace = list_workspace(
+            WorkspaceStatus::InProgress,
+            "fair-fox",
+            "Fix cmux sidebar copy",
+            "zootree/fair-fox",
+            "/tmp/fair-fox",
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        workspace.multiplexer_state.cmux_workspace = Some("workspace:old".into());
+        workspace.multiplexer_state.cmux_group = Some("workspace_group:old".into());
+        workspace.multiplexer_state.cmux_anchor_workspace = Some("workspace:anchor".into());
+        workspace.multiplexer_state.cmux_repo_workspaces = vec![CmuxRepoWorkspaceState {
+            repo: "api".into(),
+            workspace: "workspace:repo".into(),
+        }];
+
+        apply_found_cmux_group_state(&mut workspace, "workspace_group:7".into());
+
+        assert_eq!(
+            workspace.multiplexer_state.kind,
+            Some(MultiplexerKind::Cmux)
+        );
+        assert_eq!(
+            workspace.multiplexer_state.cmux_group.as_deref(),
+            Some("workspace_group:7")
+        );
+        assert!(workspace.multiplexer_state.cmux_workspace.is_none());
+        assert!(workspace.multiplexer_state.cmux_anchor_workspace.is_none());
+        assert!(workspace.multiplexer_state.cmux_repo_workspaces.is_empty());
     }
 
     #[test]

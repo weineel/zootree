@@ -203,7 +203,7 @@ zootree reads configuration from `~/.config/zootree/`. Quick map:
 | `config.toml` | Global defaults: workspace root, branch prefix, file copying, hooks, agent CLI |
 | `repos/<name>.toml` | Per-repo overrides: path, target branch, copy files, hooks, lazygit config |
 | `layouts/<name>.kdl` | Custom Zellij KDL layout files referenced from `[multiplexer.zellij].layout` |
-| `layouts/<name>.cmux.json` | Custom cmux JSON layouts referenced from `[multiplexer.cmux].layout` |
+| `[multiplexer.cmux].layout` | cmux layout selector; group-aware cmux currently supports only `default` |
 | `[hooks]` blocks | Shell commands run at workspace/repo lifecycle events |
 | `agent_cli` / `agent_cli_alias` | Coding agent template launched by `zootree start --run-agent` |
 
@@ -290,54 +290,32 @@ Available variables:
 - `@WORKSPACE_NAME@` - Workspace name
 - `@WORKSPACE_DIR@` - Workspace directory
 
-### cmux layout templates (~/.config/zootree/layouts/<name>.cmux.json)
+### cmux group layout
 
-Custom cmux JSON layouts are selected by `[multiplexer.cmux].layout`.
+When `[multiplexer] kind = "cmux"`, zootree creates one cmux workspace group per zootree workspace.
 
-```json
-{
-  "direction": "horizontal",
-  "children": [
-    {
-      "pane": {
-        "surfaces": [
-          {
-            "type": "terminal",
-            "command": "zootree info $workspace_name --watch",
-            "cwd": "$workspace_dir"
-          }
-        ]
-      }
-    },
-    {
-      "zootree_repeat_per_repo": {
-        "pane": {
-          "surfaces": [
-            {
-              "type": "terminal",
-              "command": "lazygit -p $worktree_path",
-              "cwd": "$worktree_path"
-            }
-          ]
-        }
-      }
-    }
-  ]
-}
-```
+- The group name is the zootree workspace title.
+- The group anchor runs `zootree info <workspace> --watch` on the left.
+- With multiple repos, `--run-agent` runs in the group anchor on the right.
+- The group contains one workspace per repo.
+- Each repo workspace runs `lazygit -p <worktree_path>` on the left and shells on the right.
+- With a single repo, `--run-agent` runs in that repo workspace's bottom-right terminal.
 
-Available variables: `$workspace_name`, `$workspace_dir`, `$repo_name`, `$worktree_path`, `$branch`, `$lazygit_config`, `$overview_agent_command`, `$repo_agent_command`.
-
-Use `zootree_repeat_per_repo` to repeat a cmux JSON block once per repo.
+Group-aware cmux currently supports only `layout = "default"`. Non-default cmux layouts return a clear error until a group-aware multi-template layout configuration exists.
 
 ### Agent CLI
 
 `agent_cli` is a command template for launching a coding agent in a terminal multiplexer pane. The template is parsed with shell-style word splitting, and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`.
 
-The rendered command runs in:
+For zellij, the rendered command runs in:
 
-- **1 repo** → the repo tab's bottom-right pane
-- **≥2 repos** → the overview tab's last pane
+- **1 repo** -> the repo tab's bottom-right pane
+- **>=2 repos** -> the overview tab's last pane
+
+For cmux, the rendered command runs in:
+
+- **1 repo** -> the repo workspace's bottom-right terminal
+- **>=2 repos** -> the group anchor's right terminal
 
 Without `--run-agent`, those placeholder panes fall back to a regular shell.
 
