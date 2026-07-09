@@ -1,6 +1,6 @@
 [package]
 name = "zootree"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2021"
 description = "A multi-repo workspace management tool with worktree and terminal multiplexer integration"
 license = "MIT"
