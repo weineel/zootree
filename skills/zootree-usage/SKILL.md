@@ -1,10 +1,9 @@
 ---
 name: zootree-usage
 description: >
-  帮助用户安装、配置和使用 zootree 多仓库协作工作空间管理工具。
-  当用户提到 zootree、workspace 工作空间、worktree、多仓库管理、终端复用器布局、
-  zellij/cmux、lazygit 集成、或需要创建/启动/完成/取消工作空间时，使用此 skill。
-  也适用于配置 zootree 的 config.toml、Hook 脚本、Zellij KDL 布局或 cmux group 布局等场景。
+  Use when users mention zootree, workspace 工作空间, worktree, 多仓库管理,
+  zellij/cmux, lazygit, run-agent, config.toml, Hook 脚本, 布局模板,
+  或需要创建、启动、打开、完成、取消 zootree 工作空间（任务）。
 ---
 
 # zootree 使用指南
@@ -15,6 +14,44 @@ zootree 是基于 Git Worktree + 终端复用器（默认 Zellij，可配置 cmu
 
 zootree 管理「工作空间」—— 一个工作空间包含多个仓库在同一个分支名上工作。
 状态流转: `pending` → `in_progress` → `done` / `canceled`
+
+## Agent 执行规则
+
+替用户执行 zootree 命令时，默认使用非交互参数；不要把 TUI 留给 agent 现场填写。
+
+| 场景 | 必须预填 |
+|------|----------|
+| `create` | `--title`，以及 `--repos` 或 `--template` |
+| `start/open/done/cancel` | workspace name |
+| `repo edit/remove` | repo name |
+
+- `zootree create` 只有在同时给出 `--title` 和 repo 来源时才不会进入 wizard；repo 来源是 `--repos repo:branch,...` 或 `--template name`。
+- 默认给 `--name`，避免随机 workspace 名导致后续 `start/done/info` 不好引用。
+- 标题默认用 `feat(PBI-xxxxxx): ...` 或 `fix(PBI-xxxxxx): ...`；PBI 号优先从当前分支推断，推不出用 `feat(other): ...` / `fix(other): ...`。
+- 实际执行命令前必须把 `<repo-root>`、`<repo-name>`、`<current-branch>`、`<workspace-name>` 这类占位符替换成真实值；不要把占位符原样交给 shell。
+- 若当前 git repo 尚未注册，先用 `zootree repo add <repo-root> --name <repo-name> --default-target-branch <current-branch>` 非交互注册，再 `create --repos <repo-name>:<current-branch>`。
+- `zootree start` 的 `--run-agent` 要放在 workspace name 后面：`zootree start <ws> --run-agent <alias>`。`zootree start --run-agent <ws>` 会把 `<ws>` 当 agent alias，仍可能进入 workspace 选择。
+
+非交互创建模板：
+
+```bash
+zootree create \
+  --title "feat(PBI-123456): implement file preview" \
+  --name experimental-file-preview \
+  --branch zootree/experimental-file-preview \
+  --repos f-hiro:feature/PBI-123456 \
+  --run-agent codexd_brainstorming
+```
+
+如果只需要创建 pending workspace，不启动 agent：
+
+```bash
+zootree create \
+  --title "feat(PBI-123456): implement file preview" \
+  --name experimental-file-preview \
+  --branch zootree/experimental-file-preview \
+  --repos f-hiro:feature/PBI-123456
+```
 
 ## 安装
 
@@ -29,8 +66,8 @@ cargo install --path .
 ### 仓库管理
 
 ```bash
-# 交互式添加
-zootree repo add
+# 指定路径添加
+zootree repo add ~/projects/myrepo
 
 # 指定名称和默认目标分支
 zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
@@ -39,10 +76,10 @@ zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
 zootree repo list
 
 # 编辑仓库配置（会用 $EDITOR 打开）
-zootree repo edit [name]
+zootree repo edit myrepo
 
 # 移除仓库
-zootree repo remove [name]
+zootree repo remove myrepo
 ```
 
 ### 工作空间操作
@@ -50,27 +87,24 @@ zootree repo remove [name]
 **创建** - 工作空间创建后状态为 `pending`
 
 ```bash
-# 交互式创建
-zootree create
+# Agent 执行时使用完整参数，避免进入 wizard
+zootree create --title "新功能开发" --name new-feature --repos frontend:feature/abc,backend:feature/abc
 
-# 命令行创建（repo:branch 格式，逗号分隔）
-zootree create --title "新功能开发" --repos frontend:feature/abc,backend:feature/abc
+# 创建并启动默认 brainstorming agent
+zootree create --title "新功能开发" --name new-feature --repos frontend:feature/abc --run-agent codexd_brainstorming
 
 # 指定分支名、名称或使用模板
-zootree create --branch my-feature --name my-ws --template my-template
+zootree create --title "新功能开发" --branch my-feature --name my-ws --template my-template
 ```
 
 **启动** - 创建工作树、执行 hook、启动已配置的终端复用器
 
 ```bash
-# 交互式选择
-zootree start
-
 # 指定名称
 zootree start my-workspace
 
-# 不启动终端复用器
-zootree start --no-multiplexer
+# 指定名称并启动 agent；--run-agent 放在 workspace name 后面
+zootree start my-workspace --run-agent codexd_brainstorming
 ```
 
 **查看** - 列出工作空间
@@ -83,27 +117,25 @@ zootree list --status in_progress  # pending|in_progress|done|canceled
 **打开** - 重新打开已启动的工作空间（使用已配置的终端复用器）
 
 ```bash
-zootree open            # 交互式
 zootree open my-workspace
 ```
 
 **完成** - 合并分支、清理工作树、归档
 
 ```bash
-zootree done                  # 交互式
 zootree done my-ws
-zootree done --push           # 合并后推送
-zootree done --no-merge       # 跳过合并
-zootree done --no-clean       # 跳过清理
-zootree done --strategy squash  # 合并策略: squash/rebase/merge
+zootree done my-ws --push           # 合并后推送
+zootree done my-ws --no-merge       # 跳过合并
+zootree done my-ws --no-clean       # 跳过清理
+zootree done my-ws --strategy squash  # 合并策略: squash/rebase/merge
 ```
 
 **取消** - 清理工作树、删除分支、归档
 
 ```bash
-zootree cancel [name]
-zootree cancel --no-clean     # 不清理 worktree
-zootree cancel --force        # 强制取消
+zootree cancel my-ws
+zootree cancel my-ws --no-clean     # 不清理 worktree
+zootree cancel my-ws --force        # 强制取消
 ```
 
 ### 模板管理
@@ -158,7 +190,7 @@ cmux 模式会为一个 zootree workspace 创建一个 cmux workspace group。gr
 ### agent_cli 与别名
 
 `agent_cli` 字段既可以是字面量命令模板（含 `$prompt` 占位符），也可以是
-`agent_cli_alias` 表中已注册的别名 key。`zootree start --run-agent` 默认使用
+`agent_cli_alias` 表中已注册的别名 key。`zootree start <ws> --run-agent` 默认使用
 `agent_cli` 字段；也可显式传入别名名或字面量命令。
 
 ```toml
@@ -272,15 +304,15 @@ zootree repo add ~/projects/frontend --default-target-branch develop
 zootree repo add ~/projects/backend --default-target-branch develop
 
 # 3. 创建工作空间
-zootree create --title "用户登录功能" --repos frontend:feature/login,backend:feature/login
+zootree create --title "feat(PBI-123456): 用户登录功能" --name user-login --repos frontend:feature/login,backend:feature/login --run-agent codexd_brainstorming
 
-# 4. 开始工作
-zootree start
+# 4. 查看工作空间
+zootree info user-login
 
 # 5. 在已配置的终端复用器中开发...
 
 # 6. 完成并合并
-zootree done --push
+zootree done user-login --push
 ```
 
 ## 故障排查
