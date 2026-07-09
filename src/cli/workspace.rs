@@ -1517,8 +1517,10 @@ mod tests {
             .save_repo_config("web", &repo_config("/repo/web"))
             .unwrap();
 
-        let mut global = GlobalConfig::default();
-        global.agent_cli = Some("codex -- $prompt".into());
+        let global = GlobalConfig {
+            agent_cli: Some("codex -- $prompt".into()),
+            ..GlobalConfig::default()
+        };
         let mut workspace = list_workspace(
             WorkspaceStatus::InProgress,
             "fair-fox",
@@ -1555,8 +1557,10 @@ mod tests {
             .save_repo_config("api", &repo_config("/repo/api"))
             .unwrap();
 
-        let mut global = GlobalConfig::default();
-        global.agent_cli = Some("codex -- $prompt".into());
+        let global = GlobalConfig {
+            agent_cli: Some("codex -- $prompt".into()),
+            ..GlobalConfig::default()
+        };
         let mut workspace = list_workspace(
             WorkspaceStatus::InProgress,
             "fair-fox",

@@ -55,7 +55,7 @@ impl CreateWizardPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateWizardOutcome {
-    Submit(CreateWizardOutput),
+    Submit(Box<CreateWizardOutput>),
     Cancelled,
 }
 
@@ -568,9 +568,10 @@ impl CreateWizardApp {
             return;
         }
         if matches!(self.page(), CreateWizardPage::Review) {
-            *self.outcome.borrow_mut() = Some(CreateWizardOutcome::Submit(CreateWizardOutput {
-                draft: self.draft.clone(),
-            }));
+            *self.outcome.borrow_mut() =
+                Some(CreateWizardOutcome::Submit(Box::new(CreateWizardOutput {
+                    draft: self.draft.clone(),
+                })));
         } else {
             self.enter_page(self.page_index + 1);
         }
@@ -1270,41 +1271,6 @@ impl CreateWizardApp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clamp_scroll_accounts_for_wrapped_lines() {
-        let long_text = format!(
-            "description: {} bottom-marker",
-            (0..20)
-                .map(|idx| format!("wrapped-token-{idx:02}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let lines = [Line::from(long_text)];
-
-        assert!(CreateWizardApp::wrapped_line_count(&lines, 20) > 1);
-
-        let mut scroll = usize::MAX;
-        CreateWizardApp::clamp_scroll_to_wrapped_lines(&mut scroll, &lines, 3, 20);
-
-        assert!(scroll > 0);
-        assert!(scroll < usize::MAX);
-    }
-
-    #[test]
-    fn clamp_scroll_keeps_empty_line_at_top_when_visible() {
-        let lines = [Line::from("")];
-        let mut scroll = usize::MAX;
-
-        CreateWizardApp::clamp_scroll_to_wrapped_lines(&mut scroll, &lines, 1, 20);
-
-        assert_eq!(scroll, 0);
-    }
-}
-
 impl App for CreateWizardApp {
     fn on_event(&mut self, event: Event) -> anyhow::Result<()> {
         let key = match event {
@@ -1463,7 +1429,42 @@ pub fn run_create_wizard(
     run_app(app)?;
     let outcome = outcome.borrow().clone();
     match outcome {
-        Some(CreateWizardOutcome::Submit(output)) => Ok(output),
+        Some(CreateWizardOutcome::Submit(output)) => Ok(*output),
         Some(CreateWizardOutcome::Cancelled) | None => Err(CancelledByUser.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_scroll_accounts_for_wrapped_lines() {
+        let long_text = format!(
+            "description: {} bottom-marker",
+            (0..20)
+                .map(|idx| format!("wrapped-token-{idx:02}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let lines = [Line::from(long_text)];
+
+        assert!(CreateWizardApp::wrapped_line_count(&lines, 20) > 1);
+
+        let mut scroll = usize::MAX;
+        CreateWizardApp::clamp_scroll_to_wrapped_lines(&mut scroll, &lines, 3, 20);
+
+        assert!(scroll > 0);
+        assert!(scroll < usize::MAX);
+    }
+
+    #[test]
+    fn clamp_scroll_keeps_empty_line_at_top_when_visible() {
+        let lines = [Line::from("")];
+        let mut scroll = usize::MAX;
+
+        CreateWizardApp::clamp_scroll_to_wrapped_lines(&mut scroll, &lines, 1, 20);
+
+        assert_eq!(scroll, 0);
     }
 }

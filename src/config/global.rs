@@ -35,17 +35,12 @@ impl Default for LogConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MultiplexerKind {
+    #[default]
     Zellij,
     Cmux,
-}
-
-impl Default for MultiplexerKind {
-    fn default() -> Self {
-        Self::Zellij
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
