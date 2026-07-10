@@ -24,6 +24,7 @@ src/
 │   └── info.rs      # info [name] [--watch]
 ├── config/          # 配置管理
 │   ├── mod.rs       # ConfigManager: 配置读写中枢
+│   ├── name.rs      # config-backed repo/workspace/template 名称 slug 校验
 │   ├── global.rs    # GlobalConfig + HooksConfig + HookValue
 │   ├── repo.rs      # RepoConfig + LazyGitConfig
 │   ├── workspace.rs # WorkspaceConfig + Event + WorkspaceStatus
@@ -209,6 +210,7 @@ fn test_something() {
 - **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`；Zellij 支持 `layouts/<name>.kdl`，cmux group-aware 模式当前只支持 `layout = "default"`
 - **cmux group state**: cmux mode maps one zootree workspace to one cmux workspace group. `workspace-group create --from <first-repo>` creates a default header/anchor; zootree then creates its own anchor workspace with the `zootree info` layout, uses `workspace-group set-anchor`, and closes the generated default anchor. Runtime refs live in `WorkspaceConfig.multiplexer_state`: `cmux_group` and `cmux_repo_workspaces`. Legacy `cmux_workspace` and `cmux_anchor_workspace` remain readable for older configs but new group-aware saves should not write them.
 - **shellexpand**: 所有用户输入的路径在使用前都要 `shellexpand::tilde()` 展开 `~`
+- **config-backed names**: 用来派生配置文件路径的 repo/workspace/template 名称必须通过 `config::name::validate_config_name` 校验；只允许非空 ASCII 字母、数字、`-` 和 `_`
 
 ## 常见开发任务
 

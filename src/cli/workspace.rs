@@ -199,6 +199,9 @@ fn format_draft_errors(errors: &[CreateDraftError]) -> String {
             CreateDraftError::TitleRequired => "title is required".to_string(),
             CreateDraftError::TitleSingleLineRequired => "title must be a single line".to_string(),
             CreateDraftError::WorkspaceNameRequired => "workspace name is required".to_string(),
+            CreateDraftError::WorkspaceNameInvalid(name) => {
+                format!("workspace name '{name}' must use only ASCII letters, numbers, '-' and '_'")
+            }
             CreateDraftError::WorkspaceNameSingleLineRequired => {
                 "workspace name must be a single line".to_string()
             }

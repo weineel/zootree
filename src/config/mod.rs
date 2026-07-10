@@ -1,4 +1,5 @@
 pub mod global;
+pub mod name;
 pub mod repo;
 pub mod template;
 pub mod workspace;
@@ -61,14 +62,19 @@ impl ConfigManager {
         self.base_dir.join("repos")
     }
 
+    pub fn repo_config_path(&self, name: &str) -> Result<PathBuf> {
+        name::validate_config_name("repo", name)?;
+        Ok(self.repos_dir().join(format!("{}.toml", name)))
+    }
+
     pub fn load_repo_config(&self, name: &str) -> Result<repo::RepoConfig> {
-        let path = self.repos_dir().join(format!("{}.toml", name));
+        let path = self.repo_config_path(name)?;
         let content = std::fs::read_to_string(&path)?;
         Ok(toml::from_str(&content)?)
     }
 
     pub fn save_repo_config(&self, name: &str, config: &repo::RepoConfig) -> Result<()> {
-        let path = self.repos_dir().join(format!("{}.toml", name));
+        let path = self.repo_config_path(name)?;
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)?;
         Ok(())
@@ -92,7 +98,7 @@ impl ConfigManager {
     }
 
     pub fn remove_repo_config(&self, name: &str) -> Result<()> {
-        let path = self.repos_dir().join(format!("{}.toml", name));
+        let path = self.repo_config_path(name)?;
         std::fs::remove_file(path)?;
         Ok(())
     }
@@ -108,13 +114,23 @@ impl ConfigManager {
         }
     }
 
+    fn workspace_config_path(
+        &self,
+        status: &workspace::WorkspaceStatus,
+        name: &str,
+    ) -> Result<PathBuf> {
+        name::validate_config_name("workspace", name)?;
+        Ok(self
+            .workspace_status_dir(status)
+            .join(format!("{}.toml", name)))
+    }
+
     pub fn save_workspace(
         &self,
         status: &workspace::WorkspaceStatus,
         config: &workspace::WorkspaceConfig,
     ) -> Result<()> {
-        let dir = self.workspace_status_dir(status);
-        let path = dir.join(format!("{}.toml", config.name));
+        let path = self.workspace_config_path(status, &config.name)?;
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)?;
         Ok(())
@@ -124,11 +140,10 @@ impl ConfigManager {
         &self,
         name: &str,
     ) -> Result<(workspace::WorkspaceStatus, workspace::WorkspaceConfig)> {
+        name::validate_config_name("workspace", name)?;
         use workspace::WorkspaceStatus::*;
         for status in [Pending, InProgress, Done, Canceled] {
-            let path = self
-                .workspace_status_dir(&status)
-                .join(format!("{}.toml", name));
+            let path = self.workspace_config_path(&status, name)?;
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
                 let config: workspace::WorkspaceConfig = toml::from_str(&content)?;
@@ -144,10 +159,8 @@ impl ConfigManager {
         from: &workspace::WorkspaceStatus,
         to: &workspace::WorkspaceStatus,
     ) -> Result<()> {
-        let from_path = self
-            .workspace_status_dir(from)
-            .join(format!("{}.toml", name));
-        let to_path = self.workspace_status_dir(to).join(format!("{}.toml", name));
+        let from_path = self.workspace_config_path(from, name)?;
+        let to_path = self.workspace_config_path(to, name)?;
         std::fs::rename(from_path, to_path)?;
         Ok(())
     }
@@ -188,9 +201,7 @@ impl ConfigManager {
         name: &str,
         status: &workspace::WorkspaceStatus,
     ) -> Result<()> {
-        let path = self
-            .workspace_status_dir(status)
-            .join(format!("{}.toml", name));
+        let path = self.workspace_config_path(status, name)?;
         std::fs::remove_file(path)?;
         Ok(())
     }
@@ -199,14 +210,19 @@ impl ConfigManager {
         self.base_dir.join("templates")
     }
 
+    fn template_config_path(&self, name: &str) -> Result<PathBuf> {
+        name::validate_config_name("template", name)?;
+        Ok(self.templates_dir().join(format!("{}.toml", name)))
+    }
+
     pub fn load_template(&self, name: &str) -> Result<template::TemplateConfig> {
-        let path = self.templates_dir().join(format!("{}.toml", name));
+        let path = self.template_config_path(name)?;
         let content = std::fs::read_to_string(&path)?;
         Ok(toml::from_str(&content)?)
     }
 
     pub fn save_template(&self, name: &str, config: &template::TemplateConfig) -> Result<()> {
-        let path = self.templates_dir().join(format!("{}.toml", name));
+        let path = self.template_config_path(name)?;
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)?;
         Ok(())

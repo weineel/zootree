@@ -2,9 +2,10 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::config::ConfigManager;
+use crate::config::{name::validate_config_name, ConfigManager};
 
 pub fn unique_repo_name(config_mgr: &ConfigManager, base: &str) -> Result<String> {
+    validate_config_name("repo", base)?;
     let existing: HashSet<String> = config_mgr.list_repos()?.into_iter().collect();
     if !existing.contains(base) {
         return Ok(base.to_string());

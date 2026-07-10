@@ -364,6 +364,7 @@ impl CreateWizardApp {
                 CreateDraftError::TitleRequired
                     | CreateDraftError::TitleSingleLineRequired
                     | CreateDraftError::WorkspaceNameRequired
+                    | CreateDraftError::WorkspaceNameInvalid(_)
                     | CreateDraftError::WorkspaceNameSingleLineRequired
                     | CreateDraftError::WorkspaceBranchRequired
                     | CreateDraftError::WorkspaceBranchSingleLineRequired
@@ -1215,6 +1216,9 @@ impl CreateWizardApp {
             CreateDraftError::TitleRequired => "title is required".into(),
             CreateDraftError::TitleSingleLineRequired => "title must be a single line".into(),
             CreateDraftError::WorkspaceNameRequired => "workspace name is required".into(),
+            CreateDraftError::WorkspaceNameInvalid(name) => {
+                format!("workspace name must use only ASCII letters, numbers, '-' and '_': {name}")
+            }
             CreateDraftError::WorkspaceNameSingleLineRequired => {
                 "workspace name must be a single line".into()
             }

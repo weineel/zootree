@@ -12,6 +12,39 @@ use zootree::config::workspace::{
 use zootree::config::ConfigManager;
 use zootree::runner::MockRunner;
 
+fn test_repo_config(path: &str) -> RepoConfig {
+    RepoConfig {
+        path: path.into(),
+        default_target_branch: None,
+        copy_files: Vec::new(),
+        hooks: Default::default(),
+        lazygit: None,
+    }
+}
+
+fn test_workspace_config(name: &str) -> WorkspaceConfig {
+    WorkspaceConfig {
+        title: "config path validation".into(),
+        name: name.into(),
+        description: String::new(),
+        branch: format!("zootree/{name}"),
+        workspace_dir: format!("~/zootree-workspaces/{name}"),
+        created_at: "2026-07-10T10:00:00+08:00".into(),
+        agent_cli: None,
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: MultiplexerState::default(),
+        repos: Vec::new(),
+        events: Vec::new(),
+    }
+}
+
+fn test_template_config() -> zootree::config::template::TemplateConfig {
+    zootree::config::template::TemplateConfig {
+        repos: vec!["frontend".into()],
+        multiplexer: MultiplexerConfig::default(),
+    }
+}
+
 fn assert_unknown_field_error(error: toml::de::Error, field: &str) {
     let message = error.to_string();
     assert!(
@@ -347,6 +380,112 @@ layout = "custom"
         msg.contains("failed to parse workspace config") && msg.contains("calm-river.toml"),
         "unexpected error: {msg}"
     );
+}
+
+#[test]
+fn config_manager_rejects_invalid_repo_names_used_for_paths() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let config = test_repo_config("/repo/frontend");
+
+    let err = mgr.save_repo_config("../outside", &config).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid repo name"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !tmp.path().join("outside.toml").exists(),
+        "invalid repo name should not escape the repos directory"
+    );
+
+    for invalid in ["", "front/end", "front\\end", "front end", ".hidden"] {
+        let err = mgr.load_repo_config(invalid).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid repo name"),
+            "name {invalid:?} produced unexpected error: {err}"
+        );
+    }
+
+    let err = mgr.remove_repo_config("front/end").unwrap_err();
+    assert!(
+        err.to_string().contains("invalid repo name"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn config_manager_rejects_invalid_workspace_names_used_for_paths() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let workspace = test_workspace_config("../outside");
+
+    let err = mgr
+        .save_workspace(&WorkspaceStatus::Pending, &workspace)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("invalid workspace name"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !tmp.path().join("outside.toml").exists(),
+        "invalid workspace name should not escape the workspaces directory"
+    );
+
+    for invalid in ["", "../outside", "open/reef", "open reef", ".hidden"] {
+        let err = mgr.load_workspace(invalid).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid workspace name"),
+            "name {invalid:?} produced unexpected error: {err}"
+        );
+    }
+
+    let err = mgr
+        .move_workspace(
+            "open/reef",
+            &WorkspaceStatus::Pending,
+            &WorkspaceStatus::InProgress,
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("invalid workspace name"),
+        "unexpected error: {err}"
+    );
+
+    let err = mgr
+        .delete_workspace_config("open/reef", &WorkspaceStatus::Pending)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("invalid workspace name"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn config_manager_rejects_invalid_template_names_used_for_paths() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let template = test_template_config();
+
+    let err = mgr.save_template("../outside", &template).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid template name"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !tmp.path().join("outside.toml").exists(),
+        "invalid template name should not escape the templates directory"
+    );
+
+    for invalid in ["", "../outside", "daily/work", "daily work", ".hidden"] {
+        let err = mgr.load_template(invalid).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid template name"),
+            "name {invalid:?} produced unexpected error: {err}"
+        );
+    }
 }
 
 #[test]
@@ -689,6 +828,22 @@ fn build_repo_entries_prefers_explicit_branch() {
     assert_eq!(entries[0].name, "frontend");
     assert_eq!(entries[0].target_branch.as_deref(), Some("release"));
     assert!(runner.take_calls().is_empty());
+}
+
+#[test]
+fn build_repo_entries_rejects_invalid_repo_names_before_loading_config() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let runner = MockRunner::new();
+
+    let err =
+        build_repo_entries(&mgr, &runner, vec![("../outside".to_string(), None)]).unwrap_err();
+
+    assert!(
+        err.to_string().contains("invalid repo name"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

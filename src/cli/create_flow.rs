@@ -1,5 +1,6 @@
 use crate::cli::workspace::CreateArgs;
 use crate::config::global::{GlobalConfig, HooksConfig, MultiplexerConfig};
+use crate::config::name::{is_config_name, validate_config_name};
 use crate::config::repo::RepoConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig};
 use crate::config::ConfigManager;
@@ -34,6 +35,7 @@ pub enum CreateDraftError {
     TitleRequired,
     TitleSingleLineRequired,
     WorkspaceNameRequired,
+    WorkspaceNameInvalid(String),
     WorkspaceNameSingleLineRequired,
     WorkspaceBranchRequired,
     WorkspaceBranchSingleLineRequired,
@@ -169,6 +171,8 @@ impl CreateDraft {
         }
         if self.name.trim().is_empty() {
             errors.push(CreateDraftError::WorkspaceNameRequired);
+        } else if !is_config_name(&self.name) {
+            errors.push(CreateDraftError::WorkspaceNameInvalid(self.name.clone()));
         }
         if self.branch.trim().is_empty() {
             errors.push(CreateDraftError::WorkspaceBranchRequired);
@@ -459,6 +463,7 @@ fn build_requested_repo_draft_entries<R: CommandRunner>(
     let mut entries = Vec::new();
 
     for (name, branch) in repos {
+        validate_config_name("repo", &name)?;
         if !registered.iter().any(|registered| registered == &name) {
             anyhow::bail!("repo '{}' is not registered", name);
         }

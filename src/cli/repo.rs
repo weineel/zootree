@@ -126,7 +126,7 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
                     repos[idx].clone()
                 }
             };
-            let path = config_mgr.repos_dir().join(format!("{}.toml", name));
+            let path = config_mgr.repo_config_path(&name)?;
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
             std::process::Command::new(&editor).arg(&path).status()?;
             Ok(())
