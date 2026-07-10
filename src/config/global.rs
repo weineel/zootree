@@ -22,7 +22,6 @@ pub struct HooksConfig {
 pub struct LogConfig {
     pub dir: Option<String>,
     pub max_files: Option<u32>,
-    pub max_size: Option<String>,
 }
 
 impl Default for LogConfig {
@@ -30,7 +29,6 @@ impl Default for LogConfig {
         Self {
             dir: None,
             max_files: Some(5),
-            max_size: Some("10MB".into()),
         }
     }
 }

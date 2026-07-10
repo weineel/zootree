@@ -4,12 +4,13 @@ use tempfile::TempDir;
 use zootree::cli::workspace::{build_repo_entries, parse_repos_arg};
 use zootree::config::global::GlobalConfig;
 use zootree::config::global::HookValue;
-use zootree::config::global::{MultiplexerConfig, MultiplexerKind};
+use zootree::config::global::{LogConfig, MultiplexerConfig, MultiplexerKind};
 use zootree::config::repo::RepoConfig;
 use zootree::config::workspace::{
     CmuxRepoWorkspaceState, MultiplexerState, WorkspaceConfig, WorkspaceStatus,
 };
 use zootree::config::ConfigManager;
+use zootree::core::logging::{resolve_log_dir, resolve_log_file_path};
 use zootree::runner::MockRunner;
 
 fn test_repo_config(path: &str) -> RepoConfig {
@@ -71,6 +72,7 @@ layout = "default"
 post_create = "echo hello"
 
 [log]
+dir = "~/zootree-logs"
 max_files = 5
 "#;
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
@@ -85,6 +87,7 @@ max_files = 5
             "echo hello".into()
         ))
     );
+    assert_eq!(config.log.dir.as_deref(), Some("~/zootree-logs"));
     assert_eq!(config.log.max_files, Some(5));
     assert_eq!(
         config.agent_cli.as_deref(),
@@ -100,7 +103,40 @@ fn test_parse_global_config_defaults() {
     assert_eq!(config.multiplexer.zellij.layout, Some("default".into()));
     assert_eq!(config.branch_prefix, "zootree");
     assert!(config.copy_files.is_empty());
+    assert_eq!(config.log, LogConfig::default());
     assert!(config.agent_cli.is_none());
+}
+
+#[test]
+fn log_path_defaults_to_config_manager_logs_dir() {
+    let temp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(temp.path().join("zootree"));
+    let config = GlobalConfig::default();
+
+    assert_eq!(resolve_log_dir(&mgr, &config), mgr.base_dir.join("logs"));
+    assert_eq!(
+        resolve_log_file_path(&mgr, &config),
+        mgr.base_dir.join("logs/zootree.log")
+    );
+}
+
+#[test]
+fn log_path_uses_configured_log_dir_without_creating_it() {
+    let temp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(temp.path().join("zootree"));
+    let custom_dir = temp.path().join("custom-logs");
+    let mut config = GlobalConfig::default();
+    config.log.dir = Some(custom_dir.to_string_lossy().into_owned());
+
+    assert_eq!(resolve_log_dir(&mgr, &config), custom_dir);
+    assert_eq!(
+        resolve_log_file_path(&mgr, &config),
+        temp.path().join("custom-logs/zootree.log")
+    );
+    assert!(
+        !temp.path().join("custom-logs").exists(),
+        "path resolution should not create log directories"
+    );
 }
 
 #[test]

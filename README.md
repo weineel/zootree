@@ -248,10 +248,13 @@ pre_cancel = "echo canceled"
 pre_remove = "echo removed"
 
 [log]
+dir = "~/.config/zootree/logs"
 max_files = 5
 ```
 
 cmux is the recommended multiplexer for new setups. If `[multiplexer].kind` is omitted, zootree keeps the compatibility default `zellij`.
+
+Logs rotate daily. `log.dir` changes the directory used by both the logger and `zootree logs`, and `log.max_files` limits how many daily log files are retained. Size-based rotation such as `max_size` is not supported by the current tracing appender.
 
 ### Repo config (~/.config/zootree/repos/<name>.toml)
 

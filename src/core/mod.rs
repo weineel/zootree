@@ -4,6 +4,7 @@ pub mod copy_files;
 pub mod git;
 pub mod hook;
 pub mod layout;
+pub mod logging;
 pub mod multiplexer;
 pub mod name_gen;
 pub mod repo_names;

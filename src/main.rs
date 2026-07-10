@@ -4,17 +4,26 @@ use clap_complete::CompleteEnv;
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use zootree::cli::{Cli, Commands};
+use zootree::config::{global::GlobalConfig, ConfigManager};
+use zootree::core::logging::{resolve_log_dir, resolve_log_file_path, LOG_FILE_NAME};
 
 fn init_tracing(
     verbose: bool,
     quiet: bool,
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
 ) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot find config directory"))?
-        .join("zootree/logs");
-    std::fs::create_dir_all(&config_dir)?;
+    let log_dir = resolve_log_dir(config_mgr, global);
+    std::fs::create_dir_all(&log_dir)?;
 
-    let file_appender = rolling::daily(&config_dir, "zootree.log");
+    let mut file_appender = rolling::RollingFileAppender::builder()
+        .rotation(rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_NAME)
+        .latest_symlink(LOG_FILE_NAME);
+    if let Some(max_files) = global.log.max_files {
+        file_appender = file_appender.max_log_files(max_files as usize);
+    }
+    let file_appender = file_appender.build(&log_dir)?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let terminal_level = if quiet {
@@ -51,7 +60,22 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let _guard = match init_tracing(cli.verbose, cli.quiet) {
+    let config_mgr = match ConfigManager::new() {
+        Ok(config_mgr) => config_mgr,
+        Err(e) => {
+            eprintln!("Error: failed to initialize config: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let global = match config_mgr.load_global_config() {
+        Ok(global) => global,
+        Err(e) => {
+            eprintln!("Error: failed to load global config: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let _guard = match init_tracing(cli.verbose, cli.quiet, &config_mgr, &global) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("Error: failed to initialize tracing: {}", e);
@@ -59,7 +83,7 @@ fn main() {
         }
     };
 
-    if let Err(e) = run(cli.command) {
+    if let Err(e) = run(cli.command, &config_mgr, &global) {
         if e.downcast_ref::<zootree::tui_app::CancelledByUser>()
             .is_some()
         {
@@ -71,7 +95,7 @@ fn main() {
     }
 }
 
-fn run(command: Commands) -> Result<()> {
+fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> Result<()> {
     match command {
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;
@@ -104,19 +128,17 @@ fn run(command: Commands) -> Result<()> {
             zootree::cli::prune::handle_prune(&args)?;
         }
         Commands::Logs => {
-            let config_dir = dirs::config_dir()
-                .ok_or_else(|| anyhow::anyhow!("cannot find config directory"))?
-                .join("zootree/logs/zootree.log");
-            if config_dir.exists() {
+            let log_file = resolve_log_file_path(config_mgr, global);
+            if log_file.exists() {
                 let status = std::process::Command::new("tail")
                     .args(["-f", "-n", "100"])
-                    .arg(&config_dir)
+                    .arg(&log_file)
                     .status()?;
                 if !status.success() {
                     anyhow::bail!("tail exited with error");
                 }
             } else {
-                println!("no log file found at {}", config_dir.display());
+                println!("no log file found at {}", log_file.display());
             }
         }
         Commands::Completions(args) => {
