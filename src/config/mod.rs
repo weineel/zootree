@@ -169,6 +169,17 @@ impl ConfigManager {
         &self,
         status: Option<&[workspace::WorkspaceStatus]>,
     ) -> Result<Vec<workspace::WorkspaceConfig>> {
+        Ok(self
+            .list_workspaces_with_status(status)?
+            .into_iter()
+            .map(|entry| entry.config)
+            .collect())
+    }
+
+    pub fn list_workspaces_with_status(
+        &self,
+        status: Option<&[workspace::WorkspaceStatus]>,
+    ) -> Result<Vec<workspace::WorkspaceWithStatus>> {
         use workspace::WorkspaceStatus::*;
         let statuses = match status {
             Some(s) => s.to_vec(),
@@ -177,6 +188,7 @@ impl ConfigManager {
         let mut workspaces = Vec::new();
         for s in statuses {
             let dir = self.workspace_status_dir(&s);
+            let mut status_workspaces = Vec::new();
             if dir.exists() {
                 for entry in std::fs::read_dir(&dir)? {
                     let entry = entry?;
@@ -188,10 +200,15 @@ impl ConfigManager {
                         let config = toml::from_str(&content).with_context(|| {
                             format!("failed to parse workspace config {}", path.display())
                         })?;
-                        workspaces.push(config);
+                        status_workspaces.push(workspace::WorkspaceWithStatus {
+                            status: s.clone(),
+                            config,
+                        });
                     }
                 }
             }
+            status_workspaces.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+            workspaces.extend(status_workspaces);
         }
         Ok(workspaces)
     }

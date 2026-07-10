@@ -136,6 +136,24 @@ fn workspace_completer_includes_description() {
 }
 
 #[test]
+fn workspace_completer_help_includes_in_progress_status() {
+    let (_tmp, mgr) = make_mgr();
+    save(
+        &mgr,
+        WorkspaceStatus::InProgress,
+        "add-search",
+        "Add search",
+    );
+
+    let cands = complete_workspace_with(&mgr, OsStr::new(""), WorkspaceFilter::InProgress);
+
+    assert_eq!(cands.len(), 1);
+    let help = cands[0].get_help().unwrap().to_string();
+    assert!(help.contains("Add search"), "help was: {}", help);
+    assert!(help.contains("in_progress"), "help was: {}", help);
+}
+
+#[test]
 fn workspace_completer_returns_empty_when_dir_missing() {
     let tmp = TempDir::new().unwrap();
     // Do NOT call ensure_dirs

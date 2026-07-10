@@ -404,7 +404,7 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
         args.status.clone()
     };
 
-    let workspaces = config_mgr.list_workspaces(Some(status_filter.as_slice()))?;
+    let workspaces = config_mgr.list_workspaces_with_status(Some(status_filter.as_slice()))?;
 
     if workspaces.is_empty() {
         println!("no workspaces found");
@@ -412,8 +412,9 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     }
 
     let mut items = Vec::with_capacity(workspaces.len());
-    for ws in workspaces {
-        let (status, _) = config_mgr.load_workspace(&ws.name)?;
+    for entry in workspaces {
+        let status = entry.status;
+        let ws = entry.config;
         let worktrees = if matches!(status, WorkspaceStatus::InProgress) {
             let ws_dir = shellexpand::tilde(&ws.workspace_dir).into_owned();
             repo_worktree_statuses(&ws, &ws_dir)

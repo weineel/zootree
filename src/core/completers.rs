@@ -33,23 +33,15 @@ pub fn complete_workspace_with(
     filter: WorkspaceFilter,
 ) -> Vec<CompletionCandidate> {
     let prefix = current.to_string_lossy();
-    let Ok(workspaces) = mgr.list_workspaces(Some(filter.statuses())) else {
+    let Ok(workspaces) = mgr.list_workspaces_with_status(Some(filter.statuses())) else {
         return vec![];
     };
     workspaces
         .into_iter()
-        .filter(|ws| ws.name.starts_with(prefix.as_ref()))
-        .map(|ws| {
-            let status = mgr
-                .load_workspace(&ws.name)
-                .map(|(s, _)| format!("{:?}", s).to_lowercase())
-                .unwrap_or_default();
-            let help = if status.is_empty() {
-                ws.title.clone()
-            } else {
-                format!("{} ({})", ws.title, status)
-            };
-            CompletionCandidate::new(ws.name).help(Some(help.into()))
+        .filter(|entry| entry.config.name.starts_with(prefix.as_ref()))
+        .map(|entry| {
+            let help = format!("{} ({})", entry.config.title, entry.status.as_str());
+            CompletionCandidate::new(entry.config.name).help(Some(help.into()))
         })
         .collect()
 }

@@ -10,6 +10,23 @@ pub enum WorkspaceStatus {
     Canceled,
 }
 
+impl WorkspaceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkspaceStatus::Pending => "pending",
+            WorkspaceStatus::InProgress => "in_progress",
+            WorkspaceStatus::Done => "done",
+            WorkspaceStatus::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceWithStatus {
+    pub status: WorkspaceStatus,
+    pub config: WorkspaceConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoEntry {
     pub name: String,

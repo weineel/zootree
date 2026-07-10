@@ -382,6 +382,91 @@ layout = "custom"
     );
 }
 
+fn workspace_config(name: &str, title: &str) -> WorkspaceConfig {
+    WorkspaceConfig {
+        title: title.into(),
+        name: name.into(),
+        description: String::new(),
+        branch: format!("zootree/{}", name),
+        workspace_dir: format!("~/zootree-workspaces/{}", name),
+        created_at: "2026-04-28T10:30:00+08:00".into(),
+        agent_cli: None,
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: MultiplexerState::default(),
+        repos: Vec::new(),
+        events: Vec::new(),
+    }
+}
+
+#[test]
+fn list_workspaces_returns_status_order_then_name_order() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+
+    mgr.save_workspace(
+        &WorkspaceStatus::InProgress,
+        &workspace_config("beta", "Beta"),
+    )
+    .unwrap();
+    mgr.save_workspace(&WorkspaceStatus::Pending, &workspace_config("zulu", "Zulu"))
+        .unwrap();
+    mgr.save_workspace(
+        &WorkspaceStatus::InProgress,
+        &workspace_config("alpha", "Alpha"),
+    )
+    .unwrap();
+    mgr.save_workspace(&WorkspaceStatus::Pending, &workspace_config("echo", "Echo"))
+        .unwrap();
+
+    let workspaces = mgr
+        .list_workspaces(Some(&[
+            WorkspaceStatus::Pending,
+            WorkspaceStatus::InProgress,
+        ]))
+        .unwrap();
+    let names: Vec<_> = workspaces.into_iter().map(|ws| ws.name).collect();
+
+    assert_eq!(names, vec!["echo", "zulu", "alpha", "beta"]);
+}
+
+#[test]
+fn list_workspaces_with_status_returns_status_and_config_once() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+
+    mgr.save_workspace(
+        &WorkspaceStatus::InProgress,
+        &workspace_config("beta", "Beta"),
+    )
+    .unwrap();
+    mgr.save_workspace(
+        &WorkspaceStatus::Pending,
+        &workspace_config("alpha", "Alpha"),
+    )
+    .unwrap();
+
+    let entries = mgr
+        .list_workspaces_with_status(Some(&[
+            WorkspaceStatus::Pending,
+            WorkspaceStatus::InProgress,
+        ]))
+        .unwrap();
+    let got: Vec<_> = entries
+        .into_iter()
+        .map(|entry| (entry.status, entry.config.name))
+        .collect();
+
+    assert_eq!(
+        got,
+        vec![
+            (WorkspaceStatus::Pending, "alpha".into()),
+            (WorkspaceStatus::InProgress, "beta".into())
+        ]
+    );
+}
+
 #[test]
 fn config_manager_rejects_invalid_repo_names_used_for_paths() {
     let tmp = TempDir::new().unwrap();

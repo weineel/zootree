@@ -100,6 +100,8 @@ pub trait TerminalMultiplexer {
 - 初始化: `ConfigManager::new()` → `~/.config/zootree/`
 - 测试: `ConfigManager::with_base_dir(temp_path)` 指向临时目录
 - 所有 save/load 使用 `toml` crate 进行序列化
+- workspace 列表读取使用稳定排序：按传入 status 顺序遍历，每个 status 内按 workspace name 排序
+- 需要同时使用 workspace status 和配置时，优先用 `list_workspaces_with_status`，避免先 `list_workspaces` 再逐个 `load_workspace`
 
 ### 命令路由
 
@@ -206,6 +208,7 @@ fn test_something() {
 - **日志**: 使用 `tracing::info!()` / `tracing::debug!()` 而非 `println!`
 - **序列化**: 所有配置 struct 都 derive `Serialize + Deserialize + Debug + Clone + PartialEq`
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`
+- **workspace status 展示**: 用户可见 status 字符串统一使用 `WorkspaceStatus::as_str()`，不要从 `Debug` 派生后手动 lowercase
 - **untagged enum**: `HookValue` 使用 `#[serde(untagged)]` 支持三种格式
 - **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`；Zellij 支持 `layouts/<name>.kdl`，cmux group-aware 模式当前只支持 `layout = "default"`
 - **cmux group state**: cmux mode maps one zootree workspace to one cmux workspace group. `workspace-group create --from <first-repo>` creates a default header/anchor; zootree then creates its own anchor workspace with the `zootree info` layout, uses `workspace-group set-anchor`, and closes the generated default anchor. Runtime refs live in `WorkspaceConfig.multiplexer_state`: `cmux_group` and `cmux_repo_workspaces`. Legacy `cmux_workspace` and `cmux_anchor_workspace` remain readable for older configs but new group-aware saves should not write them.
@@ -228,7 +231,7 @@ fn test_something() {
 
 ### 给新命令添加动态补全
 
-1. 确认候选数据来源（workspace/repo/template）；如需新增类别，在 `src/core/completers.rs` 中新增 `complete_<thing>_with(mgr, current)` 和 `complete_<thing>(current)`，遵循「失败返回 vec![]」原则
+1. 确认候选数据来源（workspace/repo/template）；如需新增类别，在 `src/core/completers.rs` 中新增 `complete_<thing>_with(mgr, current)` 和 `complete_<thing>(current)`，遵循「失败返回 vec![]」原则；workspace 补全要用 `list_workspaces_with_status` 直接拿状态并生成 help 文案
 2. 在对应 `Args` 字段加 `add = ArgValueCompleter::new(|c: &OsStr| complete_<thing>(c))`
 3. 在 `tests/completions_test.rs` 添加：基本列表、前缀过滤、描述包含正确字段三个测试
 4. 静态值（如固定枚举）改为 `clap::ValueEnum`，clap 自动补全
