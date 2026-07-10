@@ -564,6 +564,17 @@ impl InlineApp for TextPromptState {
 
 const SELECT_MAX_VISIBLE_ROWS: u16 = 8;
 
+fn select_window_start(visible_count: usize, cursor: Option<usize>, capacity: usize) -> usize {
+    if capacity == 0 || visible_count <= capacity {
+        return 0;
+    }
+    cursor
+        .unwrap_or(0)
+        .saturating_add(1)
+        .saturating_sub(capacity)
+        .min(visible_count - capacity)
+}
+
 impl InlineApp for SelectPromptState {
     type Output = usize;
 
@@ -597,9 +608,12 @@ impl InlineApp for SelectPromptState {
 
         let visible = self.visible_indices();
         let cursor = self.cursor_visible_index();
+        let window_start =
+            select_window_start(visible.len(), cursor, SELECT_MAX_VISIBLE_ROWS as usize);
         let lines: Vec<Line> = visible
             .iter()
             .enumerate()
+            .skip(window_start)
             .take(SELECT_MAX_VISIBLE_ROWS as usize)
             .map(|(vi, &orig)| {
                 let item = &self.items()[orig];
@@ -685,9 +699,12 @@ impl InlineApp for MultiSelectPromptState {
 
         let visible = self.visible_indices();
         let cursor = self.cursor_visible_index();
+        let window_start =
+            select_window_start(visible.len(), cursor, SELECT_MAX_VISIBLE_ROWS as usize);
         let lines: Vec<Line> = visible
             .iter()
             .enumerate()
+            .skip(window_start)
             .take(SELECT_MAX_VISIBLE_ROWS as usize)
             .map(|(vi, &orig)| {
                 let item = &self.items()[orig];

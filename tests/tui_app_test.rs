@@ -1,5 +1,9 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 use std::time::Duration;
-use zootree::tui_app::{App, Event};
+use zootree::tui_app::prompt::{MultiSelectPromptState, SelectPromptState};
+use zootree::tui_app::{App, Event, InlineApp};
 
 struct NoopApp {
     quit: bool,
@@ -80,4 +84,61 @@ fn custom_tick_interval_overrides_default() {
         }
     }
     assert_eq!(WatchApp.tick_interval(), Some(Duration::from_secs(2)));
+}
+
+fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+    let mut out = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_inline_to_string<A: InlineApp>(app: &mut A, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| <A as InlineApp>::render(app, frame))
+        .unwrap();
+    buffer_to_string(terminal.backend().buffer())
+}
+
+fn down() -> KeyEvent {
+    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+}
+
+fn numbered_items() -> Vec<String> {
+    (0..12).map(|idx| format!("item-{idx:02}")).collect()
+}
+
+#[test]
+fn select_render_scrolls_to_keep_cursor_visible_past_eight_items() {
+    let mut app = SelectPromptState::new("Pick", numbered_items());
+    for _ in 0..9 {
+        app.handle_key(down());
+    }
+
+    let out = render_inline_to_string(&mut app, 40, 10);
+
+    assert!(out.contains("> item-09"), "cursor row not visible:\n{out}");
+    assert!(!out.contains("item-00"), "list did not scroll:\n{out}");
+}
+
+#[test]
+fn multiselect_render_scrolls_to_keep_cursor_visible_past_eight_items() {
+    let mut app = MultiSelectPromptState::new("Pick", numbered_items());
+    for _ in 0..9 {
+        app.handle_key(down());
+    }
+
+    let out = render_inline_to_string(&mut app, 40, 10);
+
+    assert!(
+        out.contains("> [ ] item-09"),
+        "cursor row not visible:\n{out}"
+    );
+    assert!(!out.contains("item-00"), "list did not scroll:\n{out}");
 }
