@@ -262,3 +262,33 @@ fn run_agent_bare_with_agent_cli_uses_default() {
         repo_section
     );
 }
+
+#[test]
+fn run_agent_escapes_layout_vars_without_reprocessing_agent_cli_fragment() {
+    let mut ws = make_workspace(vec!["front\"end\\api"]);
+    ws.name = "calm\"river".into();
+    ws.workspace_dir = "/ws/calm\\river".into();
+    let map = BTreeMap::new();
+    let rendered = render_with_rule(&ws, Some(Some("")), Some("claude -- $prompt"), &map).unwrap();
+
+    assert!(
+        rendered.contains(r#""info" "calm\"river" "--watch""#),
+        "workspace name should be escaped in overview args: {}",
+        rendered
+    );
+    assert!(
+        rendered.contains(r#"cwd="/ws/calm\\river/front\"end\\api""#),
+        "worktree path should be escaped: {}",
+        rendered
+    );
+    assert!(
+        rendered.contains(r#"command="claude""#),
+        "agent_cli fragment should remain valid KDL: {}",
+        rendered
+    );
+    assert!(
+        rendered.contains(r#""Add login flow\nImplement OAuth2""#),
+        "agent_cli prompt escaping should be preserved: {}",
+        rendered
+    );
+}

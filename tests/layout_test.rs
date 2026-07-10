@@ -21,6 +21,36 @@ fn test_variable_replacement() {
 }
 
 #[test]
+fn test_variable_replacement_escapes_kdl_string_values() {
+    let template = r#"tab name="$repo_name" {
+    pane cwd="$worktree_path" {
+        args "$branch" "$workspace_name" "$workspace_dir" "$lazygit_config"
+    }
+}"#;
+    let vars = LayoutVar {
+        repo_name: "front\"end\\api\nnext".into(),
+        worktree_path: "/tmp/ws/quote\"repo\\path".into(),
+        branch: "feat/escape\tbranch".into(),
+        workspace_name: "calm\"river".into(),
+        workspace_dir: "/tmp/ws/calm\\river".into(),
+        lazygit_config: "/tmp/lazygit\"user.yml".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
+    };
+    let result = LayoutRenderer::replace_vars(template, &vars);
+
+    result
+        .parse::<kdl::KdlDocument>()
+        .unwrap_or_else(|err| panic!("rendered KDL should parse: {err}\n---\n{result}"));
+    assert!(result.contains(r#"name="front\"end\\api\nnext""#));
+    assert!(result.contains(r#"cwd="/tmp/ws/quote\"repo\\path""#));
+    assert!(result.contains(r#""feat/escape\tbranch""#));
+    assert!(result.contains(r#""calm\"river""#));
+    assert!(result.contains(r#""/tmp/ws/calm\\river""#));
+    assert!(result.contains(r#""/tmp/lazygit\"user.yml""#));
+}
+
+#[test]
 fn test_empty_lazygit_config_removes_ucf_arg() {
     let template = r#"pane command="lazygit" {
     args "-p" "$worktree_path" "-ucf" "$lazygit_config"

@@ -24,12 +24,12 @@ impl LayoutRenderer {
             result = result.replace(r#" "-ucf" "$lazygit_config""#, "");
         }
 
-        result = result.replace("$repo_name", &vars.repo_name);
-        result = result.replace("$worktree_path", &vars.worktree_path);
-        result = result.replace("$branch", &vars.branch);
-        result = result.replace("$workspace_name", &vars.workspace_name);
-        result = result.replace("$workspace_dir", &vars.workspace_dir);
-        result = result.replace("$lazygit_config", &vars.lazygit_config);
+        result = result.replace("$repo_name", &kdl_escape(&vars.repo_name));
+        result = result.replace("$worktree_path", &kdl_escape(&vars.worktree_path));
+        result = result.replace("$branch", &kdl_escape(&vars.branch));
+        result = result.replace("$workspace_name", &kdl_escape(&vars.workspace_name));
+        result = result.replace("$workspace_dir", &kdl_escape(&vars.workspace_dir));
+        result = result.replace("$lazygit_config", &kdl_escape(&vars.lazygit_config));
         // agent_cli placeholders MUST be substituted last so injected KDL fragments
         // don't get re-processed by the standard variable replacements.
         result = result.replace("$overview_agent_cli", &vars.overview_agent_cli);
