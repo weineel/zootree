@@ -191,6 +191,24 @@ fn launch_inside_zellij_session_exists_invokes_only_list_sessions() {
 }
 
 #[test]
+fn launch_propagates_list_sessions_failure() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output("zellij socket unavailable"));
+
+    let zellij = ZellijMultiplexer::new(&runner, true);
+    let err = zellij.launch(&launch()).unwrap_err();
+    let msg = format!("{:#}", err);
+
+    assert!(
+        msg.contains("zellij list-sessions failed") && msg.contains("zellij socket unavailable"),
+        "unexpected error: {msg}"
+    );
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 1, "failed list-sessions must not create");
+    assert_eq!(calls[0].args, vec!["list-sessions"]);
+}
+
+#[test]
 fn launch_treats_ansi_styled_session_name_as_existing() {
     let runner = MockRunner::new();
     runner.push_response(stdout_output(

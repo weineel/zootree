@@ -29,14 +29,14 @@ use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::worktree_status::{
     format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
 };
-use crate::runner::RealRunner;
+use crate::runner::{CommandRunner, RealRunner};
 use crate::tui;
 use crate::tui_app::create_wizard::run_create_wizard;
 use anyhow::Result;
 use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -256,9 +256,125 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     let global = config_mgr.load_global_config()?;
     let runner = RealRunner;
-    let git = GitOps::new(&runner);
-    let hook_engine = HookEngine::new(&runner);
 
+    let workspace = start_workspace_with(&config_mgr, &global, &runner, args)?;
+    println!("workspace '{}' started", workspace.name);
+
+    if !args.no_multiplexer {
+        launch_multiplexer(
+            &config_mgr,
+            &global,
+            &workspace,
+            &runner,
+            args.run_agent.clone(),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CreatedWorktree {
+    repo_path: String,
+    worktree_path: String,
+}
+
+#[derive(Debug)]
+struct StartRollback {
+    created_worktrees: Vec<CreatedWorktree>,
+    workspace_dir_to_remove: Option<PathBuf>,
+    active: bool,
+}
+
+impl StartRollback {
+    fn new(workspace_dir_to_remove: Option<PathBuf>) -> Self {
+        Self {
+            created_worktrees: Vec::new(),
+            workspace_dir_to_remove,
+            active: true,
+        }
+    }
+
+    fn record_worktree(&mut self, repo_path: String, worktree_path: String) {
+        self.created_worktrees.push(CreatedWorktree {
+            repo_path,
+            worktree_path,
+        });
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+
+    fn rollback<R: CommandRunner>(&mut self, git: &GitOps<'_, R>) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+
+        let mut failures = Vec::new();
+        for created in self.created_worktrees.iter().rev() {
+            if let Err(e) = git.worktree_remove(&created.repo_path, &created.worktree_path, true) {
+                tracing::warn!(
+                    "failed to rollback worktree '{}': {}",
+                    created.worktree_path,
+                    e
+                );
+                failures.push(format!("{}: {:#}", created.worktree_path, e));
+            }
+        }
+
+        if let Some(dir) = &self.workspace_dir_to_remove {
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to rollback workspace dir '{}': {}",
+                        dir.display(),
+                        e
+                    );
+                    failures.push(format!("{}: {}", dir.display(), e));
+                }
+            }
+        }
+
+        self.active = false;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("rollback failed: {}", failures.join("; "))
+        }
+    }
+}
+
+fn finish_start_failure<T, R: CommandRunner>(
+    err: anyhow::Error,
+    rollback: &mut StartRollback,
+    git: &GitOps<'_, R>,
+) -> Result<T> {
+    if let Err(rollback_err) = rollback.rollback(git) {
+        Err(anyhow::anyhow!(
+            "start failed: {:#}; rollback failed: {:#}",
+            err,
+            rollback_err
+        ))
+    } else {
+        Err(err)
+    }
+}
+
+fn start_workspace_with<R: CommandRunner>(
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
+    runner: &R,
+    args: &StartArgs,
+) -> Result<WorkspaceConfig> {
+    let git = GitOps::new(runner);
+    let hook_engine = HookEngine::new(runner);
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
@@ -281,78 +397,91 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     }
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+    let ws_dir_path = PathBuf::from(&ws_dir);
+    let created_workspace_dir = !ws_dir_path.exists();
     std::fs::create_dir_all(&ws_dir)?;
+    let mut rollback = StartRollback::new(created_workspace_dir.then_some(ws_dir_path));
 
-    if args.run_agent.is_some() {
-        workspace.agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
-    }
-
-    for repo_entry in &workspace.repos {
-        let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-
-        let target_branch = match &repo_entry.target_branch {
-            Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
-            Some(tb) => {
-                let current = git.current_branch(&repo_path)?;
-                tracing::warn!(
-                    "target branch '{}' not found in repo '{}', using current branch '{}'",
-                    tb,
-                    repo_entry.name,
-                    current
-                );
-                current
-            }
-            None => {
-                let current = git.current_branch(&repo_path)?;
-                tracing::warn!(
-                    "target branch not configured for repo '{}', using current branch '{}'",
-                    repo_entry.name,
-                    current
-                );
-                current
-            }
-        };
-
-        let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-
-        tracing::info!(
-            "creating worktree for {} at {}",
-            repo_entry.name,
-            worktree_path
-        );
-        git.worktree_add(
-            &repo_path,
-            &workspace.branch,
-            &worktree_path,
-            &target_branch,
-        )?;
-
-        let patterns = copy_files::merge_copy_files(&global.copy_files, &repo_config.copy_files);
-        if !patterns.is_empty() {
-            copy_files::copy_files_to_worktree(
-                Path::new(&repo_path),
-                Path::new(&worktree_path),
-                &patterns,
-            )?;
+    let prepare_result = (|| -> Result<()> {
+        if args.run_agent.is_some() {
+            workspace.agent_cli = selected_agent_cli_value(&args.run_agent, global)?;
         }
 
-        let hook = repo_config
-            .hooks
-            .post_create
-            .as_ref()
-            .or(global.hooks.post_create.as_ref());
-        if let Some(h) = hook {
-            let ctx = HookContext {
-                workspace: workspace.name.clone(),
-                repo: Some(repo_entry.name.clone()),
-                branch: workspace.branch.clone(),
-                target_branch: Some(target_branch.clone()),
-                worktree_path: Some(worktree_path.clone()),
-                workspace_dir: ws_dir.clone(),
+        for repo_entry in &workspace.repos {
+            let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
+            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+
+            let target_branch = match &repo_entry.target_branch {
+                Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
+                Some(tb) => {
+                    let current = git.current_branch(&repo_path)?;
+                    tracing::warn!(
+                        "target branch '{}' not found in repo '{}', using current branch '{}'",
+                        tb,
+                        repo_entry.name,
+                        current
+                    );
+                    current
+                }
+                None => {
+                    let current = git.current_branch(&repo_path)?;
+                    tracing::warn!(
+                        "target branch not configured for repo '{}', using current branch '{}'",
+                        repo_entry.name,
+                        current
+                    );
+                    current
+                }
             };
-            hook_engine.execute(h, &ctx)?;
+
+            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
+
+            tracing::info!(
+                "creating worktree for {} at {}",
+                repo_entry.name,
+                worktree_path
+            );
+            git.worktree_add(
+                &repo_path,
+                &workspace.branch,
+                &worktree_path,
+                &target_branch,
+            )?;
+            rollback.record_worktree(repo_path.clone(), worktree_path.clone());
+
+            let patterns =
+                copy_files::merge_copy_files(&global.copy_files, &repo_config.copy_files);
+            if !patterns.is_empty() {
+                copy_files::copy_files_to_worktree(
+                    Path::new(&repo_path),
+                    Path::new(&worktree_path),
+                    &patterns,
+                )?;
+            }
+
+            let hook = repo_config
+                .hooks
+                .post_create
+                .as_ref()
+                .or(global.hooks.post_create.as_ref());
+            if let Some(h) = hook {
+                let ctx = HookContext {
+                    workspace: workspace.name.clone(),
+                    repo: Some(repo_entry.name.clone()),
+                    branch: workspace.branch.clone(),
+                    target_branch: Some(target_branch.clone()),
+                    worktree_path: Some(worktree_path.clone()),
+                    workspace_dir: ws_dir.clone(),
+                };
+                hook_engine.execute(h, &ctx)?;
+            }
         }
+
+        Ok(())
+    })();
+
+    if let Err(err) = prepare_result {
+        return finish_start_failure(err, &mut rollback, &git);
     }
 
     let now = Local::now().to_rfc3339();
@@ -361,12 +490,17 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
         timestamp: now,
         detail: None,
     });
-    config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace)?;
-    config_mgr.move_workspace(
+    if let Err(err) = config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace) {
+        return finish_start_failure(err, &mut rollback, &git);
+    }
+    if let Err(err) = config_mgr.move_workspace(
         &name,
         &WorkspaceStatus::Pending,
         &WorkspaceStatus::InProgress,
-    )?;
+    ) {
+        return finish_start_failure(err, &mut rollback, &git);
+    }
+    rollback.disarm();
 
     if let Some(h) = &global.hooks.post_start {
         let ctx = HookContext {
@@ -380,19 +514,7 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
         hook_engine.execute(h, &ctx)?;
     }
 
-    println!("workspace '{}' started", name);
-
-    if !args.no_multiplexer {
-        launch_multiplexer(
-            &config_mgr,
-            &global,
-            &workspace,
-            &runner,
-            args.run_agent.clone(),
-        )?;
-    }
-
-    Ok(())
+    Ok(workspace)
 }
 
 pub fn handle_list(args: &ListArgs) -> Result<()> {
@@ -1442,7 +1564,10 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::workspace::CmuxRepoWorkspaceState;
+    use crate::runner::MockRunner;
     use clap::Parser;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
 
     #[derive(Parser)]
     struct TestListCli {
@@ -1501,12 +1626,98 @@ mod tests {
         }
     }
 
+    fn success_output() -> Output {
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn success_stdout(stdout: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn failure_output(stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
     fn missing_worktree(repo_name: &str, worktree_path: &str) -> RepoWorktreeStatus {
         RepoWorktreeStatus {
             repo_name: repo_name.into(),
             worktree_path: worktree_path.into(),
             exists: false,
         }
+    }
+
+    #[test]
+    fn start_rolls_back_created_worktree_when_post_create_hook_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
+        config_mgr.ensure_dirs().unwrap();
+        let workspace_dir = temp.path().join("workspaces/fair-fox");
+        let mut repo_cfg = repo_config("/repo/api");
+        repo_cfg.hooks.post_create =
+            Some(crate::config::global::HookValue::Simple("exit 42".into()));
+        config_mgr.save_repo_config("api", &repo_cfg).unwrap();
+        let workspace = list_workspace(
+            WorkspaceStatus::Pending,
+            "fair-fox",
+            "Fix start rollback",
+            "zootree/fair-fox",
+            &workspace_dir.to_string_lossy(),
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        config_mgr
+            .save_workspace(&WorkspaceStatus::Pending, &workspace)
+            .unwrap();
+        let runner = MockRunner::new();
+        runner.push_response(success_stdout("refs/heads/main\n"));
+        runner.push_response(success_output());
+        runner.push_response(failure_output("boom"));
+        runner.push_response(success_output());
+
+        let err = start_workspace_with(
+            &config_mgr,
+            &GlobalConfig::default(),
+            &runner,
+            &StartArgs {
+                name: Some("fair-fox".into()),
+                no_multiplexer: true,
+                run_agent: None,
+            },
+        )
+        .unwrap_err();
+        let msg = format!("{:#}", err);
+
+        assert!(msg.contains("hook failed"), "unexpected error: {msg}");
+        assert!(
+            !workspace_dir.exists(),
+            "rollback should remove empty workspace dir created by start"
+        );
+        let (status, _) = config_mgr.load_workspace("fair-fox").unwrap();
+        assert_eq!(status, WorkspaceStatus::Pending);
+        let calls = runner.take_calls();
+        assert_eq!(
+            calls[3].args,
+            vec![
+                "-C",
+                "/repo/api",
+                "worktree",
+                "remove",
+                "--force",
+                &format!("{}/api", workspace_dir.to_string_lossy()),
+            ]
+        );
     }
 
     #[test]

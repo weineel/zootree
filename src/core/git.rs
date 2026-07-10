@@ -53,21 +53,13 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
     }
 
     pub fn branch_exists(&self, repo_path: &str, branch: &str) -> Result<bool> {
-        let spec = CommandSpec {
-            program: "git".into(),
-            args: vec![
-                "-C".into(),
-                repo_path.into(),
-                "rev-parse".into(),
-                "--verify".into(),
-                format!("refs/heads/{}", branch),
-            ],
-            cwd: None,
-            env: HashMap::new(),
-            env_remove: vec![],
-        };
-        let output = self.runner.run(&spec)?;
-        Ok(output.status.success())
+        let refname = format!("refs/heads/{}", branch);
+        let output = self.git(
+            repo_path,
+            vec!["for-each-ref", "--format=%(refname)", &refname],
+        )?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.lines().any(|line| line.trim() == refname))
     }
 
     pub fn worktree_add(

@@ -19,6 +19,14 @@ fn success_stdout(stdout: &str) -> Output {
     }
 }
 
+fn failure_output(exit_code: i32, stderr: &str) -> Output {
+    Output {
+        status: ExitStatus::from_raw(exit_code << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
 #[test]
 fn test_repo_root_command() {
     let runner = MockRunner::new();
@@ -124,6 +132,57 @@ fn test_worktree_remove_force() {
             "--force",
             "/home/user/zootree-workspaces/calm-river/frontend",
         ]
+    );
+}
+
+#[test]
+fn branch_exists_returns_true_for_exact_local_branch_ref() {
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout("refs/heads/develop\n"));
+    let git = GitOps::new(&runner);
+
+    assert!(git
+        .branch_exists("/home/user/projects/frontend", "develop")
+        .unwrap());
+
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/develop",
+        ]
+    );
+}
+
+#[test]
+fn branch_exists_returns_false_for_missing_branch() {
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout(""));
+    let git = GitOps::new(&runner);
+
+    assert!(!git
+        .branch_exists("/home/user/projects/frontend", "missing")
+        .unwrap());
+}
+
+#[test]
+fn branch_exists_propagates_git_command_failure() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(128, "fatal: not a git repository"));
+    let git = GitOps::new(&runner);
+
+    let err = git
+        .branch_exists("/home/user/projects/frontend", "develop")
+        .unwrap_err();
+    let msg = format!("{:#}", err);
+
+    assert!(
+        msg.contains("git command failed") && msg.contains("not a git repository"),
+        "unexpected error: {msg}"
     );
 }
 

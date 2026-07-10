@@ -133,6 +133,16 @@ impl<'a, R: CommandRunner> ZellijMultiplexer<'a, R> {
 
     fn session_exists(&self, session_name: &str) -> Result<bool> {
         let output = self.zellij(vec!["list-sessions".into()])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let err_output = if stderr.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                stderr.trim().to_string()
+            };
+            bail!("zellij list-sessions failed: {}", err_output);
+        }
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout
             .lines()
