@@ -47,6 +47,13 @@ src/
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template)
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
+│   ├── create_wizard/
+│   │   ├── mod.rs        # 稳定门面、公共 re-export 与 wizard 运行入口
+│   │   ├── state.rs      # wizard 状态、页面模型与步骤导航数据
+│   │   ├── navigation.rs # 键盘事件、校验、提交与取消状态转换
+│   │   ├── render.rs     # wizard 页面与 review/draft 面板渲染
+│   │   ├── repo_page.rs  # 仓库列表交互与显示标签
+│   │   └── text_field.rs # 基于 tui-textarea 的文本字段状态
 │   └── info.rs      # InfoApp + 格式化辅助函数
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
