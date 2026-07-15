@@ -1,0 +1,6 @@
+interface:
+  display_name: "Launch zootree Workspace"
+  short_description: "Launch one zootree workspace from this conversation"
+  default_prompt: "Use $launching-zootree-workspace to turn this conversation into one launched zootree workspace."
+policy:
+  allow_implicit_invocation: true
