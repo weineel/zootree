@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use zootree"
+  short_description: "Manage zootree workspaces and configuration"
+  default_prompt: "Use $zootree-usage to manage this zootree workspace without interactive prompts."
