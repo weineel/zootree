@@ -107,11 +107,12 @@ request needs them.
 ### Frontmatter portability
 
 Do not add `disable-model-invocation`. It is not part of the currently validated
-portable frontmatter used by this repository. Set
-`policy.allow_implicit_invocation: false` in the new skill's
-`agents/openai.yaml` so Codex exposes it only through explicit `$skill`
-invocation. Keep the narrow description and body execution gate as the portable
-fallback for runtimes that do not consume the OpenAI-specific policy file.
+portable frontmatter used by this repository. Keep
+`policy.allow_implicit_invocation: true` in the new skill's
+`agents/openai.yaml` so Codex can discover it from an explicit natural-language
+request as well as `$skill` invocation. Use the narrow description and body
+execution gate to prevent an ordinary zootree discussion from authorizing a
+workspace mutation.
 
 Generate `agents/openai.yaml` for the new skill and the refactored usage skill so
 their UI metadata stays aligned with `SKILL.md`. Leave implicit invocation
@@ -337,7 +338,8 @@ runtime mismatch.
 ## Acceptance criteria
 
 - The new skill triggers only on explicit user intent.
-- The new skill's OpenAI metadata sets `policy.allow_implicit_invocation: false`.
+- The new skill's OpenAI metadata sets `policy.allow_implicit_invocation: true`
+  so explicit natural-language requests remain discoverable.
 - One explicit invocation can safely create and launch one workspace without a
   second confirmation when the task is unambiguous.
 - The launched agent receives the confirmed task decisions, scope, constraints,
