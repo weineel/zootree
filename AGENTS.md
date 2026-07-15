@@ -28,4 +28,4 @@ zootree 是 Rust 2021 CLI 工具。`src/main.rs` 负责 CLI 解析、tracing 初
 
 ## Agent-Specific Instructions
 
-总是使用中文回复。创建 zootree workspace/task 时，任务标题使用 `cz-conventional-changelog`：`<type>(<scope>): <subject>`。`scope` 使用源码模块、命令或行为边界，如 `config`、`layout`、`tui`、`workspace`、`repo`；不要使用内部项目编号、客户编号或 `other`，不明确时省略 scope。拆分任务时，无依赖关系拆成独立 workspace；有共享调用链或强依赖关系放入同一 workspace。需要启动 agent 时使用完整非交互 `zootree create ... --run-agent codexd`，并提供 `--title`、`--description`、`--name`、`--branch` 以及 `--repos` 或 `--template`。
+总是使用中文回复。创建 zootree workspace/task 时，任务标题使用 `cz-conventional-changelog`：`<type>(<scope>): <subject>`。`scope` 使用源码模块、命令或行为边界，如 `config`、`layout`、`tui`、`workspace`、`repo`；不要使用内部项目编号、客户编号或 `other`，不明确时省略 scope。拆分任务时，无依赖关系拆成独立 workspace；有共享调用链或强依赖关系放入同一 workspace。需要启动 agent 时使用完整非交互 `zootree create ... --run-agent`，并提供 `--title`、`--description`、`--name`、`--branch` 以及 `--repos` 或 `--template`；裸 `--run-agent` 使用 `~/.config/zootree/config.toml` 配置的默认 `agent_cli`，只有用户明确指定时才传 `--run-agent <alias-or-command>`。

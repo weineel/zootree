@@ -63,7 +63,7 @@ git rev-parse --show-toplevel
 git branch --show-current
 git status --short
 zootree repo list
-zootree list --status pending --status in_progress
+zootree list --status pending --status in-progress
 ```
 
 Read `~/.config/zootree/config.toml` when present to resolve `branch_prefix` and
