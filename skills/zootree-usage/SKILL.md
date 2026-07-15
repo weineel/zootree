@@ -23,6 +23,8 @@ zootree 用 Git Worktree 和 cmux/Zellij 管理一个或多个仓库组成的隔
 - 标题使用 `<type>(<scope>): <subject>`；scope 使用源码模块、命令或行为边界，不明确时省略，不使用 `other`。
 - title 只放一行摘要；给 agent 的完整任务简报放进 description。zootree 会把二者组合为 agent prompt。
 - 执行前把示例变量替换为真实且 shell-safe 的值。
+- 用户未指定 repo 或 branch 时，默认使用当前 Git repo 和当前分支。
+- 绝不自动把未提交改动搬进新 worktree；存在与任务相关的未提交改动时，停下并确认是否从 committed `HEAD` 开始。
 - 当前 Git repo 未注册时，先用 repo root、repo name 和当前分支执行非交互 `zootree repo add`。
 - `start` 的正确顺序是 `zootree start <workspace> --run-agent [alias]`，workspace name 必须在 flag 前。
 

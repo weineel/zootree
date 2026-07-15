@@ -33,11 +33,13 @@ pre_cancel = "echo canceled"
 pre_remove = "echo removing"
 
 [log]
+dir = "~/.config/zootree/logs"
 max_files = 5
-max_size = "10MB"
 ```
 
 运行时默认值是 `workspace_root = "~/zootree-workspaces"`、`branch_prefix = "zootree"` 和 `multiplexer.kind = "zellij"`。新配置推荐显式设置 `kind = "cmux"`。
+
+`log.dir` 指定日志目录并支持 `~` 展开；未配置时使用 zootree 配置目录下的 `logs/`。日志按天（DAILY）轮转，`max_files` 是保留的日志日文件数，默认为 5。
 
 ## agent_cli 与别名
 

@@ -107,7 +107,7 @@ zootree start my-workspace --run-agent claude-safe
 
 ```bash
 zootree list
-zootree list --status in_progress  # pending|in_progress|done|canceled
+zootree list --status in-progress  # pending|in-progress|done|canceled
 zootree info my-workspace
 zootree open my-workspace
 ```
@@ -139,11 +139,14 @@ zootree cancel my-ws --force
 ```bash
 zootree template list
 zootree template save <name> --from <workspace>
-zootree prune  # 清理孤立的 worktree
-zootree logs   # 查看日志文件
+zootree prune        # 在 TUI 中多选要清理的归档 workspace
+zootree prune --all  # 非交互清理全部归档 workspace
+zootree logs         # 查看日志文件
 ```
 
 每次创建工作空间时会自动保存为 `recently` 模板，方便下次使用。
+
+`zootree prune` 只删除 `done` / `canceled` 归档 workspace 的目录和配置记录，不清理 Git orphan metadata。裸命令会进入多选 TUI；仅当用户明确授权清理全部归档 workspace 时，agent 才能使用非交互 `zootree prune --all`。
 
 ## 完整工作流
 
@@ -175,7 +178,7 @@ zootree done user-login --push
 
 ## 故障排查
 
-- **worktree 创建失败**：检查分支名是否冲突，用 `zootree prune` 清理孤立 worktree。
+- **worktree 创建失败**：检查分支名是否冲突，用 `git worktree list` 查明已登记的 worktree 后再处理；`zootree prune` 不修复 Git worktree metadata。
 - **终端复用器未启动**：确认已配置的 cmux（推荐）或 Zellij 在 `PATH` 中，或使用 `--no-multiplexer` 跳过。
 - **Hook 执行失败**：检查脚本语法，设置详细日志 `--verbose` 查看错误。
-- **日志位置**：`~/.config/zootree/logs/zootree.log`。
+- **日志位置**：`[log].dir/zootree.log`；未配置 `log.dir` 时默认为 `~/.config/zootree/logs/zootree.log`。
