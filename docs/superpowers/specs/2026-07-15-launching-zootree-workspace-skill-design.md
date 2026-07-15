@@ -107,11 +107,15 @@ request needs them.
 ### Frontmatter portability
 
 Do not add `disable-model-invocation`. It is not part of the currently validated
-portable frontmatter used by this repository. Explicit-only behavior is encoded
-in the narrow description and the body execution gate.
+portable frontmatter used by this repository. Set
+`policy.allow_implicit_invocation: false` in the new skill's
+`agents/openai.yaml` so Codex exposes it only through explicit `$skill`
+invocation. Keep the narrow description and body execution gate as the portable
+fallback for runtimes that do not consume the OpenAI-specific policy file.
 
 Generate `agents/openai.yaml` for the new skill and the refactored usage skill so
-their UI metadata stays aligned with `SKILL.md`.
+their UI metadata stays aligned with `SKILL.md`. Leave implicit invocation
+enabled for the general `zootree-usage` skill.
 
 ## Invocation and authorization
 
@@ -333,6 +337,7 @@ runtime mismatch.
 ## Acceptance criteria
 
 - The new skill triggers only on explicit user intent.
+- The new skill's OpenAI metadata sets `policy.allow_implicit_invocation: false`.
 - One explicit invocation can safely create and launch one workspace without a
   second confirmation when the task is unambiguous.
 - The launched agent receives the confirmed task decisions, scope, constraints,
