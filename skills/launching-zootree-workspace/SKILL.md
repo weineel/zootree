@@ -63,6 +63,7 @@ git rev-parse --show-toplevel
 git branch --show-current
 git status --short
 zootree repo list
+zootree list --status pending --status in-progress --status done --status canceled --oneline
 zootree list --status pending --status in-progress
 ```
 
@@ -71,8 +72,10 @@ confirm that the default `agent_cli` exists. Use zootree's runtime default
 `branch_prefix` when the field is absent.
 
 Inspect relevant diffs when working-tree changes may overlap the requested task.
-Inspect `zootree info <name>` for an active workspace that appears to represent
-the same task.
+Use the all-status `--oneline` list for mechanical name collision handling, and
+the active-only list for same-task `pending`/`in_progress` detection. Inspect
+`zootree info <name>` only for a suspected active duplicate, not an archived
+name collision.
 
 Apply these branches:
 
