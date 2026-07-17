@@ -309,8 +309,8 @@ layout {
 - group anchor 左侧运行 `zootree info <workspace> --watch`。
 - group anchor 右侧只有一个 terminal：多 repo 且使用 `--run-agent` 时运行 agent；不加 `--run-agent` 时是普通 shell。
 - group 内每个 repo 一个 workspace。
-- 每个 repo workspace 左侧运行 `lazygit -p <worktree_path>`，右侧是 shell。
-- 单 repo 且使用 `--run-agent` 时，agent 运行在该 repo workspace 的右下 terminal。
+- 每个 repo workspace 使用 50/50 分栏：使用 `--run-agent` 时 agent 在左侧运行，右侧上下各是一个普通 shell。
+- 不加 `--run-agent` 时，左侧也回退为普通 shell。cmux 默认 repo 布局不再启动 lazygit。
 
 Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 会返回明确错误，直到后续支持 group-aware 多模板配置。
 
@@ -325,7 +325,7 @@ Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 
 
 对于 cmux，渲染后的命令在以下位置执行：
 
-- **1 个 repo** -> repo workspace 右下 terminal
+- **1 个 repo** -> repo workspace 左侧 terminal
 - **>=2 个 repo** -> group anchor 右侧 terminal
 
 不加 `--run-agent` 时，这些占位 pane 会回退为普通 shell。

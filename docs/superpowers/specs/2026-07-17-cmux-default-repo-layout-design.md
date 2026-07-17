@@ -28,4 +28,4 @@
 
 更新 `tests/cmux_layout_test.rs` 的结构断言，验证根分割比例、三个 terminal surface 的位置、名称、工作目录、命令、焦点，以及没有 agent 时的 fallback。现有 lazygit 路径和配置转义测试改用显式自定义模板，以继续保护 renderer 能力。
 
-同步更新 `README.md` 和 `README.zh-CN.md` 中对 cmux 默认 repo workspace 布局的说明。此次变更不新增模块、命令、依赖或编码约定，因此无需修改 `skills/zootree-dev/SKILL.md`。
+同步更新 `README.md`、`README.zh-CN.md` 和 `skills/zootree-usage/references/layouts.md` 中对 cmux 默认 repo workspace 布局的说明。此次变更不新增模块、命令、依赖或编码约定，因此无需修改 `skills/zootree-dev/SKILL.md`。

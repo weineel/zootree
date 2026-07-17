@@ -227,7 +227,7 @@ fn anchor_layout_without_multi_repo_agent_uses_shell_on_right() {
 }
 
 #[test]
-fn repo_layout_runs_lazygit_and_single_repo_agent() {
+fn default_repo_layout_places_agent_left_and_two_shells_right() {
     let repo = vars().remove(0);
     let rendered = render_cmux_repo_layout(
         default_cmux_repo_layout(),
@@ -237,35 +237,58 @@ fn repo_layout_runs_lazygit_and_single_repo_agent() {
     .unwrap();
     let value: Value = serde_json::from_str(&rendered).unwrap();
     let commands = collect_string_field(&value, "command");
-    let cwds = collect_string_field(&value, "cwd");
 
-    assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api".to_string()));
-    assert!(commands.contains(&"codex --prompt 'Fix login'".to_string()));
-    assert!(cwds.iter().any(|cwd| cwd == "/tmp/fair-fox/api"));
-    let bottom_surfaces = repo_right_bottom_surfaces(&value);
-    assert_eq!(bottom_surfaces.len(), 1);
-    assert_eq!(bottom_surfaces[0]["name"], "agent");
-    assert_eq!(bottom_surfaces[0]["command"], "codex --prompt 'Fix login'");
-    assert_eq!(bottom_surfaces[0]["cwd"], "/tmp/fair-fox/api");
+    assert_eq!(value["direction"], "horizontal");
+    assert_eq!(value["split"], 0.5);
+    assert!(!commands.iter().any(|command| command.contains("lazygit")));
+
+    let left_surfaces = repo_left_surfaces(&value);
+    assert_eq!(left_surfaces.len(), 1);
+    assert_eq!(left_surfaces[0]["name"], "agent");
+    assert_eq!(left_surfaces[0]["command"], "codex --prompt 'Fix login'");
+    assert_eq!(left_surfaces[0]["cwd"], "/tmp/fair-fox/api");
+    assert_eq!(left_surfaces[0]["focus"], true);
+
+    for surfaces in [
+        repo_right_top_surfaces(&value),
+        repo_right_bottom_surfaces(&value),
+    ] {
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0]["name"], "shell");
+        assert_eq!(surfaces[0]["cwd"], "/tmp/fair-fox/api");
+        assert!(surfaces[0].get("command").is_none());
+    }
+
     assert_no_empty_command(&value);
     assert_no_unresolved_vars(&value);
     assert_valid_cmux_split_tree(&value);
 }
 
 #[test]
-fn repo_layout_without_agent_keeps_shell_bottom() {
+fn default_repo_layout_without_agent_uses_three_shells() {
     let repo = vars().remove(0);
     let rendered = render_cmux_repo_layout(default_cmux_repo_layout(), &repo, None).unwrap();
     let value: Value = serde_json::from_str(&rendered).unwrap();
     let commands = collect_string_field(&value, "command");
 
-    assert!(commands.contains(&"lazygit -p /tmp/fair-fox/api".to_string()));
-    assert!(!commands.iter().any(|command| command.contains("codex")));
-    let bottom_surfaces = repo_right_bottom_surfaces(&value);
-    assert_eq!(bottom_surfaces.len(), 1);
-    assert_eq!(bottom_surfaces[0]["name"], "shell");
-    assert!(bottom_surfaces[0].get("command").is_none());
-    assert_eq!(bottom_surfaces[0]["cwd"], "/tmp/fair-fox/api");
+    assert!(commands.is_empty());
+    let left_surfaces = repo_left_surfaces(&value);
+    assert_eq!(left_surfaces.len(), 1);
+    assert_eq!(left_surfaces[0]["name"], "shell");
+    assert_eq!(left_surfaces[0]["cwd"], "/tmp/fair-fox/api");
+    assert_eq!(left_surfaces[0]["focus"], true);
+    assert!(left_surfaces[0].get("command").is_none());
+
+    for surfaces in [
+        repo_right_top_surfaces(&value),
+        repo_right_bottom_surfaces(&value),
+    ] {
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0]["name"], "shell");
+        assert_eq!(surfaces[0]["cwd"], "/tmp/fair-fox/api");
+        assert!(surfaces[0].get("command").is_none());
+    }
+
     assert_no_empty_command(&value);
 }
 
@@ -301,7 +324,7 @@ fn repo_layout_passes_lazygit_config_when_present() {
     let mut repo = vars().remove(0);
     repo.lazygit_config = "/tmp/lazygit.yml".into();
 
-    let rendered = render_cmux_repo_layout(default_cmux_repo_layout(), &repo, None).unwrap();
+    let rendered = render_cmux_repo_layout(lazygit_surface_template(), &repo, None).unwrap();
     let value: Value = serde_json::from_str(&rendered).unwrap();
     let commands = collect_string_field(&value, "command");
 
@@ -322,7 +345,7 @@ fn repo_layout_quotes_lazygit_paths_with_spaces() {
     ])
     .unwrap();
 
-    let rendered = render_cmux_repo_layout(default_cmux_repo_layout(), &repo, None).unwrap();
+    let rendered = render_cmux_repo_layout(lazygit_surface_template(), &repo, None).unwrap();
     let value: Value = serde_json::from_str(&rendered).unwrap();
     let commands = collect_string_field(&value, "command");
 
@@ -337,6 +360,21 @@ fn repo_layout_quotes_lazygit_paths_with_spaces() {
             "/tmp/cmux configs/lazygit user.yml"
         ]
     );
+}
+
+fn lazygit_surface_template() -> &'static str {
+    r#"{
+  "pane": {
+    "surfaces": [
+      {
+        "type": "terminal",
+        "name": "lazygit",
+        "command": "$lazygit_command",
+        "cwd": "$worktree_path"
+      }
+    ]
+  }
+}"#
 }
 
 fn collect_string_field(value: &Value, field: &str) -> Vec<String> {
@@ -362,6 +400,18 @@ fn collect_string_field_into(value: &Value, field: &str, values: &mut Vec<String
         }
         _ => {}
     }
+}
+
+fn repo_left_surfaces(value: &Value) -> &Vec<Value> {
+    value["children"][0]["pane"]["surfaces"]
+        .as_array()
+        .expect("left surfaces")
+}
+
+fn repo_right_top_surfaces(value: &Value) -> &Vec<Value> {
+    value["children"][1]["children"][0]["pane"]["surfaces"]
+        .as_array()
+        .expect("right top surfaces")
 }
 
 fn repo_right_bottom_surfaces(value: &Value) -> &Vec<Value> {

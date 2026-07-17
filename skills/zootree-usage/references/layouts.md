@@ -17,8 +17,8 @@ cmux 模式会为一个 zootree workspace 创建一个 cmux workspace group，gr
 
 - group anchor 左侧运行 `zootree info`。
 - group anchor 右侧只有一个 terminal：仅多 repo 且使用 `--run-agent` 时运行 agent，其余情况回退为普通 shell。
-- group 内每个 repo 有一个 workspace，repo workspace 左侧运行 lazygit、右侧运行 shell。
-- 单 repo 时，`--run-agent` 在 repo workspace 右下 terminal 运行 agent。
+- group 内每个 repo 有一个 workspace，使用 50/50 分栏：agent 在左侧，右侧上下各是一个普通 shell。
+- 单 repo 时，`--run-agent` 在 repo workspace 左侧 terminal 运行 agent；不加时左侧回退为普通 shell。cmux 默认 repo 布局不启动 lazygit。
 
 ## Zellij KDL 布局
 

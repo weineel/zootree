@@ -1797,9 +1797,7 @@ mod tests {
         assert!(!launch.anchor_layout.contains("codex"));
         assert_eq!(launch.repo_workspaces.len(), 1);
         assert!(launch.repo_workspaces[0].layout.contains("codex"));
-        assert!(launch.repo_workspaces[0]
-            .layout
-            .contains("lazygit -p /tmp/fair-fox/api"));
+        assert!(!launch.repo_workspaces[0].layout.contains("lazygit"));
     }
 
     #[test]

@@ -99,15 +99,15 @@ pub fn default_cmux_anchor_layout() -> &'static str {
 pub fn default_cmux_repo_layout() -> &'static str {
     r#"{
   "direction": "horizontal",
-  "split": 0.38,
+  "split": 0.5,
   "children": [
     {
       "pane": {
         "surfaces": [
           {
             "type": "terminal",
-            "name": "lazygit",
-            "command": "$lazygit_command",
+            "name": "agent",
+            "command": "$agent_command",
             "cwd": "$worktree_path",
             "focus": true
           }
@@ -134,8 +134,7 @@ pub fn default_cmux_repo_layout() -> &'static str {
             "surfaces": [
               {
                 "type": "terminal",
-                "name": "agent",
-                "command": "$agent_command",
+                "name": "shell",
                 "cwd": "$worktree_path"
               }
             ]
