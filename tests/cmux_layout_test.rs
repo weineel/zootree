@@ -240,6 +240,8 @@ fn default_repo_layout_places_agent_left_and_two_shells_right() {
 
     assert_eq!(value["direction"], "horizontal");
     assert_eq!(value["split"], 0.5);
+    assert_eq!(value["children"][1]["direction"], "vertical");
+    assert_eq!(value["children"][1]["split"], 0.5);
     assert!(!commands.iter().any(|command| command.contains("lazygit")));
 
     let left_surfaces = repo_left_surfaces(&value);

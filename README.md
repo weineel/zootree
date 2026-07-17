@@ -317,8 +317,8 @@ When `[multiplexer] kind = "cmux"`, zootree creates one cmux workspace group per
 - The group anchor runs `zootree info <workspace> --watch` on the left.
 - The group anchor's right side is a single terminal: with multiple repos, `--run-agent` runs the agent there; without `--run-agent`, it is a regular shell.
 - The group contains one workspace per repo.
-- Each repo workspace uses a 50/50 split: `--run-agent` runs on the left, and two regular shells are stacked on the right.
-- Without `--run-agent`, the left terminal also falls back to a regular shell. The default cmux repo layout does not launch lazygit.
+- Each repo workspace uses a 50/50 split: one agent-or-shell terminal on the left, and two regular shells stacked on the right.
+- With one repo, `--run-agent` runs on the left. With multiple repos, the agent runs in the group anchor and each repo's left terminal is a regular shell. Without `--run-agent`, the left terminal is also a regular shell. The default cmux repo layout does not launch lazygit.
 
 Group-aware cmux currently supports only `layout = "default"`. Non-default cmux layouts return a clear error until a group-aware multi-template layout configuration exists.
 

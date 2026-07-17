@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Change the default cmux repo workspace to a 50/50 layout with the agent on the left and two regular shells on the right, without launching lazygit.
+**Goal:** Change the default cmux repo workspace to a 50/50 layout with an agent-or-shell terminal on the left and two regular shells on the right, without launching lazygit.
 
 **Architecture:** Change only the default JSON returned by `default_cmux_repo_layout()`. Keep the renderer's `$lazygit_command` support intact for explicit custom templates, and keep the existing empty-agent-to-shell fallback.
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The root horizontal split is exactly `0.5`.
-- The left terminal is the focused agent surface; without `--run-agent`, it becomes a focused regular shell.
+- The left terminal is the focused agent surface; when that repo receives no agent command, it becomes a focused regular shell.
 - The right half contains two vertically split regular shells.
 - The default cmux repo layout does not launch lazygit.
 - Anchor workspace behavior, zellij behavior, cmux lifecycle, and custom lazygit template rendering remain unchanged.
@@ -60,6 +60,8 @@ fn default_repo_layout_places_agent_left_and_two_shells_right() {
 
     assert_eq!(value["direction"], "horizontal");
     assert_eq!(value["split"], 0.5);
+    assert_eq!(value["children"][1]["direction"], "vertical");
+    assert_eq!(value["children"][1]["split"], 0.5);
     assert!(!commands.iter().any(|command| command.contains("lazygit")));
 
     let left_surfaces = repo_left_surfaces(&value);
@@ -241,8 +243,8 @@ If the full suite exposes the existing single-repo launch assertion that require
 In `README.md`, change the repo workspace bullets to:
 
 ```markdown
-- Each repo workspace uses a 50/50 split: `--run-agent` runs on the left, and two regular shells are stacked on the right.
-- Without `--run-agent`, the left terminal also falls back to a regular shell. The default cmux repo layout does not launch lazygit.
+- Each repo workspace uses a 50/50 split: one agent-or-shell terminal on the left, and two regular shells stacked on the right.
+- With one repo, `--run-agent` runs on the left. With multiple repos, the agent runs in the group anchor and each repo's left terminal is a regular shell. Without `--run-agent`, the left terminal is also a regular shell. The default cmux repo layout does not launch lazygit.
 ```
 
 Change the cmux single-repo Agent CLI location to:
@@ -254,8 +256,8 @@ Change the cmux single-repo Agent CLI location to:
 In `README.zh-CN.md`, use the matching text:
 
 ```markdown
-- 每个 repo workspace 使用 50/50 分栏：使用 `--run-agent` 时 agent 在左侧运行，右侧上下各是一个普通 shell。
-- 不加 `--run-agent` 时，左侧也回退为普通 shell。cmux 默认 repo 布局不再启动 lazygit。
+- 每个 repo workspace 使用 50/50 分栏：左侧是 agent-or-shell terminal，右侧上下各是一个普通 shell。
+- 单 repo 时，`--run-agent` 在左侧运行 agent；多 repo 时 agent 在 group anchor 运行，每个 repo 左侧都是普通 shell。不加 `--run-agent` 时，左侧也是普通 shell。cmux 默认 repo 布局不再启动 lazygit。
 ```
 
 Change the cmux single-repo Agent CLI location to:
@@ -267,8 +269,8 @@ Change the cmux single-repo Agent CLI location to:
 In `skills/zootree-usage/references/layouts.md`, replace the two repo layout bullets with:
 
 ```markdown
-- group 内每个 repo 有一个 workspace，使用 50/50 分栏：agent 在左侧，右侧上下各是一个普通 shell。
-- 单 repo 时，`--run-agent` 在 repo workspace 左侧 terminal 运行 agent；不加时左侧回退为普通 shell。cmux 默认 repo 布局不启动 lazygit。
+- group 内每个 repo 有一个 workspace，使用 50/50 分栏：左侧是 agent-or-shell terminal，右侧上下各是一个普通 shell。
+- 单 repo 时，`--run-agent` 在 repo workspace 左侧运行 agent；多 repo 时 agent 在 group anchor 运行，各 repo 左侧都是普通 shell。不加 `--run-agent` 时左侧也是普通 shell。cmux 默认 repo 布局不启动 lazygit。
 ```
 
 - [x] **Step 7: Run complete verification**
