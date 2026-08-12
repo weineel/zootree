@@ -1,2 +1,9 @@
 [tools]
 rust = "1.95"
+
+[tasks."zootree:install-dev"]
+description = "Build and register the current checkout as cargo:zootree@dev"
+run = """
+cargo install --path . --root "{{config_root}}/target/mise-dev" --debug
+mise link --force 'cargo:zootree@dev' "{{config_root}}/target/mise-dev"
+"""

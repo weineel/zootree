@@ -42,6 +42,34 @@ cargo install zootree --locked
 cargo install --path .
 ```
 
+### 使用 mise 切换到本地开发版本
+
+如果正式版本由 mise 管理，可以保留正式版本，同时把当前 checkout 注册为独立的
+`cargo:zootree@dev` 版本：
+
+```bash
+mise run zootree:install-dev
+```
+
+该任务会把 debug 二进制构建到 `target/mise-dev`，并链接到 mise，不会覆盖正式版本。
+在当前 shell 中切换到开发版本：
+
+```bash
+mise shell 'cargo:zootree@dev'
+```
+
+也可以只让单条命令使用开发版本，不改变当前 shell：
+
+```bash
+mise x 'cargo:zootree@dev' -- zootree list
+```
+
+恢复使用 mise 配置所选择的版本：
+
+```bash
+mise shell --unset cargo:zootree
+```
+
 ### 安装 skill
 
 ```bash

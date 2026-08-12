@@ -43,6 +43,34 @@ cargo install zootree --locked
 cargo install --path .
 ```
 
+### Switch to a local development build with mise
+
+If the release version is managed by mise, keep it installed and register the
+current checkout as a separate `cargo:zootree@dev` version:
+
+```bash
+mise run zootree:install-dev
+```
+
+This builds the debug binary under `target/mise-dev` and links it into mise
+without overwriting the release version. Use it for the current shell:
+
+```bash
+mise shell 'cargo:zootree@dev'
+```
+
+Or use it for a single command without changing the current shell:
+
+```bash
+mise x 'cargo:zootree@dev' -- zootree list
+```
+
+Restore the version selected by the mise configuration:
+
+```bash
+mise shell --unset cargo:zootree
+```
+
 ### Install the skills
 
 ```bash
