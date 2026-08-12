@@ -1,6 +1,6 @@
 # zootree
 
-多仓库协作开发工作空间管理工具。基于 Git Worktree + 终端复用器（推荐 cmux，Zellij 作为兼容默认值）+ LazyGit 实现。
+多仓库协作开发工作空间管理工具。基于 Git Worktree，为每个 workspace 管理一个终端环境；底层可使用 cmux（推荐）或 Zellij（兼容默认值），并可选集成 LazyGit。
 
 [English](README.md)
 
@@ -8,7 +8,7 @@
 
 - **多仓库管理** - 同时在多个仓库的同一分支上工作
 - **工作空间** - 创建、管理和清理工作空间
-- **终端复用器集成** - 自动启动布局好的 cmux 或 Zellij 终端环境
+- **终端环境** - 幂等激活并安全关闭布局好的 cmux 或 Zellij 环境
 - **Hook 机制** - 自定义钩子支持 (simple/file/inline)
 - **文件复制** - 自动复制配置文件到 worktree
 - **模板系统** - 保存和复用工作空间配置
@@ -248,6 +248,10 @@ max_files = 5
 
 cmux 是新配置推荐的终端复用器；如果省略 `[multiplexer].kind`，zootree 保持兼容默认值 `zellij`。
 
+为保持配置兼容，`[multiplexer]` 配置键和持久化的 `[multiplexer_state]` 字段名保持不变。zootree 将持久化状态视为不透明的运行时定位与恢复提示，而不是终端环境的唯一身份；用户不应修改其内部字段。
+
+`start` 与 `open` 都会幂等激活已配置的终端环境。如果 `start` 已创建 worktree 后激活失败，workspace 会保持 `in_progress`；修复终端问题后可运行 `zootree open <name>` 重试。`--no-multiplexer` 只跳过当次 `start`。`done` 与 `cancel` 会先归档 workspace，再 best-effort 清理终端环境，因此清理 warning 不会回滚最终状态。
+
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 
 ```toml
@@ -316,7 +320,7 @@ Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 
 
 ### Agent CLI
 
-`agent_cli` 是在终端复用器 pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
+`agent_cli` 是在终端环境 pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
 
 对于 zellij，渲染后的命令在以下位置执行：
 

@@ -1,6 +1,6 @@
 # zootree
 
-A multi-repo workspace management tool. Built on Git Worktree + a terminal multiplexer (cmux recommended, Zellij supported as the compatibility default) + LazyGit.
+A multi-repo workspace management tool. Built on Git Worktree and one managed terminal environment per workspace, using cmux (recommended) or Zellij (the compatibility default), with optional LazyGit integration.
 
 [中文文档](README.zh-CN.md)
 
@@ -8,7 +8,7 @@ A multi-repo workspace management tool. Built on Git Worktree + a terminal multi
 
 - **Multi-repo management** - Work on the same branch across multiple repositories simultaneously
 - **Workspaces** - Create, manage, and clean up workspaces
-- **Terminal multiplexer integration** - Automatically launch a well-organized cmux or Zellij terminal environment
+- **Terminal environments** - Idempotently activate and safely close a well-organized cmux or Zellij environment
 - **Hook system** - Custom hooks support (simple/file/inline)
 - **File copying** - Automatically copy config files to worktrees
 - **Template system** - Save and reuse workspace configurations
@@ -254,6 +254,10 @@ max_files = 5
 
 cmux is the recommended multiplexer for new setups. If `[multiplexer].kind` is omitted, zootree keeps the compatibility default `zellij`.
 
+The `[multiplexer]` configuration key and saved `[multiplexer_state]` field remain stable for configuration compatibility. zootree treats the saved state as opaque runtime locating and recovery hints, not as the terminal environment's identity; users should not edit its internal fields.
+
+`start` and `open` both idempotently activate the configured terminal environment. If activation fails after `start` has created the worktrees, the workspace remains `in_progress`; fix the terminal issue and retry with `zootree open <name>`. `--no-multiplexer` skips only that `start` invocation. `done` and `cancel` archive the workspace before attempting best-effort terminal cleanup, so cleanup warnings never undo the final workspace status.
+
 Logs rotate daily. `log.dir` changes the directory used by both the logger and `zootree logs`, and `log.max_files` limits how many daily log files are retained. Size-based rotation such as `max_size` is not supported by the current tracing appender.
 
 ### Repo config (~/.config/zootree/repos/<name>.toml)
@@ -324,7 +328,7 @@ Group-aware cmux currently supports only `layout = "default"`. Non-default cmux 
 
 ### Agent CLI
 
-`agent_cli` is a command template for launching a coding agent in a terminal multiplexer pane. The template is parsed with shell-style word splitting, and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`.
+`agent_cli` is a command template for launching a coding agent in a terminal environment pane. The template is parsed with shell-style word splitting, and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`.
 
 For zellij, the rendered command runs in:
 

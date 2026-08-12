@@ -7,7 +7,7 @@ use zootree::config::global::HookValue;
 use zootree::config::global::{LogConfig, MultiplexerConfig, MultiplexerKind};
 use zootree::config::repo::RepoConfig;
 use zootree::config::workspace::{
-    CmuxRepoWorkspaceState, MultiplexerState, WorkspaceConfig, WorkspaceStatus,
+    StoredTerminalEnvironmentState, WorkspaceConfig, WorkspaceStatus,
 };
 use zootree::config::ConfigManager;
 use zootree::core::logging::{resolve_log_dir, resolve_log_file_path};
@@ -33,10 +33,22 @@ fn test_workspace_config(name: &str) -> WorkspaceConfig {
         created_at: "2026-07-10T10:00:00+08:00".into(),
         agent_cli: None,
         multiplexer: MultiplexerConfig::default(),
-        multiplexer_state: MultiplexerState::default(),
+        multiplexer_state: StoredTerminalEnvironmentState::default(),
         repos: Vec::new(),
         events: Vec::new(),
     }
+}
+
+fn stored_state(source: &str) -> StoredTerminalEnvironmentState {
+    toml::from_str(source).unwrap()
+}
+
+fn stored_state_table(state: &StoredTerminalEnvironmentState) -> toml::Table {
+    toml::Value::try_from(state)
+        .unwrap()
+        .as_table()
+        .unwrap()
+        .clone()
 }
 
 fn test_template_config() -> zootree::config::template::TemplateConfig {
@@ -291,9 +303,13 @@ cmux_workspace = "workspace:3"
 
     assert_eq!(config.multiplexer.kind, MultiplexerKind::Cmux);
     assert_eq!(config.multiplexer.cmux.layout.as_deref(), Some("wide"));
-    assert_eq!(config.multiplexer_state.kind, Some(MultiplexerKind::Cmux));
+    let state = stored_state_table(&config.multiplexer_state);
     assert_eq!(
-        config.multiplexer_state.cmux_workspace.as_deref(),
+        state.get("kind").and_then(toml::Value::as_str),
+        Some("cmux")
+    );
+    assert_eq!(
+        state.get("cmux_workspace").and_then(toml::Value::as_str),
         Some("workspace:3")
     );
 }
@@ -327,31 +343,41 @@ workspace = "workspace:6"
 
     let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
 
-    assert_eq!(config.multiplexer_state.kind, Some(MultiplexerKind::Cmux));
+    let state = stored_state_table(&config.multiplexer_state);
     assert_eq!(
-        config.multiplexer_state.cmux_group.as_deref(),
+        state.get("kind").and_then(toml::Value::as_str),
+        Some("cmux")
+    );
+    assert_eq!(
+        state.get("cmux_group").and_then(toml::Value::as_str),
         Some("workspace_group:2")
     );
     assert_eq!(
-        config.multiplexer_state.cmux_anchor_workspace.as_deref(),
+        state
+            .get("cmux_anchor_workspace")
+            .and_then(toml::Value::as_str),
         Some("workspace:4")
     );
-    assert_eq!(config.multiplexer_state.cmux_repo_workspaces.len(), 2);
+    let repos = state
+        .get("cmux_repo_workspaces")
+        .and_then(toml::Value::as_array)
+        .unwrap();
+    assert_eq!(repos.len(), 2);
     assert_eq!(
-        config.multiplexer_state.cmux_repo_workspaces[0].repo,
-        "frontend"
+        repos[0].get("repo").and_then(toml::Value::as_str),
+        Some("frontend")
     );
     assert_eq!(
-        config.multiplexer_state.cmux_repo_workspaces[0].workspace,
-        "workspace:5"
+        repos[0].get("workspace").and_then(toml::Value::as_str),
+        Some("workspace:5")
     );
     assert_eq!(
-        config.multiplexer_state.cmux_repo_workspaces[1].repo,
-        "backend"
+        repos[1].get("repo").and_then(toml::Value::as_str),
+        Some("backend")
     );
     assert_eq!(
-        config.multiplexer_state.cmux_repo_workspaces[1].workspace,
-        "workspace:6"
+        repos[1].get("workspace").and_then(toml::Value::as_str),
+        Some("workspace:6")
     );
 }
 
@@ -428,7 +454,7 @@ fn workspace_config(name: &str, title: &str) -> WorkspaceConfig {
         created_at: "2026-04-28T10:30:00+08:00".into(),
         agent_cli: None,
         multiplexer: MultiplexerConfig::default(),
-        multiplexer_state: MultiplexerState::default(),
+        multiplexer_state: StoredTerminalEnvironmentState::default(),
         repos: Vec::new(),
         events: Vec::new(),
     }
@@ -713,7 +739,7 @@ workspace = "workspace:3"
 }
 
 #[test]
-fn multiplexer_state_unknown_field_is_rejected() {
+fn multiplexer_state_unknown_field_is_preserved_by_opaque_carrier() {
     let toml_str = r#"
 title = "用户认证功能"
 name = "calm-river"
@@ -726,10 +752,10 @@ created_at = "2026-04-28T10:30:00+08:00"
 kind = "cmux"
 zellij_session = "old-session"
 "#;
-    assert_unknown_field_error(
-        toml::from_str::<WorkspaceConfig>(toml_str).unwrap_err(),
-        "zellij_session",
-    );
+    let config = toml::from_str::<WorkspaceConfig>(toml_str).unwrap();
+    let serialized = toml::to_string(&config).unwrap();
+
+    assert!(serialized.contains("zellij_session = \"old-session\""));
 }
 
 #[test]
@@ -760,7 +786,7 @@ fn empty_multiplexer_state_is_not_serialized() {
         created_at: "2026-04-28T10:30:00+08:00".into(),
         agent_cli: None,
         multiplexer: MultiplexerConfig::default(),
-        multiplexer_state: MultiplexerState::default(),
+        multiplexer_state: StoredTerminalEnvironmentState::default(),
         repos: Vec::new(),
         events: Vec::new(),
     };
@@ -774,6 +800,86 @@ fn empty_multiplexer_state_is_not_serialized() {
 }
 
 #[test]
+fn current_terminal_environment_envelope_round_trips_through_config_manager() {
+    let tmp = TempDir::new().unwrap();
+    let manager = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    manager.ensure_dirs().unwrap();
+    let mut config = test_workspace_config("calm-river");
+    config.multiplexer_state = toml::from_str(
+        r#"
+version = 1
+adapter = "cmux"
+
+[payload]
+group = "workspace_group:2"
+"#,
+    )
+    .unwrap();
+
+    manager
+        .save_workspace(&WorkspaceStatus::InProgress, &config)
+        .unwrap();
+    let (_, loaded) = manager.load_workspace("calm-river").unwrap();
+
+    assert_eq!(loaded.multiplexer_state, config.multiplexer_state);
+    let state = stored_state_table(&loaded.multiplexer_state);
+    assert_eq!(
+        state.get("version").and_then(toml::Value::as_integer),
+        Some(1)
+    );
+    assert_eq!(
+        state.get("adapter").and_then(toml::Value::as_str),
+        Some("cmux")
+    );
+    assert_eq!(
+        state
+            .get("payload")
+            .and_then(toml::Value::as_table)
+            .and_then(|payload| payload.get("group"))
+            .and_then(toml::Value::as_str),
+        Some("workspace_group:2")
+    );
+}
+
+#[test]
+fn unknown_terminal_environment_version_loads_without_rewrite_and_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let manager = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    manager.ensure_dirs().unwrap();
+    let mut config = test_workspace_config("calm-river");
+    config.multiplexer_state = toml::from_str(
+        r#"
+version = 99
+adapter = "future_mux"
+future_flag = true
+
+[payload]
+identity = "future:7"
+
+[payload.extension]
+retry = 3
+"#,
+    )
+    .unwrap();
+    manager
+        .save_workspace(&WorkspaceStatus::InProgress, &config)
+        .unwrap();
+    let path = tmp.path().join("workspaces/in_progress/calm-river.toml");
+    let before_load = std::fs::read_to_string(&path).unwrap();
+
+    let (_, loaded) = manager.load_workspace("calm-river").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before_load);
+    assert_eq!(loaded.multiplexer_state, config.multiplexer_state);
+
+    manager
+        .save_workspace(&WorkspaceStatus::InProgress, &loaded)
+        .unwrap();
+    let (_, round_tripped) = manager.load_workspace("calm-river").unwrap();
+    assert_eq!(round_tripped.multiplexer_state, config.multiplexer_state);
+}
+
+#[test]
 fn cmux_workspace_state_serializes_and_round_trips() {
     let config = WorkspaceConfig {
         title: "用户认证功能".into(),
@@ -784,13 +890,12 @@ fn cmux_workspace_state_serializes_and_round_trips() {
         created_at: "2026-04-28T10:30:00+08:00".into(),
         agent_cli: None,
         multiplexer: MultiplexerConfig::default(),
-        multiplexer_state: MultiplexerState {
-            kind: Some(MultiplexerKind::Cmux),
-            cmux_workspace: Some("workspace:3".into()),
-            cmux_group: None,
-            cmux_anchor_workspace: None,
-            cmux_repo_workspaces: Vec::new(),
-        },
+        multiplexer_state: stored_state(
+            r#"
+kind = "cmux"
+cmux_workspace = "workspace:3"
+"#,
+        ),
         repos: Vec::new(),
         events: Vec::new(),
     };
@@ -808,18 +913,19 @@ fn cmux_workspace_state_serializes_and_round_trips() {
 
     let round_tripped: WorkspaceConfig = toml::from_str(&serialized).unwrap();
 
+    let state = stored_state_table(&round_tripped.multiplexer_state);
     assert_eq!(
-        round_tripped.multiplexer_state.cmux_workspace.as_deref(),
+        state.get("cmux_workspace").and_then(toml::Value::as_str),
         Some("workspace:3")
     );
     assert_eq!(
-        round_tripped.multiplexer_state.kind,
-        Some(MultiplexerKind::Cmux)
+        state.get("kind").and_then(toml::Value::as_str),
+        Some("cmux")
     );
 }
 
 #[test]
-fn group_aware_multiplexer_state_is_serialized_without_legacy_workspace_ref() {
+fn legacy_group_aware_multiplexer_state_round_trips_without_workspace_ref() {
     let config = WorkspaceConfig {
         title: "Group cmux".into(),
         name: "calm-river".into(),
@@ -829,22 +935,20 @@ fn group_aware_multiplexer_state_is_serialized_without_legacy_workspace_ref() {
         created_at: "2026-04-28T10:30:00+08:00".into(),
         agent_cli: None,
         multiplexer: MultiplexerConfig::default(),
-        multiplexer_state: MultiplexerState {
-            kind: Some(MultiplexerKind::Cmux),
-            cmux_workspace: None,
-            cmux_group: Some("workspace_group:2".into()),
-            cmux_anchor_workspace: None,
-            cmux_repo_workspaces: vec![
-                CmuxRepoWorkspaceState {
-                    repo: "frontend".into(),
-                    workspace: "workspace:5".into(),
-                },
-                CmuxRepoWorkspaceState {
-                    repo: "backend".into(),
-                    workspace: "workspace:6".into(),
-                },
-            ],
-        },
+        multiplexer_state: stored_state(
+            r#"
+kind = "cmux"
+cmux_group = "workspace_group:2"
+
+[[cmux_repo_workspaces]]
+repo = "frontend"
+workspace = "workspace:5"
+
+[[cmux_repo_workspaces]]
+repo = "backend"
+workspace = "workspace:6"
+"#,
+        ),
         repos: Vec::new(),
         events: Vec::new(),
     };
@@ -864,33 +968,32 @@ fn group_aware_multiplexer_state_is_serialized_without_legacy_workspace_ref() {
     );
 
     let round_tripped: WorkspaceConfig = toml::from_str(&serialized).unwrap();
+    let state = stored_state_table(&round_tripped.multiplexer_state);
     assert_eq!(
-        round_tripped.multiplexer_state.cmux_group.as_deref(),
+        state.get("cmux_group").and_then(toml::Value::as_str),
         Some("workspace_group:2")
     );
-    assert!(round_tripped
-        .multiplexer_state
-        .cmux_anchor_workspace
-        .is_none());
+    assert!(!state.contains_key("cmux_anchor_workspace"));
+    let repos = state
+        .get("cmux_repo_workspaces")
+        .and_then(toml::Value::as_array)
+        .unwrap();
+    assert_eq!(repos.len(), 2);
     assert_eq!(
-        round_tripped.multiplexer_state.cmux_repo_workspaces.len(),
-        2
+        repos[0].get("repo").and_then(toml::Value::as_str),
+        Some("frontend")
     );
     assert_eq!(
-        round_tripped.multiplexer_state.cmux_repo_workspaces[0].repo,
-        "frontend"
+        repos[0].get("workspace").and_then(toml::Value::as_str),
+        Some("workspace:5")
     );
     assert_eq!(
-        round_tripped.multiplexer_state.cmux_repo_workspaces[0].workspace,
-        "workspace:5"
+        repos[1].get("repo").and_then(toml::Value::as_str),
+        Some("backend")
     );
     assert_eq!(
-        round_tripped.multiplexer_state.cmux_repo_workspaces[1].repo,
-        "backend"
-    );
-    assert_eq!(
-        round_tripped.multiplexer_state.cmux_repo_workspaces[1].workspace,
-        "workspace:6"
+        repos[1].get("workspace").and_then(toml::Value::as_str),
+        Some("workspace:6")
     );
 }
 

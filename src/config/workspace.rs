@@ -1,4 +1,4 @@
-use super::global::{MultiplexerConfig, MultiplexerKind};
+use super::global::MultiplexerConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
@@ -40,26 +40,15 @@ pub struct Event {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CmuxRepoWorkspaceState {
-    pub repo: String,
-    pub workspace: String,
-}
-
+/// Opaque persisted state for a workspace's terminal environment.
+///
+/// Workspace persistence deliberately treats the contents as an uninterpreted
+/// TOML table. Only `core::terminal_environment` may assign meaning to the
+/// stored fields.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct MultiplexerState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<MultiplexerKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cmux_workspace: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cmux_group: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cmux_anchor_workspace: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cmux_repo_workspaces: Vec<CmuxRepoWorkspaceState>,
+#[serde(transparent)]
+pub struct StoredTerminalEnvironmentState {
+    value: toml::Table,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,24 +65,27 @@ pub struct WorkspaceConfig {
     pub agent_cli: Option<String>,
     #[serde(default)]
     pub multiplexer: MultiplexerConfig,
-    #[serde(default, skip_serializing_if = "MultiplexerState::is_empty")]
-    pub multiplexer_state: MultiplexerState,
+    #[serde(
+        default,
+        skip_serializing_if = "StoredTerminalEnvironmentState::is_empty"
+    )]
+    pub multiplexer_state: StoredTerminalEnvironmentState,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
     #[serde(default)]
     pub events: Vec<Event>,
 }
 
-impl MultiplexerState {
+impl StoredTerminalEnvironmentState {
     pub fn is_empty(&self) -> bool {
-        self.kind.is_none()
-            && self.cmux_workspace.is_none()
-            && self.cmux_group.is_none()
-            && self.cmux_anchor_workspace.is_none()
-            && self.cmux_repo_workspaces.is_empty()
+        self.value.is_empty()
     }
 
-    pub fn has_cmux_group_state(&self) -> bool {
-        self.cmux_group.is_some() || self.cmux_anchor_workspace.is_some()
+    pub(crate) fn from_table(value: toml::Table) -> Self {
+        Self { value }
+    }
+
+    pub(crate) fn as_table(&self) -> &toml::Table {
+        &self.value
     }
 }
