@@ -37,11 +37,13 @@ src/
 │   ├── multiplexer/
 │   │   ├── mod.rs      # crate-private adapter command 模块
 │   │   ├── zellij.rs   # crate-private Zellij 命令翻译
-│   │   └── cmux.rs     # crate-private cmux group 命令翻译与 rollback
+│   │   ├── cmux.rs     # crate-private cmux group 命令翻译与 rollback
+│   │   └── herdr.rs    # crate-private Herdr JSON CLI 命令翻译与创建事务
 │   ├── terminal_environment/
 │   │   ├── mod.rs      # 稳定 activate/close 门面、opaque stored state 解释与 adapter 路由
 │   │   ├── cmux.rs     # cmux group reconciliation、layout/agent placement 与规范状态
-│   │   └── zellij.rs   # Zellij session reconciliation、KDL/agent placement 与规范状态
+│   │   ├── zellij.rs   # Zellij session reconciliation、KDL/agent placement 与规范状态
+│   │   └── herdr.rs    # Herdr workspace reconciliation、内置 topology、agent 与规范状态
 │   ├── cmux_layout.rs  # cmux JSON layout renderer
 │   ├── copy_files.rs # 文件复制逻辑
 │   ├── name_gen.rs  # 工作空间名称生成器
@@ -93,12 +95,16 @@ pub struct TerminalEnvironment<'a, R: CommandRunner> {
     config_manager: &'a ConfigManager,
     global_config: &'a GlobalConfig,
     runner: &'a R,
+    in_zellij: bool,
+    herdr_caller: HerdrCallerContext,
 }
 ```
 
+两个 caller-context 字段都在 facade 构造时捕获，仅影响对应 adapter 的呈现行为；它们不参与 Terminal environment 的目标选择或持久化 identity。
+
 `WorkspaceConfig.multiplexer_state` 的 TOML 字段名保持不变，但 Rust 类型是内部字段私有的 `StoredTerminalEnvironmentState`。配置层只负责 serde round-trip，只有 Terminal environment module 内部的私有类型解释 legacy state 或 `version + adapter + payload` envelope；未知版本同样必须可读并无损保存。配置层不公开 legacy state 结构。
 
-cmux 与 Zellij 均通过 `TerminalEnvironment::activate` / `close` 路由。adapter 优先使用可信 stored ref，失败后按确定性 display name 唯一恢复，无匹配时创建，歧义时拒绝猜测。成功 activate 返回 `version = 1` 的 opaque state；复用已有 terminal environment 时不会注入 agent，并通过 `Activation.warnings` 报告被忽略的请求。workspace caller 只保存返回 state 和记录 warning，不解释 adapter outcome/runtime refs。
+cmux、Zellij 与 Herdr 均通过 `TerminalEnvironment::activate` / `close` 路由。adapter 优先使用可信 stored ref，失败后按确定性 display name 唯一恢复，无匹配时创建，歧义时拒绝猜测。成功 activate 返回 `version = 1` 的 opaque state；复用已有 terminal environment 时不会注入 agent，并通过 `Activation.warnings` 报告被忽略的请求。workspace caller 只保存返回 state 和记录 warning，不解释 adapter outcome/runtime refs。
 
 `start` 与 `open` 共用同一个 activate caller seam：成功后保存 opaque state 并呈现 warning；`start` 在 worktree 与 `in_progress` 已完成后若激活失败，返回可由 `open` 重试的 partial-success 错误且不回滚。`done` / `cancel` 先完成 event 和最终状态归档，再调用 best-effort close；close warning 不改变最终 workspace 状态。`--no-multiplexer` 只跳过当次 `start` 的 activate。
 
@@ -107,6 +113,8 @@ cmux 与 Zellij 均通过 `TerminalEnvironment::activate` / `close` 路由。ada
 `terminal_environment::zellij` 负责 session 恢复、KDL layout 准备、agent placement 和规范状态；`src/core/multiplexer/zellij.rs` 只翻译 Zellij 命令。外部 Zellij 时前台创建/attach，内部 Zellij 时后台创建或提示已存在；close 先确认 session，目标不存在视为成功，list/delete 失败进入 `CloseReport.warnings`。
 
 `src/core/multiplexer/cmux.rs` 中的 cmux helper 只负责 group-aware 命令翻译和 rollback：第一个 repo workspace 先创建，再通过 `workspace-group create --from <first-repo>` 创建 group；cmux 会自动生成一个默认 header/anchor，所以 zootree 随后创建自己的 anchor workspace、`set-anchor` 到它、并关闭 cmux 自动生成的默认 anchor。后续 repo workspaces 加入同一 group。group 恢复决策、agent 终端位置和运行时引用解释集中在 `terminal_environment::cmux`。
+
+Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一个 Herdr workspace；规范 state 保存 `session`、`workspace_id` 和 `label`。`terminal_environment::herdr` 负责按 stored ID/精确 label 恢复、内置 overview/repo tab topology、单 agent placement 与 caller session 判断；`multiplexer::herdr` 只通过 `CommandRunner` 构造 `herdr --session <session> ...`、解码 JSON 并在结构创建失败时关闭整个新 workspace。zootree 不管理 Herdr server/session，也不修复已有 topology。
 
 ### ConfigManager 模式
 
@@ -171,7 +179,7 @@ Commands::Status(args) => zootree::cli::workspace::handle_status(&args)?,
 
 ### 测试模式
 
-所有涉及 git、zellij、cmux 或 shell 的操作使用 `MockRunner`：
+所有涉及 git、zellij、cmux、herdr 或 shell 的操作使用 `MockRunner`：
 
 ```rust
 use zootree::runner::MockRunner;
@@ -191,7 +199,7 @@ fn test_something() {
 }
 ```
 
-Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Zellij/cmux 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 
@@ -214,8 +222,8 @@ Terminal environment 的 activate/close contract 放在 `tests/terminal_environm
 | `chrono` (0.4, serde) | 时间戳 |
 | `shlex` (1) | 把 `agent_cli` 字符串模板拆成 argv |
 | `cargo-husky` (1, dev, `default-features = false`, `user-hooks`) | 安装 `.cargo-husky/hooks/` 下的 git hook 到 `.git/hooks/`，在 `cargo check --tests` 首次构建时生效 |
-| `ratatui` (0.29) | TUI 框架，`src/tui_app/` 的渲染内核 |
-| `crossterm` (0.28) | 终端后端：raw mode、事件读取、alternate screen |
+| `ratatui` (0.30) | TUI 框架，`src/tui_app/` 的渲染内核 |
+| `crossterm` (0.29) | 终端后端：raw mode、事件读取、alternate screen |
 
 ## 代码约定
 
@@ -226,10 +234,11 @@ Terminal environment 的 activate/close contract 放在 `tests/terminal_environm
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`
 - **workspace status 展示**: 用户可见 status 字符串统一使用 `WorkspaceStatus::as_str()`，不要从 `Debug` 派生后手动 lowercase
 - **untagged enum**: `HookValue` 使用 `#[serde(untagged)]` 支持三种格式
-- **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`；Zellij 支持 `layouts/<name>.kdl`，cmux group-aware 模式当前只支持 `layout = "default"`
+- **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`；Zellij 支持 `layouts/<name>.kdl`，cmux group-aware 模式当前只支持 `layout = "default"`，Herdr 首版仅配置显式 named `session`
 - **cmux group state**: cmux mode maps one zootree workspace to one cmux workspace group. `workspace-group create --from <first-repo>` creates a default header/anchor; zootree then creates its own anchor workspace with the `zootree info` layout, uses `workspace-group set-anchor`, and closes the generated default anchor. Legacy `cmux_group` / `cmux_repo_workspaces` / `cmux_workspace` / `cmux_anchor_workspace` remain readable；成功 activate 后统一写入 `multiplexer_state` 的 `version = 1`、`adapter = "cmux"` 和 private payload，不再写 legacy shape。
 - **terminal environment stored state**: workspace TOML 继续使用 `[multiplexer_state]`；配置层把它当作 opaque carrier。当前 envelope 使用 `version = 1`、`adapter` 与私有 `payload`，unknown version 也必须 round-trip；只有成功 `activate` 可以写出规范 envelope，不做后台批量迁移。
 - **Zellij terminal environment state**: Zellij 成功 activate 后在 private payload 中保存 session name；stored session 失效时按 `zootree-<workspace-name>` 恢复。default/custom KDL 和 agent CLI 解析都留在 Zellij adapter，且 AgentIntent 只在创建新 session 时生效。
+- **Herdr terminal environment state**: Herdr 0.8.0+ 成功 activate 后在 private payload 保存 named session、workspace ID 和当前 label；stored state session 优先于后来变更的 global/workspace config。按 ID、stored label、当前派生 label 精确唯一恢复；仅关闭 owned workspace，不管理共享 server/session。
 - **shellexpand**: 所有用户输入的路径在使用前都要 `shellexpand::tilde()` 展开 `~`
 - **config-backed names**: 用来派生配置文件路径的 repo/workspace/template 名称必须通过 `config::name::validate_config_name` 校验；只允许非空 ASCII 字母、数字、`-` 和 `_`
 

@@ -1,4 +1,5 @@
 mod cmux;
+mod herdr;
 mod zellij;
 
 use crate::config::global::{GlobalConfig, MultiplexerKind};
@@ -43,6 +44,7 @@ pub struct TerminalEnvironment<'a, R: CommandRunner> {
     global_config: &'a GlobalConfig,
     runner: &'a R,
     in_zellij: bool,
+    herdr_caller: herdr::HerdrCallerContext,
 }
 
 impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
@@ -56,6 +58,7 @@ impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
             global_config,
             runner,
             in_zellij: crate::core::multiplexer::zellij::is_inside_zellij(),
+            herdr_caller: herdr::HerdrCallerContext::from_env(),
         }
     }
 
@@ -71,6 +74,23 @@ impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
             global_config,
             runner,
             in_zellij,
+            herdr_caller: herdr::HerdrCallerContext::from_env(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_herdr_context(
+        config_manager: &'a ConfigManager,
+        global_config: &'a GlobalConfig,
+        runner: &'a R,
+        herdr_caller: herdr::HerdrCallerContext,
+    ) -> Self {
+        Self {
+            config_manager,
+            global_config,
+            runner,
+            in_zellij: false,
+            herdr_caller,
         }
     }
 
@@ -81,6 +101,18 @@ impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
     ) -> Result<Activation> {
         let decoded = decode_stored_state(&workspace.multiplexer_state);
         match selected_adapter(workspace, &decoded) {
+            MultiplexerKind::Herdr => {
+                let (stored_payload, warnings) = herdr_state(decoded);
+                herdr::activate(
+                    self.global_config,
+                    self.runner,
+                    workspace,
+                    stored_payload,
+                    agent_intent,
+                    warnings,
+                    &self.herdr_caller,
+                )
+            }
             MultiplexerKind::Cmux => {
                 let (stored_payload, warnings) = cmux_state(decoded);
                 cmux::activate(
@@ -109,6 +141,10 @@ impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
     pub fn close(&self, workspace: &WorkspaceConfig) -> CloseReport {
         let decoded = decode_stored_state(&workspace.multiplexer_state);
         match selected_adapter(workspace, &decoded) {
+            MultiplexerKind::Herdr => {
+                let (stored_payload, warnings) = herdr_state(decoded);
+                herdr::close(self.runner, workspace, stored_payload, warnings)
+            }
             MultiplexerKind::Cmux => {
                 let (stored_payload, warnings) = cmux_state(decoded);
                 cmux::close(self.runner, workspace, stored_payload, warnings)
@@ -268,6 +304,49 @@ fn zellij_state(decoded: DecodedStoredState) -> (Option<zellij::ZellijStatePaylo
     }
 }
 
+fn herdr_state(decoded: DecodedStoredState) -> (Option<herdr::HerdrStatePayload>, Vec<String>) {
+    match decoded {
+        DecodedStoredState::Empty | DecodedStoredState::Legacy(_) => (None, Vec::new()),
+        DecodedStoredState::Current { adapter, payload } => {
+            debug_assert_eq!(adapter, MultiplexerKind::Herdr);
+            match toml::Value::Table(payload).try_into::<herdr::HerdrStatePayload>() {
+                Ok(payload)
+                    if !payload.session.is_empty()
+                        && !payload.workspace_id.is_empty()
+                        && !payload.label.is_empty() =>
+                {
+                    (Some(payload), Vec::new())
+                }
+                Ok(_) => (
+                    None,
+                    vec![
+                        "stored Herdr state had an empty field; reconciling by derived label"
+                            .into(),
+                    ],
+                ),
+                Err(error) => (
+                    None,
+                    vec![format!(
+                        "stored Herdr state was corrupt ({error}); reconciling by derived label"
+                    )],
+                ),
+            }
+        }
+        DecodedStoredState::UnknownVersion(version) => (
+            None,
+            vec![format!(
+                "terminal environment state version {version} is unknown; reconciling Herdr by derived label"
+            )],
+        ),
+        DecodedStoredState::Corrupt(reason) => (
+            None,
+            vec![format!(
+                "terminal environment state was corrupt ({reason}); reconciling Herdr by derived label"
+            )],
+        ),
+    }
+}
+
 fn encode_current_state<T: Serialize>(
     adapter: MultiplexerKind,
     payload: &T,
@@ -404,6 +483,25 @@ mod tests {
             .and_then(toml::Value::as_str)
     }
 
+    fn stored_herdr_workspace() -> WorkspaceConfig {
+        let mut workspace = zellij_workspace(&["api"]);
+        workspace.title = "Support Herdr".into();
+        workspace.multiplexer.kind = MultiplexerKind::Herdr;
+        workspace.multiplexer.herdr.session = "agents".into();
+        workspace.multiplexer_state = stored_state(
+            r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "agents"
+workspace_id = "w7"
+label = "Support Herdr · zootree:calm-river"
+"#,
+        );
+        workspace
+    }
+
     #[test]
     fn current_envelope_is_private_but_recognized() {
         let state = stored_state(
@@ -444,6 +542,73 @@ cmux_anchor_workspace = "workspace:4"
             }
             _ => panic!("expected private legacy state"),
         }
+    }
+
+    #[test]
+    fn herdr_facade_inside_target_session_returns_state_without_attaching() {
+        let (_temp, config_manager) = setup_zellij_config(&["api"]);
+        let global_config = GlobalConfig::default();
+        let runner = MockRunner::new();
+        runner.push_response(success_output(b"herdr 0.8.0\n"));
+        runner.push_response(success_output(
+            br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr"}}}"#,
+        ));
+        runner.push_response(success_output(
+            br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr"}}}"#,
+        ));
+        runner.push_response(success_output(
+            br#"{"sessions":[{"name":"agents","running":true,"socket_path":"/tmp/agents.sock"}]}"#,
+        ));
+
+        let activation = TerminalEnvironment::with_herdr_context(
+            &config_manager,
+            &global_config,
+            &runner,
+            herdr::HerdrCallerContext::Inside {
+                socket_path: Some("/tmp/agents.sock".into()),
+            },
+        )
+        .activate(&stored_herdr_workspace(), AgentIntent::None)
+        .unwrap();
+
+        assert!(activation.warnings.is_empty());
+        assert_eq!(state_session(&activation.stored_state), Some("agents"));
+        let calls = runner.take_calls();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[3].args, vec!["session", "list", "--json"]);
+    }
+
+    #[test]
+    fn herdr_facade_inside_other_session_returns_state_and_attach_warning() {
+        let (_temp, config_manager) = setup_zellij_config(&["api"]);
+        let global_config = GlobalConfig::default();
+        let runner = MockRunner::new();
+        runner.push_response(success_output(b"herdr 0.8.0\n"));
+        runner.push_response(success_output(
+            br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr"}}}"#,
+        ));
+        runner.push_response(success_output(
+            br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr"}}}"#,
+        ));
+        runner.push_response(success_output(
+            br#"{"sessions":[{"name":"agents","running":true,"socket_path":"/tmp/agents.sock"}]}"#,
+        ));
+
+        let activation = TerminalEnvironment::with_herdr_context(
+            &config_manager,
+            &global_config,
+            &runner,
+            herdr::HerdrCallerContext::Inside {
+                socket_path: Some("/tmp/other.sock".into()),
+            },
+        )
+        .activate(&stored_herdr_workspace(), AgentIntent::None)
+        .unwrap();
+
+        assert_eq!(state_session(&activation.stored_state), Some("agents"));
+        assert_eq!(activation.warnings.len(), 1);
+        assert!(activation.warnings[0].contains("herdr session attach agents"));
+        assert_eq!(runner.take_calls().len(), 4);
     }
 
     #[test]

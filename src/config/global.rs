@@ -39,6 +39,7 @@ pub enum MultiplexerKind {
     #[default]
     Zellij,
     Cmux,
+    Herdr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +74,25 @@ impl Default for CmuxMultiplexerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct HerdrMultiplexerConfig {
+    #[serde(default = "default_herdr_session")]
+    pub session: String,
+}
+
+fn default_herdr_session() -> String {
+    "default".into()
+}
+
+impl Default for HerdrMultiplexerConfig {
+    fn default() -> Self {
+        Self {
+            session: default_herdr_session(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MultiplexerConfig {
     #[serde(default)]
     pub kind: MultiplexerKind,
@@ -80,6 +100,8 @@ pub struct MultiplexerConfig {
     pub zellij: ZellijMultiplexerConfig,
     #[serde(default)]
     pub cmux: CmuxMultiplexerConfig,
+    #[serde(default)]
+    pub herdr: HerdrMultiplexerConfig,
 }
 
 impl Default for MultiplexerConfig {
@@ -88,6 +110,7 @@ impl Default for MultiplexerConfig {
             kind: MultiplexerKind::Zellij,
             zellij: ZellijMultiplexerConfig::default(),
             cmux: CmuxMultiplexerConfig::default(),
+            herdr: HerdrMultiplexerConfig::default(),
         }
     }
 }

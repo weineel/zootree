@@ -4,7 +4,9 @@ use tempfile::TempDir;
 use zootree::cli::workspace::{build_repo_entries, parse_repos_arg};
 use zootree::config::global::GlobalConfig;
 use zootree::config::global::HookValue;
-use zootree::config::global::{LogConfig, MultiplexerConfig, MultiplexerKind};
+use zootree::config::global::{
+    HerdrMultiplexerConfig, LogConfig, MultiplexerConfig, MultiplexerKind,
+};
 use zootree::config::repo::RepoConfig;
 use zootree::config::workspace::{
     StoredTerminalEnvironmentState, WorkspaceConfig, WorkspaceStatus,
@@ -179,6 +181,63 @@ layout = "daily"
     assert_eq!(config.multiplexer.kind, MultiplexerKind::Cmux);
     assert_eq!(config.multiplexer.cmux.layout.as_deref(), Some("daily"));
     assert_eq!(config.multiplexer.zellij.layout.as_deref(), Some("default"));
+}
+
+#[test]
+fn parse_global_config_with_herdr_multiplexer() {
+    let toml_str = r#"
+[multiplexer]
+kind = "herdr"
+
+[multiplexer.herdr]
+session = "agents"
+"#;
+
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+
+    assert_eq!(config.multiplexer.kind, MultiplexerKind::Herdr);
+    assert_eq!(config.multiplexer.herdr.session, "agents");
+    assert_eq!(
+        HerdrMultiplexerConfig::default().session,
+        "default",
+        "Herdr should target the default named session when omitted"
+    );
+}
+
+#[test]
+fn herdr_unknown_field_is_rejected() {
+    let error = toml::from_str::<GlobalConfig>(
+        r#"
+[multiplexer]
+kind = "herdr"
+
+[multiplexer.herdr]
+session = "agents"
+layout = "unsupported"
+"#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `layout`"));
+}
+
+#[test]
+fn herdr_terminal_environment_state_round_trips_as_opaque_v1_envelope() {
+    let source = r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "agents"
+workspace_id = "w7"
+label = "Support Herdr · zootree:rare-moon"
+"#;
+
+    let state = stored_state(source);
+    let encoded = toml::to_string(&state).unwrap();
+    let decoded: StoredTerminalEnvironmentState = toml::from_str(&encoded).unwrap();
+
+    assert_eq!(stored_state_table(&decoded), stored_state_table(&state));
 }
 
 #[test]

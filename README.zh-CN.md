@@ -1,6 +1,6 @@
 # zootree
 
-多仓库协作开发工作空间管理工具。基于 Git Worktree，为每个 workspace 管理一个终端环境；底层可使用 cmux（推荐）或 Zellij（兼容默认值），并可选集成 LazyGit。
+多仓库协作开发工作空间管理工具。基于 Git Worktree，为每个 workspace 管理一个终端环境；底层可使用 cmux（推荐）、Zellij（兼容默认值）或 Herdr，并可选集成 LazyGit。
 
 [English](README.md)
 
@@ -8,7 +8,7 @@
 
 - **多仓库管理** - 同时在多个仓库的同一分支上工作
 - **工作空间** - 创建、管理和清理工作空间
-- **终端环境** - 幂等激活并安全关闭布局好的 cmux 或 Zellij 环境
+- **终端环境** - 幂等激活并安全关闭布局好的 cmux、Zellij 或 Herdr 环境
 - **Hook 机制** - 自定义钩子支持 (simple/file/inline)
 - **文件复制** - 自动复制配置文件到 worktree
 - **模板系统** - 保存和复用工作空间配置
@@ -243,6 +243,7 @@ zootree 从 `~/.config/zootree/` 读取配置。速查表：
 | `repos/<name>.toml` | 单仓库覆盖：path、目标分支、复制文件、hooks、lazygit 配置 |
 | `layouts/<name>.kdl` | 自定义 Zellij KDL 布局，供 `[multiplexer.zellij].layout` 引用 |
 | `[multiplexer.cmux].layout` | cmux layout 选择器；group-aware cmux 当前只支持 `default` |
+| `[multiplexer.herdr].session` | 显式指定 Herdr named session；默认值为 `default` |
 | `[hooks]` 小节 | workspace/repo 生命周期事件触发的 shell 命令 |
 | `agent_cli` / `agent_cli_alias` | `zootree start --run-agent` 启动的 coding agent 命令模板 |
 
@@ -262,6 +263,9 @@ layout = "default"
 
 [multiplexer.cmux]
 layout = "default"
+
+[multiplexer.herdr]
+session = "default"
 
 [hooks]
 post_create = "echo created"
@@ -346,6 +350,16 @@ layout {
 
 Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 会返回明确错误，直到后续支持 group-aware 多模板配置。
 
+### Herdr workspace 布局
+
+当 `[multiplexer] kind = "herdr"` 时，zootree 要求 Herdr 0.8.0+，并在显式配置的 named session 中把一个 zootree workspace 映射为一个 Herdr workspace。
+
+- zootree 创建一个 `overview` tab 和每个 repo 对应的 tab。overview 使用 50/50 分栏，左侧运行 `zootree info <workspace> --watch`；每个 repo tab 左侧是 primary shell，右侧上下各一个 shell。
+- zootree 只拥有并关闭该 Herdr workspace；不会启动或停止 Herdr server/named session，也不会让 Herdr 管理 Git worktree。
+- `start` 与 `open` 通过持久化 workspace ID 和精确 label 恢复。已有环境中用户调整过的 tab/pane 只会被聚焦，不会被修复或重建。
+- 从 Herdr 外部激活时会 attach 到配置的 named session；从 Herdr 内部调用时绝不嵌套 client，若调用者位于其他 session，则返回明确的 `herdr session attach <session>` 指引。
+- 首个版本只提供内置 topology，不提供 Herdr layout 配置。
+
 ### Agent CLI
 
 `agent_cli` 是在终端环境 pane 中启动 coding agent 的命令模板。模板会用 shell 风格拆分 token，并把 `$prompt` 替换为 workspace 的 `title`（若 `description` 非空则用换行连接）。`$prompt` 也可以嵌在 token 内部，例如 `--prompt=$prompt`。
@@ -359,6 +373,13 @@ Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 
 
 - **1 个 repo** -> repo workspace 左侧 terminal
 - **>=2 个 repo** -> group anchor 右侧 terminal
+
+对于 Herdr，渲染后的命令在以下位置执行：
+
+- **1 个 repo** -> repo tab 的 primary（左侧）pane
+- **>=2 个 repo** -> overview tab 的 primary（右侧）pane
+
+Herdr 识别出 agent 进程后，zootree 会设置长度受限的 live name `zt-<workspace-name>`。识别或重命名失败只产生 warning，不会丢弃已创建的环境。
 
 不加 `--run-agent` 时，这些占位 pane 会回退为普通 shell。
 
@@ -402,7 +423,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 ## 依赖
 
 - Git
-- cmux（推荐）或 Zellij
+- cmux（推荐）、Zellij 或 Herdr 0.8.0+
 - LazyGit (可选)
 
 ## 发布

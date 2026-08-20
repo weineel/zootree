@@ -73,6 +73,24 @@ fn state_group(state: &StoredTerminalEnvironmentState) -> Option<String> {
         .map(str::to_string)
 }
 
+fn state_payload_string(state: &StoredTerminalEnvironmentState, key: &str) -> Option<String> {
+    state_table(state)
+        .get("payload")
+        .and_then(toml::Value::as_table)
+        .and_then(|payload| payload.get(key))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+}
+
+fn herdr_workspace(repo_names: &[&str]) -> WorkspaceConfig {
+    let mut workspace = workspace(repo_names);
+    workspace.title = "Support Herdr".into();
+    workspace.description = "Exercise Herdr reconciliation".into();
+    workspace.multiplexer.kind = MultiplexerKind::Herdr;
+    workspace.multiplexer.herdr.session = "agents".into();
+    workspace
+}
+
 fn setup_config(repo_names: &[&str]) -> (TempDir, ConfigManager) {
     let temp = TempDir::new().unwrap();
     let config_manager = ConfigManager::with_base_dir(temp.path().to_path_buf());
@@ -109,6 +127,483 @@ fn push_single_repo_create_responses(runner: &MockRunner) {
 fn command_arg<'a>(args: &'a [String], name: &str) -> &'a str {
     let index = args.iter().position(|arg| arg == name).unwrap();
     &args[index + 1]
+}
+
+#[test]
+fn herdr_activate_reuses_stored_workspace_without_rebuilding_topology() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.8.0\n"));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Renamed in Herdr"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Renamed in Herdr"}}}"#,
+    ));
+    runner.push_response(success_output(b""));
+    let mut workspace = herdr_workspace(&["api"]);
+    workspace.multiplexer_state = stored_state(
+        r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "agents"
+workspace_id = "w7"
+label = "Support Herdr · zootree:calm-river"
+"#,
+    );
+
+    let activation = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&workspace, AgentIntent::Default)
+        .unwrap();
+
+    assert_eq!(
+        state_payload_string(&activation.stored_state, "workspace_id").as_deref(),
+        Some("w7")
+    );
+    assert_eq!(
+        state_payload_string(&activation.stored_state, "label").as_deref(),
+        Some("Renamed in Herdr")
+    );
+    assert!(activation.warnings[0].contains("agent request was ignored"));
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0].args, vec!["--version"]);
+    assert_eq!(
+        calls[1].args,
+        vec!["--session", "agents", "workspace", "get", "w7"]
+    );
+    assert_eq!(
+        calls[2].args,
+        vec!["--session", "agents", "workspace", "focus", "w7"]
+    );
+    assert_eq!(calls[3].args, vec!["session", "attach", "agents"]);
+}
+
+#[test]
+fn herdr_activate_recovers_a_stale_id_by_unique_stored_label() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.8.0\n"));
+    runner.push_response(failure_output(
+        br#"{"error":{"code":"workspace_not_found","message":"workspace missing"}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w9","label":"Original label"}]}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w9","label":"Original label"}}}"#,
+    ));
+    runner.push_response(success_output(b""));
+    let mut workspace = herdr_workspace(&["api"]);
+    workspace.multiplexer.herdr.session = "new-default".into();
+    workspace.multiplexer_state = stored_state(
+        r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "stored-session"
+workspace_id = "w7"
+label = "Original label"
+"#,
+    );
+
+    let activation = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&workspace, AgentIntent::None)
+        .unwrap();
+
+    assert_eq!(
+        state_payload_string(&activation.stored_state, "session").as_deref(),
+        Some("stored-session")
+    );
+    assert_eq!(
+        state_payload_string(&activation.stored_state, "workspace_id").as_deref(),
+        Some("w9")
+    );
+    assert!(activation.warnings[0].contains("was stale"));
+    let calls = runner.take_calls();
+    assert!(calls[1..4]
+        .iter()
+        .all(|call| call.args.get(1).map(String::as_str) == Some("stored-session")));
+}
+
+#[test]
+fn herdr_stale_stored_identity_does_not_adopt_the_current_derived_label() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.8.0\n"));
+    runner.push_response(failure_output(
+        br#"{"error":{"code":"workspace_not_found","message":"workspace missing"}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_list","workspaces":[]}}"#,
+    ));
+    runner.push_response(failure_output(
+        br#"{"error":{"code":"invalid_request","message":"stop before mutation"}}"#,
+    ));
+    let mut workspace = herdr_workspace(&["api"]);
+    workspace.multiplexer_state = stored_state(
+        r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "agents"
+workspace_id = "w7"
+label = "Original label"
+"#,
+    );
+
+    let error = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&workspace, AgentIntent::None)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("stop before mutation"));
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls[2].args,
+        vec!["--session", "agents", "workspace", "list"]
+    );
+    assert_eq!(
+        calls[3].args[..4],
+        ["--session", "agents", "workspace", "create"]
+    );
+}
+
+#[test]
+fn herdr_activate_rejects_an_ambiguous_label_without_creating() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.8.0\n"));
+    runner.push_response(success_output(
+        r#"{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w7","label":"Support Herdr · zootree:calm-river"},{"workspace_id":"w8","label":"Support Herdr · zootree:calm-river"}]}}"#
+            .as_bytes(),
+    ));
+
+    let error = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&herdr_workspace(&["api"]), AgentIntent::None)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("ambiguous"));
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1].args,
+        vec!["--session", "agents", "workspace", "list"]
+    );
+}
+
+#[test]
+fn herdr_activate_rejects_an_older_version_before_session_access() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.7.9\n"));
+
+    let error = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&herdr_workspace(&["api"]), AgentIntent::None)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("requires Herdr 0.8.0+"));
+    assert_eq!(runner.take_calls().len(), 1);
+}
+
+#[test]
+fn herdr_activate_creates_single_repo_environment_and_returns_canonical_state() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.8.0\n"));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_list","workspaces":[]}}"#,
+    ));
+    runner.push_response(success_output(
+        r#"{"result":{"type":"workspace_created","workspace":{"workspace_id":"w7","label":"Support Herdr · zootree:calm-river"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p1"}}}"#
+            .as_bytes(),
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"tab_info","tab":{"tab_id":"w7:t1"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"pane_info","pane":{"pane_id":"w7:p2"}}}"#,
+    ));
+    runner.push_response(success_output(b""));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"tab_created","tab":{"tab_id":"w7:t2"},"root_pane":{"pane_id":"w7:p3"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"pane_info","pane":{"pane_id":"w7:p4"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"pane_info","pane":{"pane_id":"w7:p5"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"tab_info","tab":{"tab_id":"w7:t1"}}}"#,
+    ));
+    runner.push_response(success_output(
+        r#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr · zootree:calm-river"}}}"#
+            .as_bytes(),
+    ));
+    runner.push_response(success_output(b""));
+    let workspace = herdr_workspace(&["api"]);
+
+    let activation = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&workspace, AgentIntent::None)
+        .unwrap();
+
+    let state = state_table(&activation.stored_state);
+    assert_eq!(
+        state.get("adapter").and_then(toml::Value::as_str),
+        Some("herdr")
+    );
+    assert_eq!(
+        state_payload_string(&activation.stored_state, "session").as_deref(),
+        Some("agents")
+    );
+    assert_eq!(
+        state_payload_string(&activation.stored_state, "workspace_id").as_deref(),
+        Some("w7")
+    );
+    assert!(activation.warnings.is_empty());
+    let calls = runner.take_calls();
+    assert_eq!(calls[0].args, vec!["--version"]);
+    assert_eq!(
+        calls[1].args,
+        vec!["--session", "agents", "workspace", "list"]
+    );
+    assert_eq!(
+        calls[5].args,
+        vec![
+            "--session",
+            "agents",
+            "pane",
+            "run",
+            "w7:p1",
+            "zootree info calm-river --watch",
+        ]
+    );
+    assert_eq!(
+        calls[9].args,
+        vec!["--session", "agents", "tab", "focus", "w7:t1"]
+    );
+    assert_eq!(
+        calls[10].args,
+        vec!["--session", "agents", "workspace", "focus", "w7"]
+    );
+    assert_eq!(calls[11].args, vec!["session", "attach", "agents"]);
+}
+
+#[test]
+fn herdr_close_uses_stored_session_and_workspace_id_without_version_gate() {
+    let (_temp, config_manager) = setup_config(&[]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr"}}}"#,
+    ));
+    runner.push_response(success_output(br#"{"result":{"type":"ok"}}"#));
+    let mut workspace = herdr_workspace(&[]);
+    workspace.multiplexer_state = stored_state(
+        r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "agents"
+workspace_id = "w7"
+label = "Support Herdr · zootree:calm-river"
+"#,
+    );
+
+    let report =
+        TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
+
+    assert!(report.warnings.is_empty());
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].args,
+        vec!["--session", "agents", "workspace", "get", "w7"]
+    );
+    assert_eq!(
+        calls[1].args,
+        vec!["--session", "agents", "workspace", "close", "w7"]
+    );
+}
+
+#[test]
+fn herdr_close_recovers_a_stale_id_by_unique_stored_label() {
+    let (_temp, config_manager) = setup_config(&[]);
+    let global_config = GlobalConfig::default();
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(
+        br#"{"error":{"code":"workspace_not_found","message":"workspace missing"}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w9","label":"Original label"}]}}"#,
+    ));
+    runner.push_response(success_output(br#"{"result":{"type":"ok"}}"#));
+    let mut workspace = herdr_workspace(&[]);
+    workspace.multiplexer_state = stored_state(
+        r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "stored-session"
+workspace_id = "w7"
+label = "Original label"
+"#,
+    );
+
+    let report =
+        TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
+
+    assert!(report.warnings.is_empty());
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[2].args,
+        vec!["--session", "stored-session", "workspace", "close", "w9"]
+    );
+}
+
+#[test]
+fn herdr_close_reports_ambiguous_and_malformed_responses_as_warnings() {
+    let (_temp, config_manager) = setup_config(&[]);
+    let global_config = GlobalConfig::default();
+
+    let runner = MockRunner::new();
+    runner.push_response(success_output(
+        r#"{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w7","label":"Support Herdr · zootree:calm-river"},{"workspace_id":"w8","label":"Support Herdr · zootree:calm-river"}]}}"#
+            .as_bytes(),
+    ));
+    let report = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .close(&herdr_workspace(&[]));
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].contains("ambiguous"));
+    assert_eq!(runner.take_calls().len(), 1);
+
+    let runner = MockRunner::new();
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr"}}}"#,
+    ));
+    runner.push_response(success_output(br#"{"result":{}}"#));
+    let mut workspace = herdr_workspace(&[]);
+    workspace.multiplexer_state = stored_state(
+        r#"
+version = 1
+adapter = "herdr"
+
+[payload]
+session = "agents"
+workspace_id = "w7"
+label = "Support Herdr"
+"#,
+    );
+    let report =
+        TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].contains("malformed JSON"));
+}
+
+#[test]
+fn herdr_activate_runs_and_names_single_repo_agent_in_primary_pane() {
+    let (_temp, config_manager) = setup_config(&["api"]);
+    let global_config = GlobalConfig {
+        agent_cli_alias: BTreeMap::from([(
+            "fast".into(),
+            "codex --model gpt-5 --prompt $prompt".into(),
+        )]),
+        ..GlobalConfig::default()
+    };
+    let runner = MockRunner::new();
+    runner.push_response(success_output(b"herdr 0.8.0\n"));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"workspace_list","workspaces":[]}}"#,
+    ));
+    runner.push_response(success_output(
+        r#"{"result":{"type":"workspace_created","workspace":{"workspace_id":"w7","label":"Support Herdr · zootree:calm-river"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p1"}}}"#
+            .as_bytes(),
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"tab_info","tab":{"tab_id":"w7:t1"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"pane_info","pane":{"pane_id":"w7:p2"}}}"#,
+    ));
+    runner.push_response(success_output(b""));
+    runner.push_response(success_output(br#"{"result":{"type":"tab_created","tab":{"tab_id":"w7:t2"},"root_pane":{"pane_id":"w7:p3"}}}"#));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"pane_info","pane":{"pane_id":"w7:p4"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"pane_info","pane":{"pane_id":"w7:p5"}}}"#,
+    ));
+    runner.push_response(success_output(b""));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"agent_info","agent":{"pane_id":"w7:p3","agent":"codex"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"agent_info","agent":{"pane_id":"w7:p3","agent":"codex","name":"zt-calm-river"}}}"#,
+    ));
+    runner.push_response(success_output(
+        br#"{"result":{"type":"tab_info","tab":{"tab_id":"w7:t2"}}}"#,
+    ));
+    runner.push_response(success_output(
+        r#"{"result":{"type":"workspace_info","workspace":{"workspace_id":"w7","label":"Support Herdr · zootree:calm-river"}}}"#
+            .as_bytes(),
+    ));
+    runner.push_response(success_output(b""));
+    let workspace = herdr_workspace(&["api"]);
+
+    let activation = TerminalEnvironment::new(&config_manager, &global_config, &runner)
+        .activate(&workspace, AgentIntent::Override("fast".into()))
+        .unwrap();
+
+    assert!(activation.warnings.is_empty());
+    let calls = runner.take_calls();
+    assert_eq!(
+        calls[9].args,
+        vec![
+            "--session",
+            "agents",
+            "pane",
+            "run",
+            "w7:p3",
+            "codex --model gpt-5 --prompt 'Support Herdr\nExercise Herdr reconciliation'",
+        ]
+    );
+    assert_eq!(
+        calls[10].args,
+        vec!["--session", "agents", "agent", "get", "w7:p3"]
+    );
+    assert_eq!(
+        calls[11].args,
+        vec![
+            "--session",
+            "agents",
+            "agent",
+            "rename",
+            "w7:p3",
+            "zt-calm-river",
+        ]
+    );
+    assert_eq!(
+        calls[12].args,
+        vec!["--session", "agents", "tab", "focus", "w7:t2"]
+    );
+    assert_eq!(
+        calls[13].args,
+        vec!["--session", "agents", "workspace", "focus", "w7"]
+    );
 }
 
 #[test]

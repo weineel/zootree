@@ -1,6 +1,6 @@
 # zootree
 
-A multi-repo workspace management tool. Built on Git Worktree and one managed terminal environment per workspace, using cmux (recommended) or Zellij (the compatibility default), with optional LazyGit integration.
+A multi-repo workspace management tool. Built on Git Worktree and one managed terminal environment per workspace, using cmux (recommended), Zellij (the compatibility default), or Herdr, with optional LazyGit integration.
 
 [中文文档](README.zh-CN.md)
 
@@ -8,7 +8,7 @@ A multi-repo workspace management tool. Built on Git Worktree and one managed te
 
 - **Multi-repo management** - Work on the same branch across multiple repositories simultaneously
 - **Workspaces** - Create, manage, and clean up workspaces
-- **Terminal environments** - Idempotently activate and safely close a well-organized cmux or Zellij environment
+- **Terminal environments** - Idempotently activate and safely close a well-organized cmux, Zellij, or Herdr environment
 - **Hook system** - Custom hooks support (simple/file/inline)
 - **File copying** - Automatically copy config files to worktrees
 - **Template system** - Save and reuse workspace configurations
@@ -248,6 +248,7 @@ zootree reads configuration from `~/.config/zootree/`. Quick map:
 | `repos/<name>.toml` | Per-repo overrides: path, target branch, copy files, hooks, lazygit config |
 | `layouts/<name>.kdl` | Custom Zellij KDL layout files referenced from `[multiplexer.zellij].layout` |
 | `[multiplexer.cmux].layout` | cmux layout selector; group-aware cmux currently supports only `default` |
+| `[multiplexer.herdr].session` | Explicit Herdr named session; defaults to `default` |
 | `[hooks]` blocks | Shell commands run at workspace/repo lifecycle events |
 | `agent_cli` / `agent_cli_alias` | Coding agent template launched by `zootree start --run-agent` |
 
@@ -267,6 +268,9 @@ layout = "default"
 
 [multiplexer.cmux]
 layout = "default"
+
+[multiplexer.herdr]
+session = "default"
 
 [hooks]
 post_create = "echo created"
@@ -354,6 +358,16 @@ When `[multiplexer] kind = "cmux"`, zootree creates one cmux workspace group per
 
 Group-aware cmux currently supports only `layout = "default"`. Non-default cmux layouts return a clear error until a group-aware multi-template layout configuration exists.
 
+### Herdr workspace layout
+
+When `[multiplexer] kind = "herdr"`, zootree requires Herdr 0.8.0+ and maps one zootree workspace to one Herdr workspace in the explicitly configured named session.
+
+- zootree creates an `overview` tab plus one tab per repository. The overview uses a 50/50 split with `zootree info <workspace> --watch` on the left; each repository tab has a primary shell on the left and two shells stacked on the right.
+- zootree owns and closes only that Herdr workspace. It does not start or stop the Herdr server or named session, and it does not use Herdr to manage Git worktrees.
+- `start` and `open` recover by stored workspace ID and exact label. Existing user-modified tabs and panes are focused without being repaired or recreated.
+- Outside Herdr, activation attaches to the configured named session. Inside Herdr, it never nests another client; a caller in another session receives an explicit `herdr session attach <session>` instruction.
+- The first release provides only the built-in topology; there is no Herdr layout setting.
+
 ### Agent CLI
 
 `agent_cli` is a command template for launching a coding agent in a terminal environment pane. The template is parsed with shell-style word splitting, and `$prompt` is substituted with the workspace's `title` (joined with `description` by a newline if present). `$prompt` may also be embedded inside a token, e.g. `--prompt=$prompt`.
@@ -367,6 +381,13 @@ For cmux, the rendered command runs in:
 
 - **1 repo** -> the repo workspace's left terminal
 - **>=2 repos** -> the group anchor's right terminal
+
+For Herdr, the rendered command runs in:
+
+- **1 repo** -> the repository tab's primary (left) pane
+- **>=2 repos** -> the overview tab's primary (right) pane
+
+After Herdr detects the process as an agent, zootree assigns the bounded live name `zt-<workspace-name>`. Detection or rename failures are warnings and do not discard the created environment.
 
 Without `--run-agent`, those placeholder panes fall back to a regular shell.
 
@@ -410,7 +431,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # literal command
 ## Dependencies
 
 - Git
-- cmux (recommended) or Zellij
+- cmux (recommended), Zellij, or Herdr 0.8.0+
 - LazyGit (optional)
 
 ## Release
