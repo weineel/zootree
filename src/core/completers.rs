@@ -1,5 +1,6 @@
 use crate::config::workspace::WorkspaceStatus;
 use crate::config::ConfigManager;
+use crate::core::agent_cli::AgentCatalog;
 use clap_complete::CompletionCandidate;
 use std::ffi::OsStr;
 
@@ -160,20 +161,17 @@ pub fn complete_agent_cli_alias_with(
     let Ok(global) = mgr.load_global_config() else {
         return vec![];
     };
-    let default_tpl = global.agent_cli.as_deref();
-
-    global
-        .agent_cli_alias
-        .iter()
-        .filter(|(name, _)| name.starts_with(prefix.as_ref()))
-        .map(|(name, tpl)| {
-            let is_default = default_tpl == Some(name.as_str());
-            let help = if is_default {
-                format!("(default) {}", tpl)
+    AgentCatalog::from_global(&global)
+        .aliases
+        .into_iter()
+        .filter(|alias| alias.name.starts_with(prefix.as_ref()))
+        .map(|alias| {
+            let help = if alias.is_default {
+                format!("(default) {}", alias.command)
             } else {
-                tpl.clone()
+                alias.command
             };
-            CompletionCandidate::new(name).help(Some(help.into()))
+            CompletionCandidate::new(alias.name).help(Some(help.into()))
         })
         .collect()
 }

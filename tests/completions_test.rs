@@ -467,6 +467,26 @@ fn agent_cli_alias_completer_marks_default_when_agent_cli_matches_alias_key() {
 }
 
 #[test]
+fn agent_cli_alias_completer_lists_the_default_first() {
+    let (_tmp, mgr) = make_mgr();
+    let mut cfg = GlobalConfig {
+        agent_cli: Some("gemini".into()),
+        ..Default::default()
+    };
+    cfg.agent_cli_alias
+        .insert("claude".into(), "claude -- $prompt".into());
+    cfg.agent_cli_alias
+        .insert("codex".into(), "codex -- $prompt".into());
+    cfg.agent_cli_alias
+        .insert("gemini".into(), "gemini -- $prompt".into());
+    save_global(&mgr, &cfg);
+
+    let cands = complete_agent_cli_alias_with(&mgr, OsStr::new(""));
+
+    assert_eq!(names(&cands), vec!["gemini", "claude", "codex"]);
+}
+
+#[test]
 fn agent_cli_alias_completer_no_default_marker_when_agent_cli_is_literal() {
     let (_tmp, mgr) = make_mgr();
     let mut cfg = GlobalConfig {

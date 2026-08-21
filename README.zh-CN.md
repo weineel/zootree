@@ -187,6 +187,13 @@ zootree repo list                    # 列出仓库
 zootree repo remove|delete <name>    # 移除仓库
 ```
 
+### 配置
+
+```bash
+zootree config agents                # 列出已配置的 agent 候选和默认值
+zootree config agents --json         # 以 JSON 输出同一份 catalog
+```
+
 ### 工作空间
 
 ```bash
@@ -399,6 +406,10 @@ codex = "codex --skip-confirm -- $prompt"
 
 别名解析为一层：`agent_cli_alias` 中找不到 key 时，原字符串作字面量命令使用，**不会**报错或警告。
 
+使用 `zootree config agents` 查看已配置的默认值和全部 alias。`--json`
+以结构化形式输出同一份 catalog，供脚本和 agent 工具消费；默认值命中 alias
+时，该 alias 排在首位并包含解析后的命令模板。
+
 #### 使用 `--run-agent`
 
 ```bash
@@ -409,7 +420,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 ```
 
 - `--run-agent` 建议放在 workspace 名之后。`zootree start --run-agent ws` 会把 `ws` 当作 alias 值吃掉，positional 名留空进入交互式选择器。
-- shell 补全（`--run-agent <TAB>`）会列出所有 alias 名，与当前 `agent_cli` 值匹配的那条在描述里以 `(default)` 标记。
+- shell 补全（`--run-agent <TAB>`）会列出所有 alias 名，与当前 `agent_cli` 值匹配的那条排在首位，并在描述里以 `(default)` 标记。
 
 ## 选项
 

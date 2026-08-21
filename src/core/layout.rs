@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::workspace::WorkspaceConfig;
+pub use crate::core::agent_cli::resolve_agent_cli;
 
 pub struct LayoutVar {
     pub repo_name: String,
@@ -201,14 +202,6 @@ pub fn build_agent_cli_command(agent_cli_tpl: &str, prompt: &str) -> anyhow::Res
 
     shlex::try_join(substituted.iter().map(String::as_str))
         .map_err(|e| anyhow::anyhow!("failed to join agent_cli: {}", e))
-}
-
-/// Resolve an agent_cli value against the alias map (single level).
-///
-/// If `value` is a key in `alias_map`, returns the alias's template; otherwise
-/// returns `value` unchanged so it can be used as a literal command string.
-pub fn resolve_agent_cli<'a>(value: &'a str, alias_map: &'a BTreeMap<String, String>) -> &'a str {
-    alias_map.get(value).map(String::as_str).unwrap_or(value)
 }
 
 /// Resolved alias info: which alias key was hit, and the alias's raw template.

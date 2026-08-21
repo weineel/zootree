@@ -192,6 +192,13 @@ zootree repo list                    # List repositories
 zootree repo remove|delete <name>    # Remove a repository
 ```
 
+### Configuration
+
+```bash
+zootree config agents                # List configured agent choices and the default
+zootree config agents --json         # Print the same catalog as JSON
+```
+
 ### Workspaces
 
 ```bash
@@ -407,6 +414,11 @@ codex = "codex --skip-confirm -- $prompt"
 
 Alias lookup is single-level: a value not present in `agent_cli_alias` is used as a literal command (no warning).
 
+Use `zootree config agents` to inspect the configured default and aliases. The
+`--json` form exposes the same catalog for scripts and agent tooling; when the
+default names an alias, that alias appears first and includes its resolved
+command template.
+
 #### Using `--run-agent`
 
 ```bash
@@ -417,7 +429,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # literal command
 ```
 
 - Place `--run-agent` after the workspace name. `zootree start --run-agent ws` would treat `ws` as the alias value and leave the positional name empty (interactive picker).
-- Shell completion (`--run-agent <TAB>`) lists all alias names; the entry matching the current `agent_cli` value is annotated `(default)`.
+- Shell completion (`--run-agent <TAB>`) lists all alias names; the entry matching the current `agent_cli` value appears first and is annotated `(default)`.
 
 ## Options
 

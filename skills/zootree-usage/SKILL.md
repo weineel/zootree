@@ -20,6 +20,7 @@ zootree 用 Git Worktree 和 cmux/Zellij 管理一个或多个仓库组成的隔
 - `create` 只有同时提供 title 和 repo 来源时才绕过 wizard；`--run-agent` 不会补齐这些参数。
 - 默认使用裸 `--run-agent`，让 zootree 读取全局 `agent_cli`。只有用户明确选择时才传 `--run-agent <alias-or-command>`。
 - `--run-agent` 会隐含 start。裸 flag 要求 `~/.config/zootree/config.toml` 已配置 `agent_cli`。
+- 用 `zootree config agents --json` 获取默认值和全部 alias；自动化流程不直接解析 `config.toml` 中的 agent 字段。
 - 标题使用 `<type>(<scope>): <subject>`；scope 使用源码模块、命令或行为边界，不明确时省略，不使用 `other`。
 - title 只放一行摘要；给 agent 的完整任务简报放进 description。zootree 会把二者组合为 agent prompt。
 - 执行前把示例变量替换为真实且 shell-safe 的值。
@@ -45,5 +46,5 @@ zootree create \
 ## 按需读取
 
 - 安装、repo/workspace/template 命令、完整工作流和故障排查：读取 `references/commands.md`。
-- `config.toml`、`agent_cli`/alias、repo 配置和 Hook：读取 `references/configuration.md`。
+- `config` 命令、`agent_cli`/alias、repo 配置和 Hook：读取 `references/configuration.md`。
 - cmux/Zellij 行为、KDL 布局和布局变量：读取 `references/layouts.md`。

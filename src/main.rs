@@ -97,6 +97,9 @@ fn main() {
 
 fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> Result<()> {
     match command {
+        Commands::Config(args) => {
+            zootree::cli::config::handle_config_command(&args.command, global)?;
+        }
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;
         }

@@ -60,9 +60,12 @@ codex = "codex --skip-confirm -- $prompt"
 - 裸 `--run-agent` 读取已配置的 `agent_cli`；如果该值匹配 alias key，再解析为 alias 命令，否则按字面量命令执行。
 - 显式 `--run-agent <value>` 使用 `<value>`；匹配 alias key 时选择该 alias，找不到时按字面量命令执行。
 - 别名只解析一层；`agent_cli_alias` 中找不到的字符串不报错。
-- `--run-agent <TAB>` 会列出所有 alias 名，与 `agent_cli` 匹配的那条标记为 `(default)`。
+- `zootree config agents` 列出默认值与全部 alias；`--json` 输出供自动化消费的同一份 catalog。
+- `--run-agent <TAB>` 会列出所有 alias 名，与 `agent_cli` 匹配的那条排在首位并标记为 `(default)`。
 
 ```bash
+zootree config agents                              # 人类可读候选
+zootree config agents --json                       # 结构化候选
 zootree start ws --run-agent                       # 解析全局 agent_cli
 zootree start ws --run-agent claude-safe           # 显式选择 alias
 zootree start ws --run-agent='codex -- $prompt'    # 显式字面量命令

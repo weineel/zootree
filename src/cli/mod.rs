@@ -1,4 +1,5 @@
 pub mod completions;
+pub mod config;
 pub mod create_flow;
 pub mod info;
 pub mod prune;
@@ -27,6 +28,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(about = "Inspect global configuration")]
+    Config(config::ConfigArgs),
     #[command(about = "Manage registered repositories")]
     Repo(repo::RepoArgs),
     #[command(about = "Create a new workspace")]

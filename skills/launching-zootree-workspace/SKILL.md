@@ -21,10 +21,10 @@ non-interactive argument rules.
 - Create exactly one workspace per invocation.
 - Allow multiple repositories only when they belong to the same task.
 - Default to the current Git repository and current branch.
-- Pass a bare `--run-agent`; use a value only when the user explicitly selected
-  an alias or command.
+- Complete **Choose the agent** before creation.
 - Never move uncommitted changes into the workspace automatically.
-- Ask one focused question only for a material ambiguity or unsafe state.
+- Ask one focused question at a time for agent selection, a material ambiguity,
+  or an unsafe state.
 
 ## Build the task brief
 
@@ -67,9 +67,9 @@ zootree list --status pending --status in-progress --status done --status cancel
 zootree list --status pending --status in-progress
 ```
 
-Read `~/.config/zootree/config.toml` when present to resolve `branch_prefix` and
-confirm that the default `agent_cli` exists. Use zootree's runtime default
-`branch_prefix` when the field is absent.
+Read `~/.config/zootree/config.toml` when present to resolve `branch_prefix`.
+Run `zootree config agents --json` to inspect the default agent and aliases. Use
+zootree's runtime default `branch_prefix` when the field is absent.
 
 Inspect relevant diffs when working-tree changes may overlap the requested task.
 Use the all-status `--oneline` list for mechanical name collision handling, and
@@ -83,7 +83,7 @@ Apply these branches:
 |---|---|
 | Related uncommitted changes | Ask whether to start from committed `HEAD`. |
 | Clearly unrelated changes | Continue without touching them. |
-| Missing default `agent_cli` and no explicit override | Stop before creation and ask for configuration or an override. |
+| Missing default `agent_cli` and no explicit override | List configured aliases and the custom-command option; require an explicit selection before creation. |
 | Same task already `pending` or `in_progress` | Ask whether to reuse it or create another. |
 | Mechanical name collision only | Append `-2`, `-3`, and so on. |
 | Several independent tasks | Ask which one task to launch first. |
@@ -91,6 +91,33 @@ Apply these branches:
 
 If the current repository is not registered, register it non-interactively with
 its repository root, derived repository name, and current branch before create.
+
+## Choose the agent
+
+Skip this question when the invocation already contains a concrete agent alias
+or literal command.
+
+Build the choices from `zootree config agents --json`:
+
+1. Put `default` first. Show its `value`, `kind`, and resolved `command`.
+2. List every remaining entry from `aliases` with its command template.
+3. Offer **Custom command**: the user describes the agent, mode, permissions,
+   and other desired behavior in natural language.
+
+Ask the user to accept the default, select an alias, or describe the custom
+command. The question is complete only when one concrete launch mode is known.
+
+For a custom description, generate a literal command template in real time.
+Check the selected executable's local help when a requested flag is uncertain,
+include `$prompt` exactly once, and make the final value shell-safe. Ask a
+focused follow-up only when the executable, permission level, or requested mode
+cannot be inferred safely.
+
+Map the result to CLI arguments as follows:
+
+- Default: pass a bare `--run-agent` so zootree resolves `agent_cli`.
+- Selected non-default alias: pass `--run-agent "$agent_alias"`.
+- Generated command: pass `--run-agent "$generated_agent_command"`.
 
 ## Derive concrete arguments
 
@@ -120,9 +147,6 @@ zootree create \
   --repos "$repo_targets" \
   --run-agent
 ```
-
-Do not append an agent value by default. When the user explicitly selected an
-override, use `--run-agent "$agent_override"` instead.
 
 ## Verify and report
 

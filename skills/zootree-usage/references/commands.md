@@ -4,6 +4,7 @@
 
 - 安装
 - 仓库管理
+- 配置查看
 - 工作空间操作
 - 模板与维护命令
 - 完整工作流
@@ -56,6 +57,16 @@ zootree repo edit myrepo
 
 # 移除仓库
 zootree repo remove myrepo
+```
+
+## 配置查看
+
+```bash
+# 列出已配置的默认 agent 和 alias
+zootree config agents
+
+# 输出供自动化消费的 agent catalog
+zootree config agents --json
 ```
 
 ## 工作空间操作

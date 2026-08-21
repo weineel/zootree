@@ -16,6 +16,7 @@ src/
 ├── lib.rs           # 模块声明
 ├── cli/             # CLI 命令定义和处理
 │   ├── mod.rs       # Cli struct + Commands enum (clap derive)
+│   ├── config.rs    # config agents 人类/JSON 输出
 │   ├── repo.rs      # repo add/list/edit/remove
 │   ├── workspace.rs # create/start/list/open/done/cancel
 │   ├── template.rs  # template list/save
@@ -31,6 +32,7 @@ src/
 │   └── template.rs  # TemplateConfig
 ├── core/            # 核心功能
 │   ├── mod.rs
+│   ├── agent_cli.rs # agent 默认值、alias 解析与共享 catalog
 │   ├── git.rs       # GitOps: worktree/merge/push 等 git 操作
 │   ├── hook.rs      # HookEngine + HookContext
 │   ├── layout.rs    # LayoutRenderer: KDL 模板变量替换
@@ -50,7 +52,7 @@ src/
 │   ├── repo_names.rs # repo 名称冲突处理
 │   ├── repo_status.rs # 注册 repo 配置路径存在性检查
 │   ├── worktree_status.rs # workspace repo worktree 路径存在性检查
-│   └── completers.rs # 动态补全候选生成器 (workspace/repo/template)
+│   └── completers.rs # 动态补全候选生成器 (workspace/repo/template/agent alias)
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
 │   ├── create_wizard/
@@ -131,6 +133,7 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 ```rust
 match cli.command {
+    Commands::Config(args) => zootree::cli::config::handle_config_command(&args.command, &global)?,
     Commands::Repo(args) => zootree::cli::repo::handle_repo_command(&args.command)?,
     Commands::Create(args) => zootree::cli::workspace::handle_create(&args)?,
     Commands::Info(args) => zootree::cli::info::handle_info(&args)?,
