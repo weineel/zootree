@@ -28,7 +28,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    #[command(about = "Inspect global configuration")]
+    #[command(about = "Manage global configuration")]
     Config(config::ConfigArgs),
     #[command(about = "Manage registered repositories")]
     Repo(repo::RepoArgs),

@@ -12,11 +12,11 @@ description: >
 
 ```
 src/
-├── main.rs          # 入口点: CLI 解析 + tracing 初始化 + 命令路由
+├── main.rs          # 入口点: CLI 解析 + config recovery 提前路由 + tracing 初始化 + 常规命令路由
 ├── lib.rs           # 模块声明
 ├── cli/             # CLI 命令定义和处理
 │   ├── mod.rs       # Cli struct + Commands enum (clap derive)
-│   ├── config.rs    # config agents 人类/JSON 输出
+│   ├── config.rs    # config path/show/edit recovery + agents 人类/JSON 输出
 │   ├── repo.rs      # repo add/list/edit/remove
 │   ├── workspace.rs # create/start/list/open/done/cancel
 │   ├── template.rs  # template list/save
@@ -48,6 +48,7 @@ src/
 │   │   └── herdr.rs    # Herdr workspace reconciliation、内置 topology、agent 与规范状态
 │   ├── cmux_layout.rs  # cmux JSON layout renderer
 │   ├── copy_files.rs # 文件复制逻辑
+│   ├── editor.rs    # $VISUAL/$EDITOR/vi 解析与 CommandRunner 交互式启动
 │   ├── name_gen.rs  # 工作空间名称生成器
 │   ├── repo_names.rs # repo 名称冲突处理
 │   ├── repo_status.rs # 注册 repo 配置路径存在性检查
@@ -121,15 +122,18 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 ### ConfigManager 模式
 
 `ConfigManager` 是配置读写的中枢，不依赖外部命令（不需要 runner）。
-- 初始化: `ConfigManager::new()` → `~/.config/zootree/`
+- 初始化: `ConfigManager::new()` → `~/.config/zootree/`；home 为相对路径时先按当前目录绝对化
 - 测试: `ConfigManager::with_base_dir(temp_path)` 指向临时目录
+- `global_config_path()` 是全局 `config.toml` 路径的唯一定位入口
+- config recovery 的原样读取、按需创建和强制解析分别使用 `read_global_config_source()`、`ensure_global_config_file()`、`parse_global_config_file()`，CLI 不直接读写配置文件
+- `load_global_config()` 仅用于常规运行时加载；文件缺失时返回 `GlobalConfig::default()`
 - 所有 save/load 使用 `toml` crate 进行序列化
 - workspace 列表读取使用稳定排序：按传入 status 顺序遍历，每个 status 内按 workspace name 排序
 - 需要同时使用 workspace status 和配置时，优先用 `list_workspaces_with_status`，避免先 `list_workspaces` 再逐个 `load_workspace`
 
 ### 命令路由
 
-`main.rs` 中匹配 `Commands` 枚举，每个变体调用对应的 `handle_*` 函数：
+`main.rs` 先识别 `config path/show/edit` 并在全局配置解析与文件日志初始化前调用 `handle_bootstrap_command`，保证配置缺失或损坏时仍可恢复。其余命令完成常规初始化后匹配 `Commands` 枚举并调用对应的 `handle_*` 函数：
 
 ```rust
 match cli.command {
@@ -232,6 +236,7 @@ Terminal environment 的 activate/close contract 放在 `tests/terminal_environm
 
 - **错误处理**: 统一使用 `anyhow::Result<T>`，用 `anyhow::bail!()` 返回错误
 - **可测试性**: 外部命令调用通过 `CommandRunner` trait，不直接调用 `std::process::Command`
+- **编辑器启动**: config/repo 编辑统一使用 `core::editor`，解析顺序为 `$VISUAL`、`$EDITOR`、`vi`；编辑器字符串用 `shlex` 拆分并通过 `run_interactive` 执行
 - **日志**: 使用 `tracing::info!()` / `tracing::debug!()` 而非 `println!`
 - **序列化**: 所有配置 struct 都 derive `Serialize + Deserialize + Debug + Clone + PartialEq`
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`

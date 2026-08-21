@@ -2,6 +2,7 @@ pub mod agent_cli;
 pub mod cmux_layout;
 pub mod completers;
 pub mod copy_files;
+pub mod editor;
 pub mod git;
 pub mod hook;
 pub mod layout;

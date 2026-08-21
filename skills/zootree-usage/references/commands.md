@@ -52,22 +52,33 @@ zootree repo add ~/projects/myrepo --name myrepo --default-target-branch develop
 # 列出所有仓库
 zootree repo list
 
-# 编辑仓库配置（会用 $EDITOR 打开）
+# 编辑仓库配置（依次使用 $VISUAL、$EDITOR、vi）
 zootree repo edit myrepo
 
 # 移除仓库
 zootree repo remove myrepo
 ```
 
-## 配置查看
+## 配置管理
 
 ```bash
+# 输出全局 config.toml 的绝对路径
+zootree config path
+
+# 原样输出全局配置；文件不存在时会提示 config edit
+zootree config show
+
+# 按需创建空配置，打开编辑器并在退出后校验 TOML
+zootree config edit
+
 # 列出已配置的默认 agent 和 alias
 zootree config agents
 
 # 输出供自动化消费的 agent catalog
 zootree config agents --json
 ```
+
+`config path/show/edit` 在全局配置损坏时仍可使用。编辑器选择顺序为 `$VISUAL`、`$EDITOR`、`vi`，支持 `code --wait` 这类带参数命令；编辑后的 TOML 无效时命令失败，但保留文件内容。
 
 ## 工作空间操作
 

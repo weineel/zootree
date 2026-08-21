@@ -2,6 +2,7 @@ use crate::config::global::HooksConfig;
 use crate::config::repo::RepoConfig;
 use crate::config::ConfigManager;
 use crate::core::completers::complete_repo;
+use crate::core::editor;
 use crate::core::repo_names::unique_repo_name;
 use crate::tui;
 use anyhow::Result;
@@ -127,8 +128,7 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
                 }
             };
             let path = config_mgr.repo_config_path(&name)?;
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-            std::process::Command::new(&editor).arg(&path).status()?;
+            editor::open_file(&path)?;
             Ok(())
         }
         RepoCommands::Remove { name } => {

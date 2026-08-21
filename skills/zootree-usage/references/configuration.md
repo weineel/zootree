@@ -39,6 +39,16 @@ max_files = 5
 
 运行时默认值是 `workspace_root = "~/zootree-workspaces"`、`branch_prefix = "zootree"` 和 `multiplexer.kind = "zellij"`。新配置推荐显式设置 `kind = "cmux"`。
 
+配置文件辅助命令：
+
+```bash
+zootree config path   # 输出 config.toml 的绝对路径，不创建文件
+zootree config show   # 原样输出文件；缺失时返回错误和 edit 指引
+zootree config edit   # 按需创建空文件，编辑后校验 TOML
+```
+
+`path/show/edit` 不依赖配置解析，因此配置损坏时仍可用于定位、查看和修复。`edit` 依次使用 `$VISUAL`、`$EDITOR`、`vi`，支持带参数的编辑器命令；校验失败时保留用户修改。
+
 `log.dir` 指定日志目录并支持 `~` 展开；未配置时使用 zootree 配置目录下的 `logs/`。日志按天（DAILY）轮转，`max_files` 是保留的日志日文件数，默认为 5。
 
 ## agent_cli 与别名

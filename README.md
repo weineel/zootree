@@ -189,12 +189,16 @@ zootree done --push
 ```bash
 zootree repo add <path>              # Add a repository
 zootree repo list                    # List repositories
+zootree repo edit <name>             # Edit a repository config with $VISUAL/$EDITOR
 zootree repo remove|delete <name>    # Remove a repository
 ```
 
 ### Configuration
 
 ```bash
+zootree config path                  # Print the global config file path
+zootree config show                  # Print the global config file verbatim
+zootree config edit                  # Create/edit, then validate the global config
 zootree config agents                # List configured agent choices and the default
 zootree config agents --json         # Print the same catalog as JSON
 ```
@@ -258,6 +262,8 @@ zootree reads configuration from `~/.config/zootree/`. Quick map:
 | `[multiplexer.herdr].session` | Explicit Herdr named session; defaults to `default` |
 | `[hooks]` blocks | Shell commands run at workspace/repo lifecycle events |
 | `agent_cli` / `agent_cli_alias` | Coding agent template launched by `zootree start --run-agent` |
+
+Use `zootree config path` to print the absolute `config.toml` path and `zootree config show` to print the file without parsing or reformatting it. `show` returns an error with `config edit` recovery guidance when the file is missing. `config edit` creates an empty file when needed, opens `$VISUAL`, then `$EDITOR`, then `vi`, and validates the saved TOML without reverting invalid edits. These three recovery commands remain available when the file is malformed; `config agents` still requires valid configuration.
 
 ### Global config (~/.config/zootree/config.toml)
 

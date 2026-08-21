@@ -67,6 +67,23 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Recovery commands must remain usable before global config parsing and
+    // file logging. See docs/adr/0002-keep-config-recovery-commands-bootstrap-safe.md.
+    if let Commands::Config(args) = &cli.command {
+        if let Some(result) =
+            zootree::cli::config::handle_bootstrap_command(&args.command, &config_mgr)
+        {
+            match result {
+                Ok(()) => return,
+                Err(e) => {
+                    eprintln!("Error: {:#}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     let global = match config_mgr.load_global_config() {
         Ok(global) => global,
         Err(e) => {

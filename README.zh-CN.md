@@ -184,12 +184,16 @@ zootree done --push
 ```bash
 zootree repo add <path>              # 添加仓库
 zootree repo list                    # 列出仓库
+zootree repo edit <name>             # 使用 $VISUAL/$EDITOR 编辑仓库配置
 zootree repo remove|delete <name>    # 移除仓库
 ```
 
 ### 配置
 
 ```bash
+zootree config path                  # 输出全局配置文件路径
+zootree config show                  # 原样输出全局配置文件
+zootree config edit                  # 创建/编辑并校验全局配置
 zootree config agents                # 列出已配置的 agent 候选和默认值
 zootree config agents --json         # 以 JSON 输出同一份 catalog
 ```
@@ -253,6 +257,8 @@ zootree 从 `~/.config/zootree/` 读取配置。速查表：
 | `[multiplexer.herdr].session` | 显式指定 Herdr named session；默认值为 `default` |
 | `[hooks]` 小节 | workspace/repo 生命周期事件触发的 shell 命令 |
 | `agent_cli` / `agent_cli_alias` | `zootree start --run-agent` 启动的 coding agent 命令模板 |
+
+使用 `zootree config path` 输出 `config.toml` 的绝对路径，使用 `zootree config show` 原样查看文件内容，不做解析或格式化。文件不存在时，`show` 会返回错误并提示使用 `config edit`；`config edit` 会按需创建空文件，依次尝试 `$VISUAL`、`$EDITOR`、`vi`，编辑结束后校验 TOML，但不会回滚无效内容。这三个恢复命令在配置损坏时仍可使用；`config agents` 仍要求配置可被正常解析。
 
 ### 全局配置 (~/.config/zootree/config.toml)
 

@@ -12,6 +12,10 @@ _Avoid_: Project, task workspace
 The complete set of terminals managed as one lifecycle object for a zootree workspace, independent of the terminal multiplexer's native object model.
 _Avoid_: Multiplexer session, terminal session
 
+**Global configuration**:
+The user-managed settings that apply across zootree workspaces and registered repositories.
+_Avoid_: Config directory, repository configuration
+
 ## Lifecycle boundary
 
 Workspace workflows activate or close a Terminal environment through the single public lifecycle facade. Zellij and cmux reconciliation, layout preparation, runtime references, and command translation remain internal implementation details.

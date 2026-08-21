@@ -13,10 +13,14 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new() -> Result<Self> {
-        let base_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?
-            .join(".config")
-            .join("zootree");
+        let home_dir =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+        let home_dir = if home_dir.is_absolute() {
+            home_dir
+        } else {
+            std::env::current_dir()?.join(home_dir)
+        };
+        let base_dir = home_dir.join(".config").join("zootree");
         Ok(Self { base_dir })
     }
 
@@ -41,18 +45,56 @@ impl ConfigManager {
         Ok(())
     }
 
+    pub fn global_config_path(&self) -> PathBuf {
+        self.base_dir.join("config.toml")
+    }
+
+    pub fn read_global_config_source(&self) -> Result<Option<Vec<u8>>> {
+        let path = self.global_config_path();
+        match std::fs::read(&path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to read global config {}", path.display())),
+        }
+    }
+
+    pub fn ensure_global_config_file(&self) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.base_dir).with_context(|| {
+            format!(
+                "failed to create config directory {}",
+                self.base_dir.display()
+            )
+        })?;
+        let path = self.global_config_path();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to create global config {}", path.display()))?;
+        Ok(path)
+    }
+
+    pub fn parse_global_config_file(&self) -> Result<global::GlobalConfig> {
+        let path = self.global_config_path();
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read global config {}", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("failed to parse global config {}", path.display()))
+    }
+
     pub fn load_global_config(&self) -> Result<global::GlobalConfig> {
-        let path = self.base_dir.join("config.toml");
+        let path = self.global_config_path();
         if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            Ok(toml::from_str(&content)?)
+            self.parse_global_config_file()
         } else {
             Ok(global::GlobalConfig::default())
         }
     }
 
     pub fn save_global_config(&self, config: &global::GlobalConfig) -> Result<()> {
-        let path = self.base_dir.join("config.toml");
+        let path = self.global_config_path();
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)?;
         Ok(())
