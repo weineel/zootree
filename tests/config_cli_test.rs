@@ -1,12 +1,28 @@
 use serde_json::{json, Value};
-use std::fs;
+use std::collections::BTreeMap;
 use std::process::{Command, Output};
 use tempfile::TempDir;
+use zootree::config::{global::GlobalConfig, ConfigManager};
 
-fn write_global_config(home: &TempDir, content: &str) {
-    let config_dir = home.path().join(".config/zootree");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(config_dir.join("config.toml"), content).unwrap();
+fn configured_agents() -> GlobalConfig {
+    GlobalConfig {
+        agent_cli: Some("codex".into()),
+        agent_cli_alias: BTreeMap::from([
+            ("claude".into(), "claude -- $prompt".into()),
+            (
+                "codex".into(),
+                "codex --ask-for-approval never -- $prompt".into(),
+            ),
+            ("gemini".into(), "gemini --prompt $prompt".into()),
+        ]),
+        ..Default::default()
+    }
+}
+
+fn write_global_config(home: &TempDir, config: &GlobalConfig) {
+    let manager = ConfigManager::with_base_dir(home.path().join(".config/zootree"));
+    manager.ensure_dirs().unwrap();
+    manager.save_global_config(config).unwrap();
 }
 
 fn run_zootree(home: &TempDir, args: &[&str]) -> Output {
@@ -20,17 +36,7 @@ fn run_zootree(home: &TempDir, args: &[&str]) -> Output {
 #[test]
 fn config_agents_json_lists_default_first_and_resolves_its_command() {
     let home = TempDir::new().unwrap();
-    write_global_config(
-        &home,
-        r#"
-agent_cli = "codex"
-
-[agent_cli_alias]
-claude = "claude -- $prompt"
-codex = "codex --ask-for-approval never -- $prompt"
-gemini = "gemini --prompt $prompt"
-"#,
-    );
+    write_global_config(&home, &configured_agents());
 
     let output = run_zootree(&home, &["config", "agents", "--json"]);
 
@@ -72,17 +78,7 @@ gemini = "gemini --prompt $prompt"
 #[test]
 fn config_agents_prints_a_human_readable_default_and_choices() {
     let home = TempDir::new().unwrap();
-    write_global_config(
-        &home,
-        r#"
-agent_cli = "codex"
-
-[agent_cli_alias]
-claude = "claude -- $prompt"
-codex = "codex --ask-for-approval never -- $prompt"
-gemini = "gemini --prompt $prompt"
-"#,
-    );
+    write_global_config(&home, &configured_agents());
 
     let output = run_zootree(&home, &["config", "agents"]);
 
