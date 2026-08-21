@@ -48,14 +48,9 @@ fn format_agent_catalog(catalog: &AgentCatalog) -> String {
         }
     }
 
-    if catalog.aliases.is_empty() {
-        let _ = writeln!(output, "Agents: none configured");
-    } else {
-        let _ = writeln!(output, "Agents:");
-        for alias in &catalog.aliases {
-            let marker = if alias.is_default { " (default)" } else { "" };
-            let _ = writeln!(output, "  {}{} -> {}", alias.name, marker, alias.command);
-        }
+    for alias in &catalog.aliases {
+        let marker = if alias.is_default { " (default)" } else { "" };
+        let _ = writeln!(output, "  {}{} -> {}", alias.name, marker, alias.command);
     }
 
     output

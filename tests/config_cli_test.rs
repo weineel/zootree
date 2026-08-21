@@ -91,7 +91,6 @@ fn config_agents_prints_a_human_readable_default_and_choices() {
         String::from_utf8(output.stdout).unwrap(),
         concat!(
             "Default: codex (alias)\n",
-            "Agents:\n",
             "  codex (default) -> codex --ask-for-approval never -- $prompt\n",
             "  claude -> claude -- $prompt\n",
             "  gemini -> gemini --prompt $prompt\n",
