@@ -18,7 +18,7 @@ src/
 │   ├── mod.rs       # Cli struct + Commands enum (clap derive)
 │   ├── config.rs    # config path/show/edit recovery + agents 人类/JSON 输出
 │   ├── repo.rs      # repo add/list/edit/remove
-│   ├── workspace.rs # create/start/list/open/done/cancel
+│   ├── workspace.rs # create/start/list/open/reopen/done/cancel
 │   ├── template.rs  # template list/save
 │   ├── prune.rs     # prune 清理
 │   ├── completions.rs # 生成 shell 补全脚本 (completions 子命令)
@@ -52,6 +52,7 @@ src/
 │   ├── name_gen.rs  # 工作空间名称生成器
 │   ├── repo_names.rs # repo 名称冲突处理
 │   ├── repo_status.rs # 注册 repo 配置路径存在性检查
+│   ├── reopen.rs   # archived workspace 的全量恢复计划、Git worktree 执行与回滚
 │   ├── worktree_status.rs # workspace repo worktree 路径存在性检查
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template/agent alias)
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
@@ -109,7 +110,9 @@ pub struct TerminalEnvironment<'a, R: CommandRunner> {
 
 cmux、Zellij 与 Herdr 均通过 `TerminalEnvironment::activate` / `close` 路由。adapter 优先使用可信 stored ref，失败后按确定性 display name 唯一恢复，无匹配时创建，歧义时拒绝猜测。成功 activate 返回 `version = 1` 的 opaque state；复用已有 terminal environment 时不会注入 agent，并通过 `Activation.warnings` 报告被忽略的请求。workspace caller 只保存返回 state 和记录 warning，不解释 adapter outcome/runtime refs。
 
-`start` 与 `open` 共用同一个 activate caller seam：成功后保存 opaque state 并呈现 warning；`start` 在 worktree 与 `in_progress` 已完成后若激活失败，返回可由 `open` 重试的 partial-success 错误且不回滚。`done` / `cancel` 先完成 event 和最终状态归档，再调用 best-effort close；close warning 不改变最终 workspace 状态。`--no-multiplexer` 只跳过当次 `start` 的 activate。
+`start` 与 `open` 共用同一个 activate caller seam：成功后保存 opaque state 并呈现 warning；`start` 在 worktree 与 `in_progress` 已完成后若激活失败，返回可由 `open` 重试的 partial-success 错误且不回滚。`done` / `cancel` 先完成 event 和最终状态归档，再调用 best-effort close；close warning 不改变最终 workspace 状态。`CloseReport.closed` 表示 adapter 是否确认目标已关闭，warning 只补充恢复过程信息；`reopen --overwrite` 必须检查 `closed`，成功 fallback 即使带 warning 也可继续。`--no-multiplexer` 只跳过当次 `start` / `reopen` 的 activate。
+
+`core::reopen` 把 archived workspace 恢复封装为两段式边界：`build_reopen_plan` 完成全部只读 Git、路径和用户决策检查，`execute_reopen_plan` 才创建或覆盖 worktree、复用 `copy_files` / `post_create`、写 `reopened` event 并迁移状态，最后复用既有 `post_start`。状态迁移前失败必须保留原 archived config 且 best-effort 回滚本次新建 worktree；迁移后的 hook/terminal 失败是可用 `open` 重试的 partial success。
 
 `core::multiplexer` 是 crate-private 命令翻译实现，不提供通用 trait，也不暴露 launch、identity 或 outcome 类型。其私有模块单元测试直接验证精确 argv、环境变量清理、输出解析和 rollback；integration tests 只通过 `TerminalEnvironment` 验证生命周期 contract。
 

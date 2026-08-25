@@ -8,6 +8,10 @@ zootree manages multi-repo development workspaces and the terminal environments 
 A named multi-repository development task managed by zootree, including its lifecycle state and one Terminal environment.
 _Avoid_: Project, task workspace
 
+**Reopen**:
+The lifecycle action that returns a done or canceled Workspace to in progress so work can continue.
+_Avoid_: Restore, resume, reactivate
+
 **Terminal environment**:
 The complete set of terminals managed as one lifecycle object for a zootree workspace, independent of the terminal multiplexer's native object model.
 _Avoid_: Multiplexer session, terminal session

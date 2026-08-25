@@ -81,6 +81,62 @@ fn test_worktree_add_command() {
 }
 
 #[test]
+fn worktree_add_existing_checks_out_the_existing_task_branch() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output());
+    let git = GitOps::new(&runner);
+
+    git.worktree_add_existing(
+        "/home/user/projects/frontend",
+        "zootree/calm-river",
+        "/home/user/zootree-workspaces/calm-river/frontend",
+    )
+    .unwrap();
+
+    assert_eq!(
+        runner.take_calls()[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "worktree",
+            "add",
+            "/home/user/zootree-workspaces/calm-river/frontend",
+            "zootree/calm-river",
+        ]
+    );
+}
+
+#[test]
+fn worktree_add_tracking_restores_local_task_branch_with_upstream() {
+    let runner = MockRunner::new();
+    runner.push_response(success_output());
+    let git = GitOps::new(&runner);
+
+    git.worktree_add_tracking(
+        "/home/user/projects/frontend",
+        "zootree/calm-river",
+        "/home/user/zootree-workspaces/calm-river/frontend",
+        "origin/zootree/calm-river",
+    )
+    .unwrap();
+
+    assert_eq!(
+        runner.take_calls()[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "worktree",
+            "add",
+            "--track",
+            "-b",
+            "zootree/calm-river",
+            "/home/user/zootree-workspaces/calm-river/frontend",
+            "origin/zootree/calm-river",
+        ]
+    );
+}
+
+#[test]
 fn test_worktree_remove_command() {
     let runner = MockRunner::new();
     runner.push_response(success_output());
@@ -136,6 +192,34 @@ fn test_worktree_remove_force() {
 }
 
 #[test]
+fn worktrees_report_paths_and_checked_out_branches() {
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout(
+        "worktree /home/user/projects/frontend\0HEAD 1111111\0branch refs/heads/main\0\0worktree /home/user/zootree-workspaces/calm-river/frontend\0HEAD 2222222\0branch refs/heads/zootree/calm-river\0\0worktree /tmp/detached\0HEAD 3333333\0detached\0",
+    ));
+    let git = GitOps::new(&runner);
+
+    let worktrees = git.worktrees("/home/user/projects/frontend").unwrap();
+
+    assert_eq!(worktrees.len(), 3);
+    assert_eq!(worktrees[0].path, "/home/user/projects/frontend");
+    assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+    assert_eq!(worktrees[1].branch.as_deref(), Some("zootree/calm-river"));
+    assert_eq!(worktrees[2].branch, None);
+    assert_eq!(
+        runner.take_calls()[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z"
+        ]
+    );
+}
+
+#[test]
 fn branch_exists_returns_true_for_exact_local_branch_ref() {
     let runner = MockRunner::new();
     runner.push_response(success_stdout("refs/heads/develop\n"));
@@ -183,6 +267,34 @@ fn branch_exists_propagates_git_command_failure() {
     assert!(
         msg.contains("git command failed") && msg.contains("not a git repository"),
         "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn remote_branches_return_only_exact_task_branch_matches() {
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout(
+        "refs/remotes/upstream/zootree/calm-river\nrefs/remotes/origin/zootree/calm-river\nrefs/remotes/origin/nested/zootree/calm-river\nrefs/remotes/origin/zootree/other\n",
+    ));
+    let git = GitOps::new(&runner);
+
+    let branches = git
+        .remote_branches("/home/user/projects/frontend", "zootree/calm-river")
+        .unwrap();
+
+    assert_eq!(
+        branches,
+        vec!["upstream/zootree/calm-river", "origin/zootree/calm-river"]
+    );
+    assert_eq!(
+        runner.take_calls()[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes"
+        ]
     );
 }
 

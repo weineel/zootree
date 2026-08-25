@@ -8,7 +8,8 @@ use std::ffi::OsStr;
 pub enum WorkspaceFilter {
     Pending,
     InProgress,
-    Active, // pending or in_progress
+    Active,   // pending or in_progress
+    Archived, // done or canceled
     Any,
 }
 
@@ -18,6 +19,7 @@ impl WorkspaceFilter {
             WorkspaceFilter::Pending => &[WorkspaceStatus::Pending],
             WorkspaceFilter::InProgress => &[WorkspaceStatus::InProgress],
             WorkspaceFilter::Active => &[WorkspaceStatus::Pending, WorkspaceStatus::InProgress],
+            WorkspaceFilter::Archived => &[WorkspaceStatus::Done, WorkspaceStatus::Canceled],
             WorkspaceFilter::Any => &[
                 WorkspaceStatus::Pending,
                 WorkspaceStatus::InProgress,

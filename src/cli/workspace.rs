@@ -14,8 +14,12 @@ use crate::core::completers::{
 use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
+use crate::core::reopen::{
+    build_reopen_plan, execute_reopen_plan, format_reopen_plan, ReopenBase, ReopenLifecyclePlan,
+    ReopenOptions, ReopenPrompt, ReopenSources, WorktreeAction,
+};
 use crate::core::repo_status::missing_registered_repo_names;
-use crate::core::terminal_environment::{AgentIntent, TerminalEnvironment};
+use crate::core::terminal_environment::{AgentIntent, CloseReport, TerminalEnvironment};
 use crate::core::worktree_status::{
     format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
 };
@@ -26,6 +30,8 @@ use anyhow::Result;
 use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
+use std::collections::BTreeSet;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -806,6 +812,38 @@ fn close_terminal_environment_with<R: CommandRunner>(
     terminal_environment.close(workspace).warnings
 }
 
+fn require_terminal_environment_closed(report: CloseReport) -> Result<Vec<String>> {
+    if report.closed {
+        return Ok(report.warnings);
+    }
+
+    let detail = if report.warnings.is_empty() {
+        "terminal environment could not be confirmed closed".to_string()
+    } else {
+        report.warnings.join("; ")
+    };
+    anyhow::bail!("terminal environment could not be closed: {detail}")
+}
+
+fn close_terminal_environment_for_reopen_with<R: CommandRunner>(
+    config_mgr: &ConfigManager,
+    global: &GlobalConfig,
+    workspace: &WorkspaceConfig,
+    runner: &R,
+) -> Result<Vec<String>> {
+    match config_mgr.load_workspace(&workspace.name)? {
+        (WorkspaceStatus::Done | WorkspaceStatus::Canceled, _) => {}
+        (status, _) => anyhow::bail!(
+            "cannot close terminal environment before reopen because workspace '{}' is {}",
+            workspace.name,
+            status.as_str()
+        ),
+    }
+
+    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
+    require_terminal_environment_closed(terminal_environment.close(workspace))
+}
+
 fn archive_done_workspace_and_close_with<R: CommandRunner>(
     config_mgr: &ConfigManager,
     global: &GlobalConfig,
@@ -919,6 +957,195 @@ pub struct OpenArgs {
         add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::InProgress))
     )]
     pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ReopenArgs {
+    #[arg(
+        help = "Workspace name to reopen (interactive if omitted)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Archived))
+    )]
+    pub name: Option<String>,
+    #[arg(
+        long = "from",
+        value_name = "current|REPO:BRANCH",
+        help = "Choose a base when the task branch is missing (repeatable)"
+    )]
+    pub from: Vec<String>,
+    #[arg(
+        long,
+        value_name = "REPO",
+        help = "Replace an occupied worktree path for a repo (repeatable)"
+    )]
+    pub overwrite: Vec<String>,
+    #[arg(long, help = "Skip post_create and post_start hooks")]
+    pub skip_hooks: bool,
+    #[arg(long, help = "Show the recovery plan without making changes")]
+    pub dry_run: bool,
+    #[arg(long, help = "Skip terminal environment activation after reopen")]
+    pub no_multiplexer: bool,
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_name = "ALIAS_OR_CMD",
+        help = "Launch agent_cli when a new terminal environment is created",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_agent_cli_alias(c)),
+    )]
+    pub run_agent: Option<Option<String>>,
+}
+
+struct CliReopenPrompt {
+    interactive: bool,
+}
+
+impl ReopenPrompt for CliReopenPrompt {
+    fn is_interactive(&self) -> bool {
+        self.interactive
+    }
+
+    fn choose_remote(&mut self, repo: &str, branches: &[String]) -> Result<String> {
+        if !self.interactive {
+            anyhow::bail!(
+                "repo '{}' has ambiguous remote task branches; use --from {}:REMOTE/BRANCH",
+                repo,
+                repo
+            );
+        }
+        let idx = tui::select_one(
+            &format!("Select remote task branch for repo '{}'", repo),
+            branches,
+        )?;
+        Ok(branches[idx].clone())
+    }
+
+    fn choose_base(&mut self, repo: &str, current: &str) -> Result<ReopenBase> {
+        if !self.interactive {
+            anyhow::bail!(
+                "repo '{}' has no recoverable task branch; use --from current or --from {}:BRANCH",
+                repo,
+                repo
+            );
+        }
+        let choices = vec![
+            format!("current ({current})"),
+            "specify another branch".into(),
+        ];
+        match tui::select_one(&format!("Select base for repo '{}'", repo), &choices)? {
+            0 => Ok(ReopenBase::Current),
+            _ => Ok(ReopenBase::Branch(tui::input_required("Base branch")?)),
+        }
+    }
+
+    fn confirm_overwrite(
+        &mut self,
+        repo: &str,
+        path: &str,
+        valid_worktree: bool,
+        dirty: bool,
+    ) -> Result<bool> {
+        if !self.interactive {
+            anyhow::bail!(
+                "repo '{}' requires --overwrite before replacing '{}'",
+                repo,
+                path
+            );
+        }
+        let kind = if valid_worktree {
+            "matching worktree"
+        } else {
+            "occupied path"
+        };
+        let loss = if dirty {
+            " It contains uncommitted or untracked content that zootree cannot recover."
+        } else {
+            " Existing content will be permanently removed."
+        };
+        tui::confirm(
+            &format!("Overwrite {kind} for repo '{repo}' at '{path}'?{loss}"),
+            false,
+        )
+    }
+}
+
+pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
+    let config_manager = ConfigManager::new()?;
+    let global = config_manager.load_global_config()?;
+    let runner = RealRunner;
+    let interactive = std::io::stdin().is_terminal();
+    let name = match &args.name {
+        Some(name) => name.clone(),
+        None if interactive => {
+            let archived = config_manager
+                .list_workspaces(Some(&[WorkspaceStatus::Done, WorkspaceStatus::Canceled]))?;
+            if archived.is_empty() {
+                anyhow::bail!("no archived workspaces to reopen");
+            }
+            let choices = archived
+                .iter()
+                .map(|workspace| format!("{} - {}", workspace.name, workspace.title))
+                .collect::<Vec<_>>();
+            let idx = tui::select_one("Select workspace to reopen", &choices)?;
+            archived[idx].name.clone()
+        }
+        None => anyhow::bail!("workspace name is required when stdin is not interactive"),
+    };
+    let options = ReopenOptions {
+        sources: ReopenSources::parse(&args.from)?,
+        overwrite_repos: args.overwrite.iter().cloned().collect::<BTreeSet<_>>(),
+    };
+    let mut prompt = CliReopenPrompt { interactive };
+    let mut plan = build_reopen_plan(&config_manager, &runner, &name, &options, &mut prompt)?;
+    if args.run_agent.is_some() {
+        plan.workspace.agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
+    }
+    let lifecycle = ReopenLifecyclePlan {
+        skip_hooks: args.skip_hooks,
+        activate_terminal_environment: !args.no_multiplexer,
+        run_agent: args.run_agent.is_some(),
+    };
+    print!("{}", format_reopen_plan(&plan, &lifecycle));
+    if args.dry_run {
+        println!("dry run: no changes made");
+        return Ok(());
+    }
+
+    if plan
+        .repos
+        .iter()
+        .any(|repo| matches!(repo.worktree_action, WorktreeAction::Overwrite { .. }))
+    {
+        let warnings = close_terminal_environment_for_reopen_with(
+            &config_manager,
+            &global,
+            &plan.workspace,
+            &runner,
+        )?;
+        report_terminal_environment_warnings(&plan.workspace.name, warnings);
+    }
+
+    let workspace = execute_reopen_plan(&config_manager, &global, &runner, plan, args.skip_hooks)?;
+    let warnings = if args.no_multiplexer {
+        Vec::new()
+    } else {
+        activate_terminal_environment_with(
+            &config_manager,
+            &global,
+            &workspace,
+            &runner,
+            agent_intent(args.run_agent.clone()),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "workspace '{}' reopened and remains in_progress, but terminal environment activation failed: {error:#}. Run `zootree open {}` to retry",
+                workspace.name,
+                workspace.name
+            )
+        })?
+    };
+    println!("workspace '{}' reopened", workspace.name);
+    report_terminal_environment_warnings(&workspace.name, warnings);
+    Ok(())
 }
 
 #[derive(Args)]
@@ -1349,6 +1576,26 @@ mod tests {
     use clap::Parser;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
+
+    #[test]
+    fn reopen_overwrite_accepts_a_confirmed_close_with_fallback_warnings() {
+        let warnings = require_terminal_environment_closed(CloseReport {
+            closed: true,
+            warnings: vec!["stored terminal id was stale; closed by name".into()],
+        })
+        .unwrap();
+
+        assert_eq!(warnings.len(), 1);
+
+        let error = require_terminal_environment_closed(CloseReport {
+            closed: false,
+            warnings: vec!["terminal environment is ambiguous".into()],
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("terminal environment is ambiguous"));
+    }
 
     #[derive(Parser)]
     struct TestListCli {

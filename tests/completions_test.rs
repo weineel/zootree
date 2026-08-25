@@ -111,6 +111,25 @@ fn workspace_completer_any_includes_all() {
 }
 
 #[test]
+fn workspace_completer_archived_includes_done_and_canceled() {
+    let (_tmp, mgr) = make_mgr();
+    save(&mgr, WorkspaceStatus::Pending, "a", "A");
+    save(&mgr, WorkspaceStatus::InProgress, "b", "B");
+    save(&mgr, WorkspaceStatus::Done, "c", "C");
+    save(&mgr, WorkspaceStatus::Canceled, "d", "D");
+
+    let cands = complete_workspace_with(&mgr, OsStr::new(""), WorkspaceFilter::Archived);
+
+    assert_eq!(names(&cands), vec!["c", "d"]);
+    assert!(cands[0].get_help().unwrap().to_string().contains("done"));
+    assert!(cands[1]
+        .get_help()
+        .unwrap()
+        .to_string()
+        .contains("canceled"));
+}
+
+#[test]
 fn workspace_completer_filters_by_prefix() {
     let (_tmp, mgr) = make_mgr();
     save(&mgr, WorkspaceStatus::Pending, "fix-login", "Fix login");

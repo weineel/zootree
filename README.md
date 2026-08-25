@@ -105,6 +105,7 @@ Restart your shell (or `source` the rc file) to activate.
 - `zootree start <TAB>` — pending workspaces
 - `zootree open <TAB>` / `zootree done <TAB>` — in-progress workspaces
 - `zootree cancel <TAB>` — pending or in-progress workspaces
+- `zootree reopen <TAB>` — done or canceled workspaces
 - `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — registered repos
 - `zootree template save --from <TAB>` — any workspace
 - `zootree create --template <TAB>` — saved templates
@@ -223,6 +224,15 @@ zootree list                         # List workspaces as compact cards
 
 zootree open [name]                  # Open an existing workspace
 
+zootree reopen [name]                # Reopen an archived workspace as in-progress
+  --from current                     # Recreate every missing task branch from each repo's current revision
+  --from <repo>:<branch>             # Override the recovery base for one repo (repeatable)
+  --overwrite <repo>                 # Replace an occupied canonical worktree path (repeatable)
+  --dry-run                          # Print the complete recovery plan without changing anything
+  --skip-hooks                       # Skip post_create and post_start hooks
+  --no-multiplexer                   # Don't activate the terminal environment after recovery
+  --run-agent [alias|command]        # Launch an agent if a terminal environment is created
+
 zootree done [name]                  # Finish a workspace
   --no-merge                         # Skip merge
   --no-clean                         # Skip cleanup
@@ -302,6 +312,8 @@ cmux is the recommended multiplexer for new setups. If `[multiplexer].kind` is o
 The `[multiplexer]` configuration key and saved `[multiplexer_state]` field remain stable for configuration compatibility. zootree treats the saved state as opaque runtime locating and recovery hints, not as the terminal environment's identity; users should not edit its internal fields.
 
 `start` and `open` both idempotently activate the configured terminal environment. If activation fails after `start` has created the worktrees, the workspace remains `in_progress`; fix the terminal issue and retry with `zootree open <name>`. `--no-multiplexer` skips only that `start` invocation. `done` and `cancel` archive the workspace before attempting best-effort terminal cleanup, so cleanup warnings never undo the final workspace status.
+
+`reopen` returns a `done` or `canceled` workspace to `in_progress`. It first plans every repository: an existing local task branch is reused, otherwise a remote-tracking task branch is preferred without fetching; if neither exists, interactive use asks whether to recreate the task branch from the repo's current revision or a specified branch. Scripts must make that choice with `--from current` and/or repeatable `--from <repo>:<branch>`. Existing matching worktrees can be reused; replacing any occupied path requires an interactive confirmation or explicit `--overwrite <repo>`. New and overwritten worktrees rerun file copying and `post_create`; after all repositories succeed, zootree records `reopened`, moves the workspace to `in_progress`, runs `post_start`, and activates the terminal environment. Use `--dry-run` to inspect the full read-only plan.
 
 Logs rotate daily. `log.dir` changes the directory used by both the logger and `zootree logs`, and `log.max_files` limits how many daily log files are retained. Size-based rotation such as `max_size` is not supported by the current tracing appender.
 

@@ -31,6 +31,7 @@ pub struct Activation {
 /// environment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloseReport {
+    pub closed: bool,
     pub warnings: Vec<String>,
 }
 
@@ -889,6 +890,7 @@ session = "renamed-session"
         )
         .close(&workspace);
 
+        assert!(report.closed);
         assert!(report.warnings.is_empty());
         let calls = runner.take_calls();
         assert_eq!(calls[0].args, vec!["list-sessions"]);
@@ -913,6 +915,7 @@ session = "renamed-session"
         )
         .close(&zellij_workspace(&[]));
 
+        assert!(report.closed);
         assert!(report.warnings.is_empty());
         assert_eq!(runner.take_calls().len(), 1);
     }
@@ -931,6 +934,7 @@ session = "renamed-session"
             false,
         )
         .close(&zellij_workspace(&[]));
+        assert!(!report.closed);
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("socket unavailable"));
 
@@ -944,6 +948,7 @@ session = "renamed-session"
             false,
         )
         .close(&zellij_workspace(&[]));
+        assert!(!report.closed);
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("permission denied"));
     }

@@ -114,18 +114,33 @@ impl<'a, R: CommandRunner> ZellijAdapter<'a, R> {
 
         if let Some(session) = stored_session {
             match close_named_session(&zellij, session, workspace, &mut warnings) {
-                CloseLookupOutcome::Closed | CloseLookupOutcome::Failed => {
-                    return CloseReport { warnings };
+                CloseLookupOutcome::Closed => {
+                    return CloseReport {
+                        closed: true,
+                        warnings,
+                    };
+                }
+                CloseLookupOutcome::Failed => {
+                    return CloseReport {
+                        closed: false,
+                        warnings,
+                    };
                 }
                 CloseLookupOutcome::NotFound if session == display_name => {
-                    return CloseReport { warnings };
+                    return CloseReport {
+                        closed: true,
+                        warnings,
+                    };
                 }
                 CloseLookupOutcome::NotFound => {}
             }
         }
 
-        close_named_session(&zellij, &display_name, workspace, &mut warnings);
-        CloseReport { warnings }
+        let outcome = close_named_session(&zellij, &display_name, workspace, &mut warnings);
+        CloseReport {
+            closed: !matches!(outcome, CloseLookupOutcome::Failed),
+            warnings,
+        }
     }
 }
 

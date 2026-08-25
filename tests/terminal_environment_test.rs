@@ -425,6 +425,7 @@ label = "Support Herdr · zootree:calm-river"
     let report =
         TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
 
+    assert!(report.closed);
     assert!(report.warnings.is_empty());
     let calls = runner.take_calls();
     assert_eq!(calls.len(), 2);
@@ -466,6 +467,7 @@ label = "Original label"
     let report =
         TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
 
+    assert!(report.closed);
     assert!(report.warnings.is_empty());
     let calls = runner.take_calls();
     assert_eq!(calls.len(), 3);
@@ -487,6 +489,7 @@ fn herdr_close_reports_ambiguous_and_malformed_responses_as_warnings() {
     ));
     let report = TerminalEnvironment::new(&config_manager, &global_config, &runner)
         .close(&herdr_workspace(&[]));
+    assert!(!report.closed);
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("ambiguous"));
     assert_eq!(runner.take_calls().len(), 1);
@@ -510,6 +513,7 @@ label = "Support Herdr"
     );
     let report =
         TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
+    assert!(!report.closed);
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("malformed JSON"));
 }
@@ -987,6 +991,7 @@ group = "workspace_group:2"
     let report =
         TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
 
+    assert!(report.closed);
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("stored cmux group 'workspace_group:2'"));
     assert!(report.warnings[0].contains("completed close fallback by name"));
@@ -1016,6 +1021,7 @@ fn close_reports_ambiguous_and_command_failures_as_warnings() {
 
     let report =
         TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace(&[]));
+    assert!(!report.closed);
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("ambiguous"));
 
@@ -1034,6 +1040,7 @@ group = "workspace_group:2"
     );
     let report =
         TerminalEnvironment::new(&config_manager, &global_config, &runner).close(&workspace);
+    assert!(!report.closed);
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("failed to close cmux"));
 }

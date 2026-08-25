@@ -102,6 +102,7 @@ zootree 支持 5 种 shell 的补全：bash、zsh、fish、PowerShell、elvish�
 - `zootree start <TAB>` — pending 状态的 workspace
 - `zootree open <TAB>` / `zootree done <TAB>` — in-progress 状态的 workspace
 - `zootree cancel <TAB>` — pending 或 in-progress 状态的 workspace
+- `zootree reopen <TAB>` — done 或 canceled 状态的 workspace
 - `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — 已注册的 repo
 - `zootree template save --from <TAB>` — 任意 workspace
 - `zootree create --template <TAB>` — 已保存的 template
@@ -218,6 +219,15 @@ zootree list                         # 以紧凑卡片形式列出工作空间
 
 zootree open [name]                  # 打开已有工作空间
 
+zootree reopen [name]                # 将已归档 workspace 恢复为 in-progress
+  --from current                     # 从各 repo 的当前 revision 重建缺失的任务分支
+  --from <repo>:<branch>             # 指定某个 repo 的恢复基线（可重复）
+  --overwrite <repo>                 # 覆盖已占用的规范 worktree 路径（可重复）
+  --dry-run                          # 仅输出完整恢复计划，不做修改
+  --skip-hooks                       # 跳过 post_create 与 post_start hook
+  --no-multiplexer                   # 恢复后不激活终端环境
+  --run-agent [alias|command]        # 新建终端环境时启动 agent
+
 zootree done [name]                  # 完成工作空间
   --no-merge                         # 不合并
   --no-clean                         # 不清理
@@ -296,6 +306,8 @@ cmux 是新配置推荐的终端复用器；如果省略 `[multiplexer].kind`，
 为保持配置兼容，`[multiplexer]` 配置键和持久化的 `[multiplexer_state]` 字段名保持不变。zootree 将持久化状态视为不透明的运行时定位与恢复提示，而不是终端环境的唯一身份；用户不应修改其内部字段。
 
 `start` 与 `open` 都会幂等激活已配置的终端环境。如果 `start` 已创建 worktree 后激活失败，workspace 会保持 `in_progress`；修复终端问题后可运行 `zootree open <name>` 重试。`--no-multiplexer` 只跳过当次 `start`。`done` 与 `cancel` 会先归档 workspace，再 best-effort 清理终端环境，因此清理 warning 不会回滚最终状态。
+
+`reopen` 将 `done` 或 `canceled` workspace 恢复为 `in_progress`。命令会先规划所有 repo：优先复用本地任务分支，其次在不执行 fetch 的前提下使用 remote-tracking 任务分支；两者都不存在时，交互模式让用户选择从 repo 当前 revision 或指定分支重建任务分支。脚本必须通过 `--from current` 和/或可重复的 `--from <repo>:<branch>` 明确选择。匹配的现有 worktree 可以复用；覆盖任何已占用路径都需要交互确认或显式 `--overwrite <repo>`。新建和覆盖的 worktree 会重新复制文件并执行 `post_create`；所有 repo 成功后，zootree 记录 `reopened`、迁移到 `in_progress`、执行 `post_start` 并激活终端环境。可用 `--dry-run` 查看完整只读计划。
 
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 

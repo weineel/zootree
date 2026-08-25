@@ -112,7 +112,7 @@ pub(super) fn close<R: CommandRunner>(
         .map(|payload| payload.group.as_str())
         .filter(|group| !group.is_empty());
 
-    match cmux.delete_group(deterministic_group_name(workspace), stored_group) {
+    let closed = match cmux.delete_group(deterministic_group_name(workspace), stored_group) {
         Ok(
             DeleteResult::Deleted { stored_ref_failure }
             | DeleteResult::NotFound { stored_ref_failure },
@@ -120,6 +120,7 @@ pub(super) fn close<R: CommandRunner>(
             if let Some(failure) = stored_ref_failure {
                 warnings.push(format!("{failure}; completed close fallback by name"));
             }
+            true
         }
         Ok(DeleteResult::Ambiguous { stored_ref_failure }) => {
             if let Some(failure) = stored_ref_failure {
@@ -129,14 +130,18 @@ pub(super) fn close<R: CommandRunner>(
                 "cmux group '{}' is ambiguous; terminal environment was not closed",
                 deterministic_group_name(workspace)
             ));
+            false
         }
-        Err(error) => warnings.push(format!(
-            "failed to close cmux terminal environment for workspace '{}': {error:#}",
-            workspace.name
-        )),
-    }
+        Err(error) => {
+            warnings.push(format!(
+                "failed to close cmux terminal environment for workspace '{}': {error:#}",
+                workspace.name
+            ));
+            false
+        }
+    };
 
-    CloseReport { warnings }
+    CloseReport { closed, warnings }
 }
 
 fn deterministic_group_name(workspace: &WorkspaceConfig) -> &str {

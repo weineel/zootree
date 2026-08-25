@@ -2,6 +2,12 @@ use crate::runner::{CommandRunner, CommandSpec};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitWorktree {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
 pub struct GitOps<'a, R: CommandRunner> {
     runner: &'a R,
 }
@@ -46,6 +52,11 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(branch)
     }
 
+    pub fn short_revision(&self, repo_path: &str, revision: &str) -> Result<String> {
+        let output = self.git(repo_path, vec!["rev-parse", "--short", revision])?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     pub fn repo_root(&self, repo_path: &str) -> Result<String> {
         let output = self.git(repo_path, vec!["rev-parse", "--show-toplevel"])?;
         let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -62,6 +73,36 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(stdout.lines().any(|line| line.trim() == refname))
     }
 
+    pub fn remote_branches(&self, repo_path: &str, branch: &str) -> Result<Vec<String>> {
+        let output = self.git(
+            repo_path,
+            vec!["for-each-ref", "--format=%(refname)", "refs/remotes"],
+        )?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("refs/remotes/"))
+            .filter(|name| name.split_once('/').is_some_and(|(_, rest)| rest == branch))
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub fn branch_ref_exists(&self, repo_path: &str, branch: &str) -> Result<bool> {
+        let local_ref = format!("refs/heads/{branch}");
+        let remote_ref = format!("refs/remotes/{branch}");
+        let output = self.git(
+            repo_path,
+            vec![
+                "for-each-ref",
+                "--format=%(refname)",
+                &local_ref,
+                &remote_ref,
+            ],
+        )?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| matches!(line.trim(), value if value == local_ref || value == remote_ref)))
+    }
+
     pub fn worktree_add(
         &self,
         repo_path: &str,
@@ -76,6 +117,38 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(())
     }
 
+    pub fn worktree_add_existing(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        worktree_path: &str,
+    ) -> Result<()> {
+        self.git(repo_path, vec!["worktree", "add", worktree_path, branch])?;
+        Ok(())
+    }
+
+    pub fn worktree_add_tracking(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        worktree_path: &str,
+        remote_branch: &str,
+    ) -> Result<()> {
+        self.git(
+            repo_path,
+            vec![
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                branch,
+                worktree_path,
+                remote_branch,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn worktree_remove(&self, repo_path: &str, worktree_path: &str, force: bool) -> Result<()> {
         let mut args = vec!["worktree", "remove"];
         if force {
@@ -84,6 +157,26 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         args.push(worktree_path);
         self.git(repo_path, args)?;
         Ok(())
+    }
+
+    pub fn worktrees(&self, repo_path: &str) -> Result<Vec<GitWorktree>> {
+        let output = self.git(repo_path, vec!["worktree", "list", "--porcelain", "-z"])?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .split("\0\0")
+            .filter_map(|record| {
+                let mut path = None;
+                let mut branch = None;
+                for field in record.split('\0') {
+                    if let Some(value) = field.strip_prefix("worktree ") {
+                        path = Some(value.to_string());
+                    } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
+                        branch = Some(value.to_string());
+                    }
+                }
+                path.map(|path| GitWorktree { path, branch })
+            })
+            .collect())
     }
 
     pub fn merge(

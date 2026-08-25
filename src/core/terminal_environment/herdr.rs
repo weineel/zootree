@@ -113,7 +113,10 @@ pub(super) fn close<R: CommandRunner>(
         .unwrap_or(&workspace.multiplexer.herdr.session);
     if session.is_empty() {
         warnings.push("Herdr named session was empty; terminal environment was not closed".into());
-        return CloseReport { warnings };
+        return CloseReport {
+            closed: false,
+            warnings,
+        };
     }
 
     let target = (|| -> Result<Option<HerdrWorkspace>> {
@@ -126,22 +129,28 @@ pub(super) fn close<R: CommandRunner>(
         find_unique_workspace(&commands, session, &display_label(workspace))
     })();
 
-    match target {
+    let closed = match target {
         Ok(Some(target)) => {
             if let Err(error) = commands.close_workspace(session, &target.id) {
                 warnings.push(format!(
                     "failed to close Herdr terminal environment for workspace '{}': {error:#}",
                     workspace.name
                 ));
+                false
+            } else {
+                true
             }
         }
-        Ok(None) => {}
-        Err(error) => warnings.push(format!(
-            "failed to inspect Herdr terminal environment for workspace '{}': {error:#}",
-            workspace.name
-        )),
-    }
-    CloseReport { warnings }
+        Ok(None) => true,
+        Err(error) => {
+            warnings.push(format!(
+                "failed to inspect Herdr terminal environment for workspace '{}': {error:#}",
+                workspace.name
+            ));
+            false
+        }
+    };
+    CloseReport { closed, warnings }
 }
 
 fn find_unique_workspace<R: CommandRunner>(

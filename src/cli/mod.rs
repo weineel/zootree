@@ -42,6 +42,8 @@ pub enum Commands {
     Start(workspace::StartArgs),
     #[command(about = "Open an in-progress workspace in terminal multiplexer")]
     Open(workspace::OpenArgs),
+    #[command(about = "Reopen a done or canceled workspace")]
+    Reopen(workspace::ReopenArgs),
     #[command(about = "Show detailed info about a workspace")]
     Info(info::InfoArgs),
     #[command(about = "Complete a workspace (merge, clean up worktrees)")]

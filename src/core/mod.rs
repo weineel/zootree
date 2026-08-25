@@ -9,6 +9,7 @@ pub mod layout;
 pub mod logging;
 mod multiplexer;
 pub mod name_gen;
+pub mod reopen;
 pub mod repo_names;
 pub mod repo_status;
 pub mod terminal_environment;
