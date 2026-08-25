@@ -112,7 +112,7 @@ cmux、Zellij 与 Herdr 均通过 `TerminalEnvironment::activate` / `close` 路�
 
 `start` 与 `open` 共用同一个 activate caller seam：成功后保存 opaque state 并呈现 warning；`start` 在 worktree 与 `in_progress` 已完成后若激活失败，返回可由 `open` 重试的 partial-success 错误且不回滚。`done` / `cancel` 先完成 event 和最终状态归档，再调用 best-effort close；close warning 不改变最终 workspace 状态。`CloseReport.closed` 表示 adapter 是否确认目标已关闭，warning 只补充恢复过程信息；`reopen --overwrite` 必须检查 `closed`，成功 fallback 即使带 warning 也可继续。`--no-multiplexer` 只跳过当次 `start` / `reopen` 的 activate。
 
-`core::reopen` 把 archived workspace 恢复封装为两段式边界：`build_reopen_plan` 完成全部只读 Git、路径和用户决策检查，`execute_reopen_plan` 才创建或覆盖 worktree、复用 `copy_files` / `post_create`、写 `reopened` event 并迁移状态，最后复用既有 `post_start`。状态迁移前失败必须保留原 archived config 且 best-effort 回滚本次新建 worktree；迁移后的 hook/terminal 失败是可用 `open` 重试的 partial success。
+`core::reopen` 把 archived workspace 恢复封装为两段式边界：`build_reopen_plan` 完成全部只读 Git、路径和用户决策检查，`execute_reopen_plan` 才创建或覆盖 worktree、复用 `copy_files` / `post_create`、写 `reopened` event 并迁移状态，最后复用既有 `post_start`。reopen 的目标 Workspace 必须通过 `ReopenPlan::apply_current_terminal_config` 使用当前 global `[multiplexer]` 快照并清空 archived `multiplexer_state`；若 overwrite 需要先关闭旧环境，close caller 应重新加载 archived Workspace，仅把旧 config/state 用于定位旧 runtime。状态迁移前失败必须保留原 archived config 且 best-effort 回滚本次新建 worktree；迁移后的 hook/terminal 失败是可用 `open` 重试的 partial success。
 
 `core::multiplexer` 是 crate-private 命令翻译实现，不提供通用 trait，也不暴露 launch、identity 或 outcome 类型。其私有模块单元测试直接验证精确 argv、环境变量清理、输出解析和 rollback；integration tests 只通过 `TerminalEnvironment` 验证生命周期 contract。
 

@@ -3,9 +3,11 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
 use tempfile::TempDir;
 use zootree::cli::{Cli, Commands};
-use zootree::config::global::{GlobalConfig, MultiplexerConfig};
+use zootree::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
 use zootree::config::repo::RepoConfig;
-use zootree::config::workspace::{RepoEntry, WorkspaceConfig, WorkspaceStatus};
+use zootree::config::workspace::{
+    RepoEntry, StoredTerminalEnvironmentState, WorkspaceConfig, WorkspaceStatus,
+};
 use zootree::config::ConfigManager;
 use zootree::core::reopen::{
     build_reopen_plan, execute_reopen_plan, format_reopen_plan, NonInteractiveReopenPrompt,
@@ -72,6 +74,10 @@ fn setup_archived_workspace() -> (TempDir, ConfigManager, WorkspaceConfig) {
     (tmp, manager, workspace)
 }
 
+fn stored_terminal_state(source: &str) -> StoredTerminalEnvironmentState {
+    toml::from_str(source).unwrap()
+}
+
 #[test]
 fn reopen_cli_accepts_recovery_and_lifecycle_options() {
     let cli = Cli::parse_from([
@@ -121,6 +127,51 @@ fn reopen_sources_apply_repo_override_over_current_default() {
         Some(ReopenBase::Branch("release/2026".into()))
     );
     assert_eq!(sources.for_repo("docs"), Some(ReopenBase::Current));
+}
+
+#[test]
+fn reopen_plan_replaces_archived_terminal_snapshot_with_current_global_config() {
+    let (_tmp, manager, mut workspace) = setup_archived_workspace();
+    workspace.multiplexer.kind = MultiplexerKind::Cmux;
+    workspace.multiplexer_state = stored_terminal_state(
+        r#"
+version = 1
+adapter = "cmux"
+
+[payload]
+group = "workspace_group:old"
+"#,
+    );
+    manager
+        .save_workspace(&WorkspaceStatus::Canceled, &workspace)
+        .unwrap();
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout("refs/heads/zootree/calm-river\n"));
+    runner.push_response(success_stdout(
+        "worktree /repos/frontend\0HEAD 1111111\0branch refs/heads/main\0",
+    ));
+    let mut prompt = NonInteractiveReopenPrompt;
+    let mut plan = build_reopen_plan(
+        &manager,
+        &runner,
+        "calm-river",
+        &ReopenOptions::default(),
+        &mut prompt,
+    )
+    .unwrap();
+    let mut global = GlobalConfig::default();
+    global.multiplexer.kind = MultiplexerKind::Herdr;
+    global.multiplexer.herdr.session = "current-session".into();
+
+    plan.apply_current_terminal_config(&global);
+
+    assert_eq!(plan.workspace.multiplexer, global.multiplexer);
+    assert!(plan.workspace.multiplexer_state.is_empty());
+    let output = format_reopen_plan(&plan, &ReopenLifecyclePlan::default());
+    assert!(
+        output.contains("terminal config: current global config (herdr)"),
+        "{output}"
+    );
 }
 
 #[test]
@@ -293,7 +344,20 @@ fn current_reopen_base_supports_detached_head_with_visible_commit() {
 
 #[test]
 fn reopen_execution_restores_worktree_then_moves_workspace_to_in_progress() {
-    let (_tmp, manager, _) = setup_archived_workspace();
+    let (_tmp, manager, mut archived) = setup_archived_workspace();
+    archived.multiplexer.kind = MultiplexerKind::Cmux;
+    archived.multiplexer_state = stored_terminal_state(
+        r#"
+version = 1
+adapter = "cmux"
+
+[payload]
+group = "workspace_group:old"
+"#,
+    );
+    manager
+        .save_workspace(&WorkspaceStatus::Canceled, &archived)
+        .unwrap();
     let runner = MockRunner::new();
     runner.push_response(success_stdout("refs/heads/zootree/calm-river\n"));
     runner.push_response(success_stdout(
@@ -309,13 +373,19 @@ fn reopen_execution_restores_worktree_then_moves_workspace_to_in_progress() {
     )
     .unwrap();
     runner.push_response(success_stdout(""));
+    let mut global = GlobalConfig::default();
+    global.multiplexer.kind = MultiplexerKind::Herdr;
+    global.multiplexer.herdr.session = "current-session".into();
 
-    let reopened =
-        execute_reopen_plan(&manager, &GlobalConfig::default(), &runner, plan, true).unwrap();
+    let reopened = execute_reopen_plan(&manager, &global, &runner, plan, true).unwrap();
 
     assert_eq!(reopened.name, "calm-river");
+    assert_eq!(reopened.multiplexer, global.multiplexer);
+    assert!(reopened.multiplexer_state.is_empty());
     let (status, persisted) = manager.load_workspace("calm-river").unwrap();
     assert_eq!(status, WorkspaceStatus::InProgress);
+    assert_eq!(persisted.multiplexer, global.multiplexer);
+    assert!(persisted.multiplexer_state.is_empty());
     assert_eq!(
         persisted.events.last().unwrap().action,
         "reopened".to_string()

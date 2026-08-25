@@ -79,6 +79,13 @@ impl Default for ReopenLifecyclePlan {
     }
 }
 
+impl ReopenPlan {
+    pub fn apply_current_terminal_config(&mut self, global: &GlobalConfig) {
+        self.workspace.multiplexer = global.multiplexer.clone();
+        self.workspace.multiplexer_state = Default::default();
+    }
+}
+
 pub trait ReopenPrompt {
     fn is_interactive(&self) -> bool;
     fn choose_remote(&mut self, repo: &str, branches: &[String]) -> Result<String>;
@@ -369,6 +376,7 @@ pub fn execute_reopen_plan<R: CommandRunner>(
     mut plan: ReopenPlan,
     skip_hooks: bool,
 ) -> Result<WorkspaceConfig> {
+    plan.apply_current_terminal_config(global);
     let git = GitOps::new(runner);
     let hook_engine = HookEngine::new(runner);
     let workspace_dir =
@@ -565,6 +573,14 @@ pub fn format_reopen_plan(plan: &ReopenPlan, lifecycle: &ReopenLifecyclePlan) ->
             repo.repo_name, action, repo.worktree_path
         ));
     }
+    let multiplexer = match plan.workspace.multiplexer.kind {
+        crate::config::global::MultiplexerKind::Zellij => "zellij",
+        crate::config::global::MultiplexerKind::Cmux => "cmux",
+        crate::config::global::MultiplexerKind::Herdr => "herdr",
+    };
+    output.push_str(&format!(
+        "  terminal config: current global config ({multiplexer})\n"
+    ));
     if plan
         .repos
         .iter()

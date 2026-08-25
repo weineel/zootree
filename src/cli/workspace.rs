@@ -828,20 +828,20 @@ fn require_terminal_environment_closed(report: CloseReport) -> Result<Vec<String
 fn close_terminal_environment_for_reopen_with<R: CommandRunner>(
     config_mgr: &ConfigManager,
     global: &GlobalConfig,
-    workspace: &WorkspaceConfig,
+    workspace_name: &str,
     runner: &R,
 ) -> Result<Vec<String>> {
-    match config_mgr.load_workspace(&workspace.name)? {
-        (WorkspaceStatus::Done | WorkspaceStatus::Canceled, _) => {}
+    let workspace = match config_mgr.load_workspace(workspace_name)? {
+        (WorkspaceStatus::Done | WorkspaceStatus::Canceled, workspace) => workspace,
         (status, _) => anyhow::bail!(
             "cannot close terminal environment before reopen because workspace '{}' is {}",
-            workspace.name,
+            workspace_name,
             status.as_str()
         ),
-    }
+    };
 
     let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    require_terminal_environment_closed(terminal_environment.close(workspace))
+    require_terminal_environment_closed(terminal_environment.close(&workspace))
 }
 
 fn archive_done_workspace_and_close_with<R: CommandRunner>(
@@ -1096,6 +1096,7 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
     };
     let mut prompt = CliReopenPrompt { interactive };
     let mut plan = build_reopen_plan(&config_manager, &runner, &name, &options, &mut prompt)?;
+    plan.apply_current_terminal_config(&global);
     if args.run_agent.is_some() {
         plan.workspace.agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
     }
@@ -1118,7 +1119,7 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
         let warnings = close_terminal_environment_for_reopen_with(
             &config_manager,
             &global,
-            &plan.workspace,
+            &plan.workspace.name,
             &runner,
         )?;
         report_terminal_environment_warnings(&plan.workspace.name, warnings);
@@ -1595,6 +1596,40 @@ mod tests {
         assert!(error
             .to_string()
             .contains("terminal environment is ambiguous"));
+    }
+
+    #[test]
+    fn reopen_overwrite_closes_the_archived_terminal_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
+        config_mgr.ensure_dirs().unwrap();
+        let mut archived = test_workspace("reopen-old-terminal");
+        archived.multiplexer.kind = MultiplexerKind::Cmux;
+        archived.multiplexer_state = stored_terminal_state(
+            r#"
+version = 1
+adapter = "cmux"
+
+[payload]
+group = "workspace_group:old"
+"#,
+        );
+        config_mgr
+            .save_workspace(&WorkspaceStatus::Canceled, &archived)
+            .unwrap();
+        let runner = MockRunner::new();
+        runner.push_response(success_output());
+
+        let warnings = close_terminal_environment_for_reopen_with(
+            &config_mgr,
+            &GlobalConfig::default(),
+            "reopen-old-terminal",
+            &runner,
+        )
+        .unwrap();
+
+        assert!(warnings.is_empty());
+        assert_eq!(runner.take_calls()[0].program, "cmux");
     }
 
     #[derive(Parser)]
