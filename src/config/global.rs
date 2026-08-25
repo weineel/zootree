@@ -42,6 +42,16 @@ pub enum MultiplexerKind {
     Herdr,
 }
 
+impl MultiplexerKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Zellij => "zellij",
+            Self::Cmux => "cmux",
+            Self::Herdr => "herdr",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ZellijMultiplexerConfig {

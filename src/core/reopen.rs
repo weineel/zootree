@@ -573,11 +573,7 @@ pub fn format_reopen_plan(plan: &ReopenPlan, lifecycle: &ReopenLifecyclePlan) ->
             repo.repo_name, action, repo.worktree_path
         ));
     }
-    let multiplexer = match plan.workspace.multiplexer.kind {
-        crate::config::global::MultiplexerKind::Zellij => "zellij",
-        crate::config::global::MultiplexerKind::Cmux => "cmux",
-        crate::config::global::MultiplexerKind::Herdr => "herdr",
-    };
+    let multiplexer = plan.workspace.multiplexer.kind.as_str();
     output.push_str(&format!(
         "  terminal config: current global config ({multiplexer})\n"
     ));

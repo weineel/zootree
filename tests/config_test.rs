@@ -122,6 +122,13 @@ fn test_parse_global_config_defaults() {
 }
 
 #[test]
+fn multiplexer_kind_as_str_matches_config_values() {
+    assert_eq!(MultiplexerKind::Zellij.as_str(), "zellij");
+    assert_eq!(MultiplexerKind::Cmux.as_str(), "cmux");
+    assert_eq!(MultiplexerKind::Herdr.as_str(), "herdr");
+}
+
+#[test]
 fn log_path_defaults_to_config_manager_logs_dir() {
     let temp = TempDir::new().unwrap();
     let mgr = ConfigManager::with_base_dir(temp.path().join("zootree"));
