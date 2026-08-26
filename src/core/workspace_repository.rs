@@ -4,12 +4,13 @@ use anyhow::{Context, Result};
 use chrono::Local;
 
 use crate::config::global::GlobalConfig;
-use crate::config::workspace::{Event, RepoEntry, WorkspaceStatus};
+use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
-use crate::core::terminal_environment::{AppliedRepositoryAddition, TerminalEnvironment};
+use crate::core::terminal_environment::TerminalEnvironment;
+use crate::core::workspace_instruction_index;
 use crate::runner::CommandRunner;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,7 @@ pub fn add<R: CommandRunner>(
     if status != WorkspaceStatus::InProgress {
         anyhow::bail!("workspace '{}' is not in_progress", request.workspace);
     }
+    let original_workspace = workspace.clone();
     if request.repo.is_empty() {
         anyhow::bail!("repository name must not be empty");
     }
@@ -148,7 +150,7 @@ pub fn add<R: CommandRunner>(
         ));
     }
 
-    let operation = (|| -> Result<AppliedRepositoryAddition> {
+    let operation = (|| -> Result<()> {
         let patterns =
             copy_files::merge_copy_files(&global_config.copy_files, &repo_config.copy_files);
         if !patterns.is_empty() {
@@ -178,28 +180,23 @@ pub fn add<R: CommandRunner>(
             )?;
         }
 
-        terminal_environment.apply_repository_addition(prepared_terminal)
+        Ok(())
     })();
 
-    let applied_terminal = match operation {
-        Ok(applied) => applied,
-        Err(error) => {
-            return Err(rollback_error(
-                error,
-                None,
-                Some(&terminal_environment),
-                &git,
-                GitRollbackTarget {
-                    repo_path: &repo_path,
-                    worktree_path: &worktree_path,
-                    workspace_branch: &workspace.branch,
-                    worktree_created: true,
-                    branch_created: true,
-                },
-                Vec::new(),
-            ));
-        }
-    };
+    if let Err(error) = operation {
+        return Err(rollback_error(
+            error,
+            &git,
+            GitRollbackTarget {
+                repo_path: &repo_path,
+                worktree_path: &worktree_path,
+                workspace_branch: &workspace.branch,
+                worktree_created: true,
+                branch_created: true,
+            },
+            Vec::new(),
+        ));
+    }
 
     workspace.repos.push(RepoEntry {
         name: request.repo.clone(),
@@ -213,14 +210,11 @@ pub fn add<R: CommandRunner>(
             request.repo, target_branch
         )),
     });
-    workspace.multiplexer_state = applied_terminal.stored_state().clone();
     if let Err(error) =
         config_manager.save_workspace_atomic(&WorkspaceStatus::InProgress, &workspace)
     {
         return Err(rollback_error(
             error.context("failed to persist added repository"),
-            Some(&applied_terminal),
-            Some(&terminal_environment),
             &git,
             GitRollbackTarget {
                 repo_path: &repo_path,
@@ -231,6 +225,56 @@ pub fn add<R: CommandRunner>(
             },
             Vec::new(),
         ));
+    }
+    workspace_instruction_index::sync(&workspace);
+
+    let applied_terminal = match terminal_environment.apply_repository_addition(prepared_terminal) {
+        Ok(applied) => applied,
+        Err(error) => {
+            let residues = restore_workspace_after_failed_add(config_manager, &original_workspace);
+            return Err(rollback_error(
+                error,
+                &git,
+                GitRollbackTarget {
+                    repo_path: &repo_path,
+                    worktree_path: &worktree_path,
+                    workspace_branch: &workspace.branch,
+                    worktree_created: true,
+                    branch_created: true,
+                },
+                residues,
+            ));
+        }
+    };
+
+    let terminal_state_changed = workspace.multiplexer_state != *applied_terminal.stored_state();
+    workspace.multiplexer_state = applied_terminal.stored_state().clone();
+    if terminal_state_changed {
+        if let Err(error) =
+            config_manager.save_workspace_atomic(&WorkspaceStatus::InProgress, &workspace)
+        {
+            let mut residues = Vec::new();
+            if let Err(error) = terminal_environment.rollback_repository_addition(&applied_terminal)
+            {
+                residues.push(format!("terminal unit cleanup failed: {error:#}"));
+            }
+            residues.extend(restore_workspace_after_failed_add(
+                config_manager,
+                &original_workspace,
+            ));
+            return Err(rollback_error(
+                error.context("failed to persist terminal state for added repository"),
+                &git,
+                GitRollbackTarget {
+                    repo_path: &repo_path,
+                    worktree_path: &worktree_path,
+                    workspace_branch: &workspace.branch,
+                    worktree_created: true,
+                    branch_created: true,
+                },
+                residues,
+            ));
+        }
     }
 
     Ok(AddRepositoryResult {
@@ -245,6 +289,19 @@ pub fn add<R: CommandRunner>(
             TerminalUpdate::Absent
         },
     })
+}
+
+fn restore_workspace_after_failed_add(
+    config_manager: &ConfigManager,
+    original_workspace: &WorkspaceConfig,
+) -> Vec<String> {
+    match config_manager.save_workspace_atomic(&WorkspaceStatus::InProgress, original_workspace) {
+        Ok(()) => {
+            workspace_instruction_index::sync(original_workspace);
+            Vec::new()
+        }
+        Err(error) => vec![format!("workspace config rollback failed: {error:#}")],
+    }
 }
 
 struct GitRollbackTarget<'a> {
@@ -298,8 +355,6 @@ fn rollback_failed_worktree_add<R: CommandRunner>(
 
     rollback_error(
         primary,
-        None,
-        None,
         git,
         GitRollbackTarget {
             repo_path,
@@ -314,18 +369,10 @@ fn rollback_failed_worktree_add<R: CommandRunner>(
 
 fn rollback_error<R: CommandRunner>(
     primary: anyhow::Error,
-    applied_terminal: Option<&AppliedRepositoryAddition>,
-    terminal_environment: Option<&TerminalEnvironment<'_, R>>,
     git: &GitOps<'_, R>,
     git_target: GitRollbackTarget<'_>,
     mut residues: Vec<String>,
 ) -> anyhow::Error {
-    if let (Some(applied), Some(terminal_environment)) = (applied_terminal, terminal_environment) {
-        if let Err(error) = terminal_environment.rollback_repository_addition(applied) {
-            residues.push(format!("terminal unit cleanup failed: {error:#}"));
-        }
-    }
-
     if git_target.worktree_created {
         match git.worktree_remove(git_target.repo_path, git_target.worktree_path, true) {
             Ok(()) => {

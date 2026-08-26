@@ -321,6 +321,8 @@ The `[multiplexer]` configuration key and saved `[multiplexer_state]` field rema
 
 `add-repo` adds exactly one already registered repository to an `in_progress` workspace. It resolves the target branch from `--repo name:branch`, then the repo default, then the repo's current branch; missing local branches are errors. Worktree creation, merged `copy_files`, `post_create`, an existing terminal unit, membership, and the `repo_added` event form one transaction. On failure, zootree removes only the terminal unit, worktree, and Workspace branch created by that attempt. It never creates a missing terminal environment, starts or moves an agent, updates the `recently` template, or runs global `post_start`.
 
+After `start`, `reopen`, or `add-repo` commits its Workspace state or membership, zootree rewrites `AGENTS.md` and `CLAUDE.md` in the workspace root. In Workspace repository order, the first file tells agents to read each existing `<repo>/AGENTS.md`, while the second imports each existing `<repo>/CLAUDE.md` with `@<repo>/CLAUDE.md`. Only exact files at each worktree root are included. Both workspace-root files are always replaced without a generated marker and are empty when no matching repository file exists. Each replacement is atomic and best-effort: a failure is logged as a warning without failing the Workspace operation. Other commands, including `open`, do not resynchronize these files.
+
 Logs rotate daily. `log.dir` changes the directory used by both the logger and `zootree logs`, and `log.max_files` limits how many daily log files are retained. Size-based rotation such as `max_size` is not supported by the current tracing appender.
 
 ### Repo config (~/.config/zootree/repos/<name>.toml)

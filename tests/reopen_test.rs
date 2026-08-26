@@ -453,6 +453,38 @@ fn reopen_moves_done_workspace_to_in_progress_and_reuses_matching_worktree() {
 }
 
 #[test]
+fn reopen_syncs_workspace_instruction_indexes_when_hooks_are_skipped() {
+    let (_tmp, manager, workspace) = setup_archived_workspace();
+    let worktree_path = std::path::Path::new(&workspace.workspace_dir).join("frontend");
+    std::fs::create_dir_all(&worktree_path).unwrap();
+    std::fs::write(worktree_path.join("AGENTS.md"), "frontend rules").unwrap();
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout("refs/heads/zootree/calm-river\n"));
+    runner.push_response(success_stdout(&format!(
+        "worktree /repos/frontend\0HEAD 1111111\0branch refs/heads/main\0\0worktree {}\0HEAD 2222222\0branch refs/heads/zootree/calm-river\0",
+        worktree_path.display()
+    )));
+    let mut prompt = NonInteractiveReopenPrompt;
+    let plan = build_reopen_plan(
+        &manager,
+        &runner,
+        "calm-river",
+        &ReopenOptions::default(),
+        &mut prompt,
+    )
+    .unwrap();
+
+    execute_reopen_plan(&manager, &GlobalConfig::default(), &runner, plan, true).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&workspace.workspace_dir).join("AGENTS.md"))
+            .unwrap(),
+        "# Workspace repository instructions\n\n\
+- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n"
+    );
+}
+
+#[test]
 fn reopen_plan_output_describes_source_and_worktree_action() {
     let (_tmp, manager, _) = setup_archived_workspace();
     let runner = MockRunner::new();

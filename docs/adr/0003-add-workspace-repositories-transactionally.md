@@ -33,16 +33,19 @@ An existing same-named Workspace branch or any existing filesystem entry at `<wo
 2. Create the Workspace branch and worktree from the Target branch.
 3. Apply the existing merged `copy_files` behavior.
 4. Execute the existing repository-first, global-fallback `post_create` hook with complete repository context.
-5. Apply the prepared terminal addition when an existing Terminal environment was found.
-6. Append the membership and a `repo_added` event, then save them once with the terminal outcome's stored state by atomically replacing the Workspace config.
+5. Append the membership and a `repo_added` event, then atomically replace the Workspace config.
+6. Synchronize the disposable Workspace instruction indexes from the committed membership. Index write failures only warn and do not interrupt the transaction.
+7. Apply the prepared terminal addition when an existing Terminal environment was found.
+8. When the terminal outcome changes the stored state, atomically replace the Workspace config again with that state.
 
 The event detail is `repo=<name>, target_branch=<branch>`. A failed or rolled-back attempt appends neither membership nor event. A reconciled Terminal environment returns normalized opaque state; verified absence performs no terminal work and preserves the existing opaque state for normal future reconciliation. `add-repo` never triggers the Workspace-level global `post_start`.
 
 Rollback proceeds in reverse order and continues safe cleanup after individual failures:
 
 1. Remove only the adapter-native terminal unit created by the operation.
-2. Force-remove only its new worktree.
-3. After the worktree is gone, force-delete only its new Workspace branch.
+2. If membership was already persisted, restore the previous Workspace config and synchronize its instruction indexes again.
+3. Force-remove only its new worktree.
+4. After the worktree is gone, force-delete only its new Workspace branch.
 
 The final error aggregates the initiating failure and every cleanup residue. These internal force operations need no user-facing `--force` because preflight established ownership of every eligible target.
 

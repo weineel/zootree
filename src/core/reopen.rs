@@ -6,6 +6,7 @@ use crate::config::ConfigManager;
 use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{HookContext, HookEngine};
+use crate::core::workspace_instruction_index;
 use crate::runner::CommandRunner;
 use anyhow::{bail, Context, Result};
 use chrono::Local;
@@ -507,6 +508,7 @@ pub fn execute_reopen_plan<R: CommandRunner>(
             workspace_dir_created.then_some(&workspace_dir),
         ));
     }
+    workspace_instruction_index::sync(&plan.workspace);
 
     if !skip_hooks {
         hook_engine

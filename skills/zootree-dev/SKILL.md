@@ -19,6 +19,7 @@ src/
 │   ├── config.rs    # config path/show/edit recovery + agents 人类/JSON 输出
 │   ├── repo.rs      # repo add/list/edit/remove
 │   ├── add_repo.rs  # add-repo 参数、交互选择、结果输出与 core transaction 调用
+│   ├── create_flow.rs # create draft、当前 repo 发现、校验与 WorkspaceConfig 转换
 │   ├── workspace.rs # create/start/list/open/reopen/done/cancel
 │   ├── template.rs  # template list/save
 │   ├── prune.rs     # prune 清理
@@ -37,6 +38,7 @@ src/
 │   ├── git.rs       # GitOps: worktree/merge/push 等 git 操作
 │   ├── hook.rs      # HookEngine + HookContext
 │   ├── layout.rs    # LayoutRenderer: KDL 模板变量替换
+│   ├── logging.rs   # tracing 日志目录、daily rotation 与保留策略初始化
 │   ├── multiplexer/
 │   │   ├── mod.rs      # crate-private adapter command 模块
 │   │   ├── zellij.rs   # crate-private Zellij 命令翻译
@@ -55,6 +57,7 @@ src/
 │   ├── repo_status.rs # 注册 repo 配置路径存在性检查
 │   ├── reopen.rs   # archived workspace 的全量恢复计划、Git worktree 执行与回滚
 │   ├── worktree_status.rs # workspace repo worktree 路径存在性检查
+│   ├── workspace_instruction_index.rs # workspace 根 AGENTS.md/CLAUDE.md 派生索引与 best-effort 原子替换
 │   ├── workspace_repository.rs # in-progress workspace 增加 repo 的跨 Git/hook/terminal/config 事务
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template/agent alias)
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
@@ -66,7 +69,8 @@ src/
 │   │   ├── render.rs     # wizard 页面与 review/draft 面板渲染
 │   │   ├── repo_page.rs  # 仓库列表交互与显示标签
 │   │   └── text_field.rs # 基于 tui-textarea 的文本字段状态
-│   └── info.rs      # InfoApp + 格式化辅助函数
+│   ├── info.rs      # InfoApp + 格式化辅助函数
+│   └── prompt.rs    # TUI 通用确认 prompt
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
@@ -118,7 +122,9 @@ cmux、Zellij 与 Herdr 均通过 `TerminalEnvironment::activate` / `close` 路�
 
 `core::multiplexer` 是 crate-private 命令翻译实现，不提供通用 trait，也不暴露 launch、identity 或 outcome 类型。其私有模块单元测试直接验证精确 argv、环境变量清理、输出解析和 rollback；integration tests 只通过 `TerminalEnvironment` 验证生命周期 contract。
 
-`core::workspace_repository::add` 是给 `in_progress` Workspace 增加 repo 的唯一事务入口。它在副作用前完成状态、repo、Target branch、Workspace branch、worktree path 和 terminal plan 校验；成功顺序是 worktree、`copy_files`、repo-first/global-fallback `post_create`、terminal apply、membership/event 单次保存。失败时反向清理本次创建的 terminal unit、worktree 和 branch；不会执行 global `post_start`、创建缺失终端或操作 agent。CLI 只负责参数/交互和用户输出，不解释 adapter runtime ref。
+`core::workspace_repository::add` 是给 `in_progress` Workspace 增加 repo 的唯一事务入口。它在副作用前完成状态、repo、Target branch、Workspace branch、worktree path 和 terminal plan 校验；成功顺序是 worktree、`copy_files`、repo-first/global-fallback `post_create`、membership/event 原子保存、Workspace instruction index 同步、terminal apply，并仅在 terminal outcome 改变 opaque state 时再次原子保存。后半段失败时按已产生副作用的逆序清理本次 terminal unit（如有）、恢复旧 Workspace config/index，再清理 worktree 和 branch；不会执行 global `post_start`、创建缺失终端或操作 agent。CLI 只负责参数/交互和用户输出，不解释 adapter runtime ref。
+
+`core::workspace_instruction_index::sync` 是 Workspace instruction index 的唯一写入 seam。它按 `WorkspaceConfig.repos` 顺序只检测各 worktree 根目录的精确 `AGENTS.md` / `CLAUDE.md`，并直接原子替换 workspace 根目录的同名文件；没有匹配项时写零字节文件。两个文件独立 best-effort，失败通过 `tracing::warn!` 报告但不返回错误。`start`、`reopen` 与 `add-repo` 只在状态或 membership 成功持久化后调用；`open` 和其他命令不调用。
 
 `terminal_environment::zellij` 负责 session 恢复、KDL layout 准备、agent placement 和规范状态；`src/core/multiplexer/zellij.rs` 只翻译 Zellij 命令。外部 Zellij 时前台创建/attach，内部 Zellij 时后台创建或提示已存在；close 先确认 session，目标不存在视为成功，list/delete 失败进入 `CloseReport.warnings`。
 
@@ -213,7 +219,7 @@ fn test_something() {
 }
 ```
 
-Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 

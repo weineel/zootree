@@ -1,0 +1,3 @@
+# Replace Workspace instruction indexes on synchronization
+
+Workspace instruction indexes are disposable views derived from current Workspace repository membership. Whenever zootree synchronizes them, it replaces the workspace-root `AGENTS.md` and `CLAUDE.md` files unconditionally; it does not add ownership markers, merge existing content, or preserve manual edits, keeping the generated view deterministic at the cost of overwriting user changes. `start`, `reopen`, and `add-repo` synchronize only after committing their Workspace state or membership; success is silent, while a write failure produces a warning without failing or rolling back the surrounding operation.

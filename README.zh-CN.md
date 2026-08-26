@@ -315,6 +315,8 @@ cmux 是新配置推荐的终端复用器；如果省略 `[multiplexer].kind`，
 
 `add-repo` 每次只向 `in_progress` workspace 增加一个已经注册的 repo。Target branch 依次取自 `--repo name:branch`、repo 默认分支、repo 当前分支；本地分支不存在时直接报错。worktree 创建、合并后的 `copy_files`、`post_create`、已有终端单元、membership 和 `repo_added` 事件属于同一个事务。失败时只清理由本次尝试创建的终端单元、worktree 和 Workspace branch。它不会创建缺失的终端环境，不会启动或移动 agent，不会更新 `recently` template，也不会执行全局 `post_start`。
 
+`start`、`reopen` 或 `add-repo` 提交 Workspace 状态或 membership 后，zootree 会重写 workspace 根目录的 `AGENTS.md` 和 `CLAUDE.md`。前者按 Workspace repository 顺序要求 agent 读取每个实际存在的 `<repo>/AGENTS.md`，后者用 `@<repo>/CLAUDE.md` 导入每个实际存在的 `<repo>/CLAUDE.md`；只检测各 worktree 根目录中的精确文件。两个根文件始终直接覆盖且不带生成标记，没有匹配源文件时写为空文件。每个文件独立原子替换并采用 best-effort：失败只记录 warning，不会让 Workspace 操作失败。`open` 等其他命令不会重新同步这些文件。
+
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 
 ```toml

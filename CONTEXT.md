@@ -16,6 +16,10 @@ _Avoid_: Restore, resume, reactivate
 A registered repository included in a Workspace. For an in-progress Workspace, membership includes its development checkout and its place in any existing Terminal environment.
 _Avoid_: Attached repo, workspace member
 
+**Workspace instruction index**:
+A workspace-root guidance document that directs an agent to the available repository-local instructions for every Workspace repository. It is derived from current Workspace repository membership and does not copy those instructions.
+_Avoid_: Combined instructions, copied instructions
+
 **Target branch**:
 The existing branch in a registered repository from which a Workspace branch starts and into which it is later integrated.
 _Avoid_: Base branch, destination branch

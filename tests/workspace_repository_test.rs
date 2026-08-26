@@ -34,6 +34,58 @@ impl CommandRunner for CreatePathOnWorktreeAddRunner {
     }
 }
 
+struct AssertIndexBeforeTerminalRunner {
+    inner: CreatePathOnWorktreeAddRunner,
+    index_path: std::path::PathBuf,
+    expected_index: String,
+}
+
+impl CommandRunner for AssertIndexBeforeTerminalRunner {
+    fn run(&self, spec: &CommandSpec) -> anyhow::Result<Output> {
+        if spec.program == "zellij" && spec.args.iter().any(|arg| arg == "new-tab") {
+            let actual = std::fs::read_to_string(&self.index_path)?;
+            anyhow::ensure!(
+                actual == self.expected_index,
+                "workspace instruction index was not synchronized before terminal mutation"
+            );
+        }
+        self.inner.run(spec)
+    }
+
+    fn run_interactive(&self, spec: &CommandSpec) -> anyhow::Result<ExitStatus> {
+        self.inner.run_interactive(spec)
+    }
+}
+
+struct FailTerminalStatePersistenceRunner {
+    inner: MockRunner,
+    config_dir: std::path::PathBuf,
+}
+
+impl CommandRunner for FailTerminalStatePersistenceRunner {
+    fn run(&self, spec: &CommandSpec) -> anyhow::Result<Output> {
+        let is_cleanup = (spec.program == "zellij"
+            && spec.args.iter().any(|arg| arg == "close-tab"))
+            || (spec.program == "cmux" && spec.args.get(1).map(String::as_str) == Some("close"));
+        if is_cleanup {
+            std::fs::set_permissions(&self.config_dir, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        let output = self.inner.run(spec)?;
+        let is_addition = (spec.program == "zellij"
+            && spec.args.iter().any(|arg| arg == "new-tab"))
+            || (spec.program == "cmux" && spec.args.get(1).map(String::as_str) == Some("create"));
+        if is_addition && output.status.success() {
+            std::fs::set_permissions(&self.config_dir, std::fs::Permissions::from_mode(0o555))?;
+        }
+        Ok(output)
+    }
+
+    fn run_interactive(&self, spec: &CommandSpec) -> anyhow::Result<ExitStatus> {
+        self.inner.run_interactive(spec)
+    }
+}
+
 fn output(status: i32, stdout: &[u8], stderr: &[u8]) -> Output {
     Output {
         status: ExitStatus::from_raw(status << 8),
@@ -146,6 +198,123 @@ fn add_persists_membership_and_event_when_terminal_environment_is_absent() {
         ]
     );
     assert!(calls.iter().all(|call| call.program != "sh"));
+}
+
+#[test]
+fn add_syncs_workspace_instruction_indexes_after_membership_commit() {
+    let (temp, config_manager, workspace) = setup();
+    let workspace_dir = std::path::Path::new(&workspace.workspace_dir);
+    std::fs::create_dir_all(workspace_dir.join("frontend")).unwrap();
+    std::fs::write(workspace_dir.join("frontend/AGENTS.md"), "frontend rules").unwrap();
+    let backend_source = temp.path().join("backend-source");
+    std::fs::create_dir_all(&backend_source).unwrap();
+    std::fs::write(backend_source.join("AGENTS.md"), "backend rules").unwrap();
+    let mut backend = config_manager.load_repo_config("backend").unwrap();
+    backend.path = backend_source.to_string_lossy().into_owned();
+    backend.copy_files = vec!["AGENTS.md".into()];
+    config_manager
+        .save_repo_config("backend", &backend)
+        .unwrap();
+    let expected_index = "# Workspace repository instructions\n\n\
+- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n\
+- For work in `backend/`, read and follow `backend/AGENTS.md`.\n";
+    let runner = AssertIndexBeforeTerminalRunner {
+        inner: CreatePathOnWorktreeAddRunner {
+            inner: MockRunner::new(),
+            worktree_path: workspace_dir.join("backend"),
+        },
+        index_path: workspace_dir.join("AGENTS.md"),
+        expected_index: expected_index.into(),
+    };
+    runner
+        .inner
+        .inner
+        .push_response(success(b"refs/heads/main\n"));
+    runner.inner.inner.push_response(success(b""));
+    runner
+        .inner
+        .inner
+        .push_response(success(b"zootree-calm-river [Created 1m ago]\n"));
+    runner
+        .inner
+        .inner
+        .push_response(success(b"frontend\noverview\n"));
+    runner.inner.inner.push_response(success(b""));
+    runner.inner.inner.push_response(success(b"7\n"));
+    runner.inner.inner.push_response(success(b""));
+    runner.inner.inner.push_response(success(b""));
+
+    add(
+        &config_manager,
+        &GlobalConfig::default(),
+        &runner,
+        &AddRepositoryRequest {
+            workspace: workspace.name,
+            repo: "backend".into(),
+            target_branch: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
+        expected_index
+    );
+}
+
+#[test]
+fn add_restores_membership_and_indexes_when_terminal_mutation_fails() {
+    let (temp, config_manager, workspace) = setup();
+    let workspace_dir = std::path::Path::new(&workspace.workspace_dir);
+    std::fs::create_dir_all(workspace_dir.join("frontend")).unwrap();
+    std::fs::write(workspace_dir.join("frontend/AGENTS.md"), "frontend rules").unwrap();
+    let backend_source = temp.path().join("backend-source");
+    std::fs::create_dir_all(&backend_source).unwrap();
+    std::fs::write(backend_source.join("AGENTS.md"), "backend rules").unwrap();
+    let mut backend = config_manager.load_repo_config("backend").unwrap();
+    backend.path = backend_source.to_string_lossy().into_owned();
+    backend.copy_files = vec!["AGENTS.md".into()];
+    config_manager
+        .save_repo_config("backend", &backend)
+        .unwrap();
+    let runner = CreatePathOnWorktreeAddRunner {
+        inner: MockRunner::new(),
+        worktree_path: workspace_dir.join("backend"),
+    };
+    runner.inner.push_response(success(b"refs/heads/main\n"));
+    runner.inner.push_response(success(b""));
+    runner
+        .inner
+        .push_response(success(b"zootree-calm-river [Created 1m ago]\n"));
+    runner.inner.push_response(success(b"frontend\noverview\n"));
+    runner.inner.push_response(success(b""));
+    runner
+        .inner
+        .push_response(failure(b"terminal mutation failed"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b""));
+
+    let error = add(
+        &config_manager,
+        &GlobalConfig::default(),
+        &runner,
+        &AddRepositoryRequest {
+            workspace: workspace.name,
+            repo: "backend".into(),
+            target_branch: None,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("terminal mutation failed"));
+    let (_, saved) = config_manager.load_workspace("calm-river").unwrap();
+    assert_eq!(saved.repos.len(), 1);
+    assert!(saved.events.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
+        "# Workspace repository instructions\n\n\
+- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n"
+    );
 }
 
 #[test]
@@ -631,24 +800,26 @@ fn add_rejects_an_incremental_zellij_layout_without_one_marker_before_git() {
 }
 
 #[test]
-fn add_rolls_back_zellij_tab_and_git_when_persistence_fails() {
+fn add_rolls_back_zellij_tab_and_git_when_terminal_state_persistence_fails() {
     let (temp, config_manager, workspace) = setup();
     let config_path = temp
         .path()
         .join("config/workspaces/in_progress/calm-river.toml");
     let original_config = std::fs::read(&config_path).unwrap();
     let config_dir = config_path.parent().unwrap();
-    std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let runner = MockRunner::new();
-    runner.push_response(success(b"refs/heads/main\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(b"zootree-calm-river\n"));
-    runner.push_response(success(b"overview\nfrontend\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(b"9\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(b""));
-    runner.push_response(success(b""));
+    let runner = FailTerminalStatePersistenceRunner {
+        inner: MockRunner::new(),
+        config_dir: config_dir.to_path_buf(),
+    };
+    runner.inner.push_response(success(b"refs/heads/main\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b"zootree-calm-river\n"));
+    runner.inner.push_response(success(b"overview\nfrontend\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b"9\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b""));
 
     let error = add(
         &config_manager,
@@ -663,9 +834,9 @@ fn add_rolls_back_zellij_tab_and_git_when_persistence_fails() {
     .unwrap_err();
 
     std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(error.to_string().contains("persist"));
+    assert!(error.to_string().contains("persist terminal state"));
     assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
-    let calls = runner.take_calls();
+    let calls = runner.inner.take_calls();
     assert_eq!(
         calls[6].args,
         vec![
@@ -688,17 +859,19 @@ fn add_aggregates_terminal_and_branch_cleanup_residue() {
         .path()
         .join("config/workspaces/in_progress/calm-river.toml");
     let config_dir = config_path.parent().unwrap();
-    std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let runner = MockRunner::new();
-    runner.push_response(success(b"refs/heads/main\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(b"zootree-calm-river\n"));
-    runner.push_response(success(b"overview\nfrontend\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(b"9\n"));
-    runner.push_response(failure(b"tab close failed"));
-    runner.push_response(success(b""));
-    runner.push_response(failure(b"branch delete failed"));
+    let runner = FailTerminalStatePersistenceRunner {
+        inner: MockRunner::new(),
+        config_dir: config_dir.to_path_buf(),
+    };
+    runner.inner.push_response(success(b"refs/heads/main\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b"zootree-calm-river\n"));
+    runner.inner.push_response(success(b"overview\nfrontend\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b"9\n"));
+    runner.inner.push_response(failure(b"tab close failed"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(failure(b"branch delete failed"));
 
     let error = add(
         &config_manager,
@@ -714,11 +887,11 @@ fn add_aggregates_terminal_and_branch_cleanup_residue() {
 
     std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     let message = format!("{error:#}");
-    assert!(message.contains("failed to persist added repository"));
+    assert!(message.contains("failed to persist terminal state"));
     assert!(message.contains("tab close failed"));
     assert!(message.contains("branch delete failed"));
     assert!(message.contains("rollback residue"));
-    assert_eq!(runner.take_calls().len(), 9);
+    assert_eq!(runner.inner.take_calls().len(), 9);
 }
 
 #[test]
@@ -898,7 +1071,7 @@ fn add_skips_cmux_mutation_when_the_group_is_verified_absent() {
 }
 
 #[test]
-fn add_rolls_back_cmux_workspace_by_returned_ref_when_persistence_fails() {
+fn add_rolls_back_cmux_workspace_when_terminal_state_persistence_fails() {
     let (temp, config_manager, mut workspace) = setup();
     workspace.multiplexer.kind = MultiplexerKind::Cmux;
     workspace.multiplexer_state = toml::from_str(
@@ -919,19 +1092,21 @@ group = "workspace_group:2"
         .join("config/workspaces/in_progress/calm-river.toml");
     let original_config = std::fs::read(&config_path).unwrap();
     let config_dir = config_path.parent().unwrap();
-    std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let runner = MockRunner::new();
-    runner.push_response(success(b"refs/heads/main\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(
+    let runner = FailTerminalStatePersistenceRunner {
+        inner: MockRunner::new(),
+        config_dir: config_dir.to_path_buf(),
+    };
+    runner.inner.push_response(success(b"refs/heads/main\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(
         br#"{"groups":[{"name":"Add backend","ref":"workspace_group:2"}]}"#,
     ));
-    runner.push_response(success(br#"{"workspaces":[]}"#));
-    runner.push_response(success(b""));
-    runner.push_response(success(b"workspace:9\n"));
-    runner.push_response(success(b""));
-    runner.push_response(success(b""));
-    runner.push_response(success(b""));
+    runner.inner.push_response(success(br#"{"workspaces":[]}"#));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b"workspace:9\n"));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b""));
+    runner.inner.push_response(success(b""));
 
     let error = add(
         &config_manager,
@@ -946,9 +1121,9 @@ group = "workspace_group:2"
     .unwrap_err();
 
     std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(error.to_string().contains("persist"));
+    assert!(error.to_string().contains("persist terminal state"));
     assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
-    let calls = runner.take_calls();
+    let calls = runner.inner.take_calls();
     assert_eq!(calls[6].args, vec!["workspace", "close", "workspace:9"]);
     assert_eq!(calls[7].args[2..5], ["worktree", "remove", "--force"]);
     assert_eq!(calls[8].args[2..5], ["branch", "-D", "zootree/calm-river"]);

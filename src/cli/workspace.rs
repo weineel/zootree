@@ -20,6 +20,7 @@ use crate::core::reopen::{
 };
 use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::terminal_environment::{AgentIntent, CloseReport, TerminalEnvironment};
+use crate::core::workspace_instruction_index;
 use crate::core::worktree_status::{
     format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
 };
@@ -489,6 +490,7 @@ fn start_workspace_with<R: CommandRunner>(
         return finish_start_failure(err, &mut rollback, &git);
     }
     rollback.disarm();
+    workspace_instruction_index::sync(&workspace);
 
     if let Some(h) = &global.hooks.post_start {
         let ctx = HookContext {
@@ -1792,6 +1794,57 @@ group = "workspace_group:old"
                 "--force",
                 &format!("{}/api", workspace_dir.to_string_lossy()),
             ]
+        );
+    }
+
+    #[test]
+    fn start_syncs_workspace_instruction_indexes_after_state_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
+        config_mgr.ensure_dirs().unwrap();
+        config_mgr
+            .save_repo_config("api", &repo_config("/repo/api"))
+            .unwrap();
+        let workspace_dir = temp.path().join("workspaces/calm-river");
+        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
+        std::fs::write(workspace_dir.join("api/AGENTS.md"), "api rules").unwrap();
+        std::fs::write(workspace_dir.join("api/CLAUDE.md"), "api rules").unwrap();
+        let workspace = list_workspace(
+            WorkspaceStatus::Pending,
+            "calm-river",
+            "Sync instruction indexes",
+            "zootree/calm-river",
+            &workspace_dir.to_string_lossy(),
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        config_mgr
+            .save_workspace(&WorkspaceStatus::Pending, &workspace)
+            .unwrap();
+        let runner = MockRunner::new();
+        runner.push_response(success_stdout("refs/heads/main\n"));
+        runner.push_response(success_output());
+
+        start_workspace_with(
+            &config_mgr,
+            &GlobalConfig::default(),
+            &runner,
+            &StartArgs {
+                name: Some("calm-river".into()),
+                no_multiplexer: true,
+                run_agent: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
+            "# Workspace repository instructions\n\n\
+- For work in `api/`, read and follow `api/AGENTS.md`.\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_dir.join("CLAUDE.md")).unwrap(),
+            "@api/CLAUDE.md\n"
         );
     }
 
