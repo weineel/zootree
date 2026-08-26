@@ -98,6 +98,35 @@ struct TabCreatedResult {
 }
 
 #[derive(Debug, Deserialize)]
+struct TabCreateRecoveryEnvelope {
+    result: TabCreateRecoveryResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabCreateRecoveryResult {
+    tab: TabRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListResult {
+    #[serde(rename = "type")]
+    kind: String,
+    tabs: Vec<TabListRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListRecord {
+    tab_id: String,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::core) struct HerdrTab {
+    pub(in crate::core) id: String,
+    pub(in crate::core) label: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TabInfoResult {
     #[serde(rename = "type")]
     kind: String,
@@ -328,6 +357,37 @@ impl<'a, R: CommandRunner> HerdrCommands<'a, R> {
             .collect())
     }
 
+    pub(in crate::core) fn list_tabs(
+        &self,
+        session: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<HerdrTab>> {
+        let output = self.run_session(
+            session,
+            vec![
+                "tab".into(),
+                "list".into(),
+                "--workspace".into(),
+                workspace_id.into(),
+            ],
+        )?;
+        let result: TabListResult = decode_success(&output, "Herdr tab list")?;
+        if result.kind != "tab_list" {
+            bail!(
+                "Herdr tab list returned unexpected result type '{}'",
+                result.kind
+            );
+        }
+        Ok(result
+            .tabs
+            .into_iter()
+            .map(|tab| HerdrTab {
+                id: tab.tab_id,
+                label: tab.label,
+            })
+            .collect())
+    }
+
     fn ensure_ok(&self, output: std::process::Output, context: &str) -> Result<()> {
         let result: OkResult = decode_success(&output, context)?;
         if result.kind != "ok" {
@@ -398,14 +458,14 @@ impl<'a, R: CommandRunner> HerdrCommands<'a, R> {
         self.ensure_tab_info(output, "Herdr tab rename", tab_id)
     }
 
-    fn create_tab(
+    fn request_tab_create(
         &self,
         session: &str,
         workspace_id: &str,
         cwd: &str,
         label: &str,
-    ) -> Result<(String, String)> {
-        let output = self.run_session(
+    ) -> Result<std::process::Output> {
+        self.run_session(
             session,
             vec![
                 "tab".into(),
@@ -418,15 +478,18 @@ impl<'a, R: CommandRunner> HerdrCommands<'a, R> {
                 label.into(),
                 "--no-focus".into(),
             ],
-        )?;
-        let result: TabCreatedResult = decode_success(&output, "Herdr tab create")?;
-        if result.kind != "tab_created" {
-            bail!(
-                "Herdr tab create returned unexpected result type '{}'",
-                result.kind
-            );
-        }
-        Ok((result.tab.tab_id, result.root_pane.pane_id))
+        )
+    }
+
+    fn create_tab(
+        &self,
+        session: &str,
+        workspace_id: &str,
+        cwd: &str,
+        label: &str,
+    ) -> Result<(String, String)> {
+        let output = self.request_tab_create(session, workspace_id, cwd, label)?;
+        decode_tab_created(&output)
     }
 
     fn split_pane(
@@ -489,6 +552,76 @@ impl<'a, R: CommandRunner> HerdrCommands<'a, R> {
             self.ensure_ok(output, "Herdr workspace close")
         } else {
             Ok(())
+        }
+    }
+
+    pub(in crate::core) fn close_tab(&self, session: &str, tab_id: &str) -> Result<()> {
+        let output =
+            self.run_session(session, vec!["tab".into(), "close".into(), tab_id.into()])?;
+        if !output.status.success()
+            && error_body(&output)
+                .as_ref()
+                .map(|error| error.code.as_str())
+                != Some("tab_not_found")
+        {
+            bail!("Herdr tab close failed: {}", command_error_text(&output));
+        }
+        if output.status.success() {
+            self.ensure_ok(output, "Herdr tab close")
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(in crate::core) fn create_repo_tab(
+        &self,
+        session: &str,
+        workspace_id: &str,
+        cwd: &str,
+        label: &str,
+    ) -> Result<CreatedRepoTab> {
+        let create_output = self.request_tab_create(session, workspace_id, cwd, label)?;
+        let (tab_id, primary_pane_id) = match decode_tab_created(&create_output) {
+            Ok(created) => created,
+            Err(error) if !create_output.status.success() => return Err(error),
+            Err(error) => {
+                let recovery_id = tab_id_from_create_output(&create_output)
+                    .map(Some)
+                    .map(Ok)
+                    .unwrap_or_else(|| self.unique_tab_id_by_label(session, workspace_id, label));
+                return match recovery_id {
+                    Ok(Some(tab_id)) => match self.close_tab(session, &tab_id) {
+                        Ok(()) => Err(error),
+                        Err(rollback_error) => Err(anyhow::anyhow!(
+                            "{error:#}; additionally failed to roll back Herdr tab '{tab_id}': {rollback_error:#}"
+                        )),
+                    },
+                    Ok(None) => Err(anyhow::anyhow!(
+                        "{error:#}; additionally failed to identify the created Herdr tab because no exact tab named '{label}' was found"
+                    )),
+                    Err(rollback_error) => Err(anyhow::anyhow!(
+                        "{error:#}; additionally failed to identify the Herdr tab for rollback: {rollback_error:#}"
+                    )),
+                };
+            }
+        };
+        let build = (|| -> Result<()> {
+            let right_pane_id = self.split_pane(session, &primary_pane_id, "right", cwd)?;
+            self.split_pane(session, &right_pane_id, "down", cwd)?;
+            self.focus_tab(session, &tab_id)?;
+            Ok(())
+        })();
+        match build {
+            Ok(()) => Ok(CreatedRepoTab {
+                tab_id,
+                primary_pane_id,
+            }),
+            Err(error) => match self.close_tab(session, &tab_id) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(anyhow::anyhow!(
+                    "{error:#}; additionally failed to roll back Herdr tab '{tab_id}': {rollback_error:#}"
+                )),
+            },
         }
     }
 
@@ -600,6 +733,25 @@ impl<'a, R: CommandRunner> HerdrCommands<'a, R> {
             );
         }
         Ok(first.map(|workspace| workspace.id))
+    }
+
+    fn unique_tab_id_by_label(
+        &self,
+        session: &str,
+        workspace_id: &str,
+        label: &str,
+    ) -> Result<Option<String>> {
+        let mut matches = self
+            .list_tabs(session, workspace_id)?
+            .into_iter()
+            .filter(|tab| tab.label == label);
+        let first = matches.next();
+        if matches.next().is_some() {
+            bail!(
+                "Herdr tab label '{label}' is ambiguous in workspace '{workspace_id}'; refusing to guess during rollback"
+            );
+        }
+        Ok(first.map(|tab| tab.id))
     }
 
     pub(in crate::core) fn focus_workspace(&self, session: &str, workspace_id: &str) -> Result<()> {
@@ -767,6 +919,24 @@ fn decode_workspace_created(output: &std::process::Output) -> Result<CreatedWork
     })
 }
 
+fn decode_tab_created(output: &std::process::Output) -> Result<(String, String)> {
+    let result: TabCreatedResult = decode_success(output, "Herdr tab create")?;
+    if result.kind != "tab_created" {
+        bail!(
+            "Herdr tab create returned unexpected result type '{}'",
+            result.kind
+        );
+    }
+    Ok((result.tab.tab_id, result.root_pane.pane_id))
+}
+
+fn tab_id_from_create_output(output: &std::process::Output) -> Option<String> {
+    serde_json::from_slice::<TabCreateRecoveryEnvelope>(&output.stdout)
+        .ok()
+        .map(|envelope| envelope.result.tab.tab_id)
+        .filter(|tab_id| !tab_id.is_empty())
+}
+
 fn workspace_id_from_create_output(output: &std::process::Output) -> Option<String> {
     serde_json::from_slice::<WorkspaceCreateRecoveryEnvelope>(&output.stdout)
         .ok()
@@ -921,6 +1091,65 @@ mod tests {
         assert_eq!(
             runner.take_calls()[0].args,
             vec!["--session", "agents", "workspace", "list"]
+        );
+    }
+
+    #[test]
+    fn list_tabs_uses_the_workspace_filter_and_decodes_ids_and_labels() {
+        let runner = MockRunner::new();
+        runner.push_response(output(
+            0,
+            br#"{"result":{"type":"tab_list","tabs":[{"tab_id":"w7:t1","label":"overview"},{"tab_id":"w7:t2","label":"backend"}]}}"#,
+            b"",
+        ));
+
+        let tabs = HerdrCommands::new(&runner)
+            .list_tabs("agents", "w7")
+            .unwrap();
+
+        assert_eq!(
+            tabs,
+            vec![
+                HerdrTab {
+                    id: "w7:t1".into(),
+                    label: "overview".into(),
+                },
+                HerdrTab {
+                    id: "w7:t2".into(),
+                    label: "backend".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            runner.take_calls()[0].args,
+            vec!["--session", "agents", "tab", "list", "--workspace", "w7"]
+        );
+    }
+
+    #[test]
+    fn malformed_repo_tab_create_recovers_and_closes_the_unique_label_match() {
+        let runner = MockRunner::new();
+        runner.push_response(output(0, b"{truncated", b""));
+        runner.push_response(output(
+            0,
+            br#"{"result":{"type":"tab_list","tabs":[{"tab_id":"w7:t3","label":"backend"}]}}"#,
+            b"",
+        ));
+        runner.push_response(output(0, br#"{"result":{"type":"ok"}}"#, b""));
+
+        let error = HerdrCommands::new(&runner)
+            .create_repo_tab("agents", "w7", "/tmp/backend", "backend")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("malformed JSON"));
+        let calls = runner.take_calls();
+        assert_eq!(
+            calls[1].args,
+            vec!["--session", "agents", "tab", "list", "--workspace", "w7"]
+        );
+        assert_eq!(
+            calls[2].args,
+            vec!["--session", "agents", "tab", "close", "w7:t3"]
         );
     }
 

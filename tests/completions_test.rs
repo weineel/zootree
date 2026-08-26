@@ -8,7 +8,8 @@ use zootree::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use zootree::config::ConfigManager;
 use zootree::core::completers::{
     complete_agent_cli_alias_with, complete_repo_with, complete_repos_list_with,
-    complete_template_with, complete_workspace_with, WorkspaceFilter,
+    complete_single_repo_spec_with, complete_template_with, complete_workspace_with,
+    WorkspaceFilter,
 };
 
 fn make_workspace(name: &str, title: &str) -> WorkspaceConfig {
@@ -224,6 +225,19 @@ fn repo_completer_filters_by_prefix() {
 
     let cands = complete_repo_with(&mgr, OsStr::new("fr"));
     assert_eq!(names(&cands), vec!["frontend"]);
+}
+
+#[test]
+fn single_repo_spec_completer_stops_after_target_branch_separator() {
+    let (_tmp, mgr) = make_mgr();
+    mgr.save_repo_config("frontend", &make_repo("/work/fe"))
+        .unwrap();
+
+    assert_eq!(
+        names(&complete_single_repo_spec_with(&mgr, OsStr::new("fr"))),
+        vec!["frontend"]
+    );
+    assert!(complete_single_repo_spec_with(&mgr, OsStr::new("frontend:ma")).is_empty());
 }
 
 #[test]

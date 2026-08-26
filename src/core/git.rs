@@ -179,6 +179,31 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
             .collect())
     }
 
+    pub fn worktree_registered_for_branch(
+        &self,
+        repo_path: &str,
+        worktree_path: &str,
+        branch: &str,
+    ) -> Result<bool> {
+        let output = self.git(repo_path, vec!["worktree", "list", "--porcelain", "-z"])?;
+        let expected_branch = format!("refs/heads/{branch}");
+        let mut matched_path = false;
+        for field in output.stdout.split(|byte| *byte == b'\0') {
+            if field.is_empty() {
+                matched_path = false;
+            } else if let Some(path) = field.strip_prefix(b"worktree ") {
+                matched_path = path == worktree_path.as_bytes();
+            } else if matched_path {
+                if let Some(recorded_branch) = field.strip_prefix(b"branch ") {
+                    if recorded_branch == expected_branch.as_bytes() {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub fn merge(
         &self,
         repo_path: &str,

@@ -8,7 +8,7 @@ use crate::core::cmux_layout::{
 };
 use crate::core::layout::{build_agent_cli_command, build_prompt, resolve_agent_cli};
 use crate::core::multiplexer::cmux::{
-    CmuxCommands, DeleteResult, FocusResult, GroupSpec, RepoWorkspaceSpec,
+    CmuxCommands, DeleteResult, FocusResult, GroupLookup, GroupSpec, RepoWorkspaceSpec,
 };
 use crate::runner::CommandRunner;
 use anyhow::{bail, Result};
@@ -20,6 +20,134 @@ pub(super) struct CmuxStatePayload {
     pub(super) group: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) repo_workspaces: Vec<CmuxRepoWorkspaceRef>,
+}
+
+pub(super) struct PreparedRepositoryAddition {
+    group: String,
+    repo_name: String,
+    spec: RepoWorkspaceSpec,
+    payload: CmuxStatePayload,
+}
+
+pub(super) struct AppliedRepositoryAddition {
+    group: String,
+    workspace: String,
+    pub(super) stored_state: crate::config::workspace::StoredTerminalEnvironmentState,
+}
+
+pub(super) fn prepare_repository_addition<R: CommandRunner>(
+    config_manager: &ConfigManager,
+    runner: &R,
+    workspace: &WorkspaceConfig,
+    repo_name: &str,
+    worktree_path: &str,
+    stored_payload: Option<CmuxStatePayload>,
+    _warnings: Vec<String>,
+) -> Result<Option<PreparedRepositoryAddition>> {
+    let cmux = CmuxCommands::new(runner);
+    let stored_group = stored_payload
+        .as_ref()
+        .map(|payload| payload.group.as_str())
+        .filter(|group| !group.is_empty());
+    let group =
+        match cmux.lookup_group_without_focus(deterministic_group_name(workspace), stored_group)? {
+            GroupLookup::Found(group) => group,
+            GroupLookup::NotFound => return Ok(None),
+            GroupLookup::Ambiguous => bail!(
+                "cmux group '{}' is ambiguous; refusing to guess",
+                deterministic_group_name(workspace)
+            ),
+        };
+    let workspace_name = repo_workspace_name(workspace, repo_name);
+    if cmux
+        .workspace_names()?
+        .iter()
+        .any(|name| name == &workspace_name)
+    {
+        bail!("cmux already contains a workspace named '{workspace_name}'; refusing to adopt it");
+    }
+    let layout_name = workspace
+        .multiplexer
+        .cmux
+        .layout
+        .as_deref()
+        .unwrap_or("default");
+    if layout_name != "default" {
+        bail!(
+            "incremental cmux repository addition currently supports only layout = \"default\"; workspace '{}' selected '{}'",
+            workspace.name,
+            layout_name
+        );
+    }
+    let repo_config = config_manager.load_repo_config(repo_name)?;
+    let vars = CmuxLayoutVar {
+        repo_name: repo_name.into(),
+        worktree_path: worktree_path.into(),
+        branch: workspace.branch.clone(),
+        workspace_name: workspace.name.clone(),
+        workspace_dir: shellexpand::tilde(&workspace.workspace_dir).into_owned(),
+        lazygit_config: repo_config
+            .lazygit
+            .map(|config| config.config)
+            .unwrap_or_default(),
+        overview_agent_command: String::new(),
+        repo_agent_command: String::new(),
+    };
+    let repo_workspaces = if stored_group == Some(group.as_str()) {
+        stored_payload
+            .map(|payload| payload.repo_workspaces)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok(Some(PreparedRepositoryAddition {
+        group: group.clone(),
+        repo_name: repo_name.into(),
+        spec: RepoWorkspaceSpec {
+            repo_name: repo_name.into(),
+            workspace_name,
+            description: repo_name.into(),
+            cwd: worktree_path.into(),
+            layout: render_cmux_repo_layout(default_cmux_repo_layout(), &vars, None)?,
+        },
+        payload: CmuxStatePayload {
+            group,
+            repo_workspaces,
+        },
+    }))
+}
+
+pub(super) fn apply_repository_addition<R: CommandRunner>(
+    runner: &R,
+    mut prepared: PreparedRepositoryAddition,
+) -> Result<AppliedRepositoryAddition> {
+    let workspace =
+        CmuxCommands::new(runner).create_repo_workspace(&prepared.spec, &prepared.group)?;
+    prepared.payload.repo_workspaces.push(CmuxRepoWorkspaceRef {
+        repo: prepared.repo_name,
+        workspace: workspace.clone(),
+    });
+    let stored_state = encode_current_state(MultiplexerKind::Cmux, &prepared.payload)?;
+    Ok(AppliedRepositoryAddition {
+        group: prepared.group,
+        workspace,
+        stored_state,
+    })
+}
+
+pub(super) fn rollback_repository_addition<R: CommandRunner>(
+    runner: &R,
+    applied: &AppliedRepositoryAddition,
+) -> Result<()> {
+    CmuxCommands::new(runner)
+        .close_repo_workspace(&applied.workspace)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to close cmux repo workspace '{}' in group '{}': {error:#}",
+                applied.workspace,
+                applied.group
+            )
+        })
 }
 
 pub(super) fn activate<R: CommandRunner>(

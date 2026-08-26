@@ -206,6 +206,38 @@ fn worktrees_report_paths_and_checked_out_branches() {
     assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
     assert_eq!(worktrees[1].branch.as_deref(), Some("zootree/calm-river"));
     assert_eq!(worktrees[2].branch, None);
+
+    assert_eq!(
+        runner.take_calls()[0].args,
+        vec![
+            "-C",
+            "/home/user/projects/frontend",
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z"
+        ]
+    );
+}
+
+#[test]
+fn worktree_registration_requires_the_exact_path_and_branch() {
+    let runner = MockRunner::new();
+    runner.push_response(Output {
+        status: ExitStatus::from_raw(0),
+        stdout: b"worktree /home/user/projects/frontend\0HEAD abc\0branch refs/heads/main\0\0worktree /home/user/zootree-workspaces/calm-river/frontend\0HEAD def\0branch refs/heads/zootree/calm-river\0\0".to_vec(),
+        stderr: Vec::new(),
+    });
+    let git = GitOps::new(&runner);
+
+    assert!(git
+        .worktree_registered_for_branch(
+            "/home/user/projects/frontend",
+            "/home/user/zootree-workspaces/calm-river/frontend",
+            "zootree/calm-river",
+        )
+        .unwrap());
+
     assert_eq!(
         runner.take_calls()[0].args,
         vec![

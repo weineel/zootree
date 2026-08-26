@@ -9,6 +9,7 @@ use crate::core::multiplexer::zellij::{SessionLookup, ZellijCommands};
 use crate::runner::CommandRunner;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +22,19 @@ pub(super) struct ZellijAdapter<'a, R: CommandRunner> {
     global_config: &'a GlobalConfig,
     runner: &'a R,
     in_zellij: bool,
+}
+
+pub(super) struct PreparedRepositoryAddition {
+    session: String,
+    repo_name: String,
+    layout: String,
+    stored_state: crate::config::workspace::StoredTerminalEnvironmentState,
+}
+
+pub(super) struct AppliedRepositoryAddition {
+    session: String,
+    tab_id: String,
+    pub(super) stored_state: crate::config::workspace::StoredTerminalEnvironmentState,
 }
 
 impl<'a, R: CommandRunner> ZellijAdapter<'a, R> {
@@ -141,6 +155,186 @@ impl<'a, R: CommandRunner> ZellijAdapter<'a, R> {
             closed: !matches!(outcome, CloseLookupOutcome::Failed),
             warnings,
         }
+    }
+
+    pub(super) fn prepare_repository_addition(
+        &self,
+        workspace: &WorkspaceConfig,
+        repo_name: &str,
+        worktree_path: &str,
+        stored_payload: Option<ZellijStatePayload>,
+        _warnings: Vec<String>,
+    ) -> Result<Option<PreparedRepositoryAddition>> {
+        let zellij = ZellijCommands::new(self.runner, self.in_zellij);
+        let display_name = deterministic_display_name(workspace);
+        let stored_session = stored_payload
+            .as_ref()
+            .map(|payload| payload.session.as_str())
+            .filter(|session| !session.is_empty());
+
+        let session = if let Some(session) = stored_session {
+            match zellij.lookup_session(session)? {
+                SessionLookup::Unique => Some(session.to_string()),
+                SessionLookup::Ambiguous => {
+                    bail!("stored Zellij session '{session}' is ambiguous; refusing to guess")
+                }
+                SessionLookup::NotFound if session == display_name => None,
+                SessionLookup::NotFound => match zellij.lookup_session(&display_name)? {
+                    SessionLookup::Unique => Some(display_name.clone()),
+                    SessionLookup::Ambiguous => bail!(
+                        "Zellij session '{}' is ambiguous; refusing to guess",
+                        display_name
+                    ),
+                    SessionLookup::NotFound => None,
+                },
+            }
+        } else {
+            match zellij.lookup_session(&display_name)? {
+                SessionLookup::Unique => Some(display_name.clone()),
+                SessionLookup::Ambiguous => bail!(
+                    "Zellij session '{}' is ambiguous; refusing to guess",
+                    display_name
+                ),
+                SessionLookup::NotFound => None,
+            }
+        };
+
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        if zellij
+            .tab_names(&session)?
+            .iter()
+            .any(|name| name == repo_name)
+        {
+            bail!(
+                "Zellij session '{session}' already contains a tab named '{repo_name}'; refusing to adopt it"
+            );
+        }
+
+        let layout_name = workspace
+            .multiplexer
+            .zellij
+            .layout
+            .as_deref()
+            .unwrap_or("default");
+        let template = if layout_name == "default" {
+            LayoutRenderer::default_layout().to_string()
+        } else {
+            let path = self
+                .config_manager
+                .base_dir
+                .join("layouts")
+                .join(format!("{layout_name}.kdl"));
+            std::fs::read_to_string(&path).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to read Zellij layout '{}' at {}: {error}",
+                    layout_name,
+                    path.display()
+                )
+            })?
+        };
+        let repo_config = self.config_manager.load_repo_config(repo_name)?;
+        let vars = LayoutVar {
+            repo_name: repo_name.into(),
+            worktree_path: worktree_path.into(),
+            branch: workspace.branch.clone(),
+            workspace_name: workspace.name.clone(),
+            workspace_dir: shellexpand::tilde(&workspace.workspace_dir).into_owned(),
+            lazygit_config: repo_config
+                .lazygit
+                .map(|config| config.config)
+                .unwrap_or_default(),
+            overview_agent_cli: String::new(),
+            repo_agent_cli: String::new(),
+        };
+        let tab = LayoutRenderer::render_single_repo_tab(&template, &vars)?;
+        let layout = format!("layout {{\n{tab}\n}}\n");
+        let stored_state = encode_current_state(
+            MultiplexerKind::Zellij,
+            &ZellijStatePayload {
+                session: session.clone(),
+            },
+        )?;
+        Ok(Some(PreparedRepositoryAddition {
+            session,
+            repo_name: repo_name.into(),
+            layout,
+            stored_state,
+        }))
+    }
+
+    pub(super) fn apply_repository_addition(
+        &self,
+        prepared: PreparedRepositoryAddition,
+    ) -> Result<AppliedRepositoryAddition> {
+        let layout_dir = self.config_manager.base_dir.join("layouts");
+        std::fs::create_dir_all(&layout_dir)?;
+        let layout_path = layout_dir.join(format!(
+            ".zootree-add-repo-{}-{}.kdl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let mut layout_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&layout_path)?;
+        if let Err(error) = layout_file.write_all(prepared.layout.as_bytes()) {
+            let cleanup = std::fs::remove_file(&layout_path);
+            return match cleanup {
+                Ok(()) => Err(error.into()),
+                Err(cleanup_error) => Err(anyhow::anyhow!(
+                    "failed to write temporary Zellij layout {}: {error}; cleanup also failed: {cleanup_error}",
+                    layout_path.display()
+                )),
+            };
+        }
+        drop(layout_file);
+        let result = ZellijCommands::new(self.runner, self.in_zellij).create_tab(
+            &prepared.session,
+            &layout_path,
+            &prepared.repo_name,
+        );
+        let cleanup = std::fs::remove_file(&layout_path);
+        let tab_id = match (result, cleanup) {
+            (Ok(tab_id), Ok(())) => tab_id,
+            (Ok(tab_id), Err(error)) => {
+                let rollback = ZellijCommands::new(self.runner, self.in_zellij)
+                    .close_tab(&prepared.session, &tab_id);
+                return match rollback {
+                    Ok(()) => Err(anyhow::anyhow!(
+                        "failed to remove temporary Zellij layout {}: {error}",
+                        layout_path.display()
+                    )),
+                    Err(rollback_error) => Err(anyhow::anyhow!(
+                        "failed to remove temporary Zellij layout {}: {error}; additionally failed to roll back Zellij tab '{tab_id}': {rollback_error:#}",
+                        layout_path.display()
+                    )),
+                };
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Err(error), Err(cleanup_error)) => {
+                return Err(anyhow::anyhow!(
+                    "{error:#}; additionally failed to remove temporary Zellij layout {}: {cleanup_error}",
+                    layout_path.display()
+                ))
+            }
+        };
+        Ok(AppliedRepositoryAddition {
+            session: prepared.session,
+            tab_id,
+            stored_state: prepared.stored_state,
+        })
+    }
+
+    pub(super) fn rollback_repository_addition(
+        &self,
+        applied: &AppliedRepositoryAddition,
+    ) -> Result<()> {
+        ZellijCommands::new(self.runner, self.in_zellij)
+            .close_tab(&applied.session, &applied.tab_id)
     }
 }
 

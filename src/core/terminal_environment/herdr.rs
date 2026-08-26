@@ -17,6 +17,99 @@ pub(super) struct HerdrStatePayload {
     pub(super) label: String,
 }
 
+pub(super) struct PreparedRepositoryAddition {
+    session: String,
+    workspace_id: String,
+    repo_name: String,
+    worktree_path: String,
+    stored_state: crate::config::workspace::StoredTerminalEnvironmentState,
+}
+
+pub(super) struct AppliedRepositoryAddition {
+    session: String,
+    tab_id: String,
+    pub(super) stored_state: crate::config::workspace::StoredTerminalEnvironmentState,
+}
+
+pub(super) fn prepare_repository_addition<R: CommandRunner>(
+    runner: &R,
+    workspace: &WorkspaceConfig,
+    repo_name: &str,
+    worktree_path: &str,
+    stored_payload: Option<HerdrStatePayload>,
+    _warnings: Vec<String>,
+) -> Result<Option<PreparedRepositoryAddition>> {
+    let commands = HerdrCommands::new(runner);
+    commands.ensure_supported_version()?;
+    let session = stored_payload
+        .as_ref()
+        .map(|payload| payload.session.as_str())
+        .unwrap_or(&workspace.multiplexer.herdr.session);
+    if session.is_empty() {
+        bail!("Herdr named session must not be empty");
+    }
+    let existing = if let Some(payload) = &stored_payload {
+        match commands.get_workspace(session, &payload.workspace_id)? {
+            Some(existing) => Some(existing),
+            None => find_unique_workspace(&commands, session, &payload.label)?,
+        }
+    } else {
+        find_unique_workspace(&commands, session, &display_label(workspace))?
+    };
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if commands
+        .list_tabs(session, &existing.id)?
+        .iter()
+        .any(|tab| tab.label == repo_name)
+    {
+        bail!(
+            "Herdr workspace '{}' already contains a tab named '{repo_name}'; refusing to adopt it",
+            existing.id
+        );
+    }
+    let stored_state = encode_current_state(
+        MultiplexerKind::Herdr,
+        &HerdrStatePayload {
+            session: session.into(),
+            workspace_id: existing.id.clone(),
+            label: existing.label,
+        },
+    )?;
+    Ok(Some(PreparedRepositoryAddition {
+        session: session.into(),
+        workspace_id: existing.id,
+        repo_name: repo_name.into(),
+        worktree_path: worktree_path.into(),
+        stored_state,
+    }))
+}
+
+pub(super) fn apply_repository_addition<R: CommandRunner>(
+    runner: &R,
+    prepared: PreparedRepositoryAddition,
+) -> Result<AppliedRepositoryAddition> {
+    let created = HerdrCommands::new(runner).create_repo_tab(
+        &prepared.session,
+        &prepared.workspace_id,
+        &prepared.worktree_path,
+        &prepared.repo_name,
+    )?;
+    Ok(AppliedRepositoryAddition {
+        session: prepared.session,
+        tab_id: created.tab_id,
+        stored_state: prepared.stored_state,
+    })
+}
+
+pub(super) fn rollback_repository_addition<R: CommandRunner>(
+    runner: &R,
+    applied: &AppliedRepositoryAddition,
+) -> Result<()> {
+    HerdrCommands::new(runner).close_tab(&applied.session, &applied.tab_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum HerdrCallerContext {
     Outside,

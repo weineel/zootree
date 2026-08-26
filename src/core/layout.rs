@@ -79,6 +79,38 @@ impl LayoutRenderer {
         format!("{}\n\n{}{}", before.trim_end_matches('\n'), expanded, after)
     }
 
+    pub fn render_single_repo_tab(template: &str, vars: &LayoutVar) -> anyhow::Result<String> {
+        const MARKER: &str = "// @repeat-per-repo";
+        let marker_positions = template.match_indices(MARKER).collect::<Vec<_>>();
+        if marker_positions.len() != 1 {
+            anyhow::bail!(
+                "Zellij layout must contain exactly one {MARKER} marker for incremental repository tabs"
+            );
+        }
+
+        let after_marker = &template[marker_positions[0].0 + MARKER.len()..];
+        let candidate = after_marker.trim_start();
+        for (index, character) in candidate.char_indices() {
+            if character != '}' {
+                continue;
+            }
+            let block = &candidate[..index + character.len_utf8()];
+            let Ok(document) = block.parse::<kdl::KdlDocument>() else {
+                continue;
+            };
+            if document.nodes().len() == 1
+                && document.nodes()[0].name().value() == "tab"
+                && document.nodes()[0].children().is_some()
+            {
+                return Ok(Self::replace_vars(block, vars));
+            }
+        }
+
+        anyhow::bail!(
+            "Zellij layout marker must be followed by one valid tab block for incremental repository tabs"
+        )
+    }
+
     fn extract_tab_block(s: &str) -> &str {
         let mut depth = 0;
         let mut started = false;

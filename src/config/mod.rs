@@ -5,6 +5,7 @@ pub mod template;
 pub mod workspace;
 
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::PathBuf;
 
 pub struct ConfigManager {
@@ -175,6 +176,76 @@ impl ConfigManager {
         let path = self.workspace_config_path(status, &config.name)?;
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub(crate) fn save_workspace_atomic(
+        &self,
+        status: &workspace::WorkspaceStatus,
+        config: &workspace::WorkspaceConfig,
+    ) -> Result<()> {
+        let path = self.workspace_config_path(status, &config.name)?;
+        let content = toml::to_string_pretty(config)?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("workspace config path has no file name"))?
+            .to_string_lossy();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temporary_path = path.with_file_name(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            suffix
+        ));
+
+        let write_result = (|| -> Result<()> {
+            let mut temporary_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+                .with_context(|| {
+                    format!(
+                        "failed to create temporary workspace config {}",
+                        temporary_path.display()
+                    )
+                })?;
+            temporary_file
+                .write_all(content.as_bytes())
+                .with_context(|| {
+                    format!(
+                        "failed to write temporary workspace config {}",
+                        temporary_path.display()
+                    )
+                })?;
+            temporary_file.sync_all().with_context(|| {
+                format!(
+                    "failed to sync temporary workspace config {}",
+                    temporary_path.display()
+                )
+            })?;
+            std::fs::rename(&temporary_path, &path).with_context(|| {
+                format!(
+                    "failed to replace workspace config {} atomically",
+                    path.display()
+                )
+            })?;
+            Ok(())
+        })();
+
+        if let Err(error) = write_result {
+            return match std::fs::remove_file(&temporary_path) {
+                Ok(()) => Err(error),
+                Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                    Err(error)
+                }
+                Err(cleanup_error) => Err(anyhow::anyhow!(
+                    "{error:#}; additionally failed to remove temporary workspace config {}: {cleanup_error}",
+                    temporary_path.display()
+                )),
+            };
+        }
+
         Ok(())
     }
 

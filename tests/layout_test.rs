@@ -134,6 +134,47 @@ fn test_repeat_per_repo() {
 }
 
 #[test]
+fn render_single_repo_tab_requires_exactly_one_valid_marker_block() {
+    let vars = LayoutVar {
+        repo_name: "backend".into(),
+        worktree_path: "/ws/backend".into(),
+        branch: "zootree/test".into(),
+        workspace_name: "test".into(),
+        workspace_dir: "/ws".into(),
+        lazygit_config: "".into(),
+        overview_agent_cli: "".into(),
+        repo_agent_cli: "".into(),
+    };
+    let valid = r#"layout {
+    // @repeat-per-repo
+    tab name="$repo_name" {
+        pane cwd="$worktree_path"
+    }
+}"#;
+
+    let rendered = LayoutRenderer::render_single_repo_tab(valid, &vars).unwrap();
+    assert_eq!(
+        rendered,
+        "tab name=\"backend\" {\n        pane cwd=\"/ws/backend\"\n    }"
+    );
+
+    let missing = LayoutRenderer::render_single_repo_tab("layout {}", &vars).unwrap_err();
+    assert!(missing.to_string().contains("exactly one"));
+
+    let duplicate = LayoutRenderer::render_single_repo_tab(
+        "// @repeat-per-repo\ntab {}\n// @repeat-per-repo\ntab {}",
+        &vars,
+    )
+    .unwrap_err();
+    assert!(duplicate.to_string().contains("exactly one"));
+
+    let invalid =
+        LayoutRenderer::render_single_repo_tab("// @repeat-per-repo\ntab name=\"broken\" {", &vars)
+            .unwrap_err();
+    assert!(invalid.to_string().contains("valid tab block"));
+}
+
+#[test]
 fn default_layout_overview_uses_info_watch() {
     let template = LayoutRenderer::default_layout();
     assert!(

@@ -31,6 +31,13 @@ enum CmuxGroupLookup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::core) enum GroupLookup {
+    Found(String),
+    NotFound,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::core) struct RepoWorkspaceSpec {
     pub(in crate::core) repo_name: String,
     pub(in crate::core) workspace_name: String,
@@ -183,6 +190,60 @@ impl<'a, R: CommandRunner> CmuxCommands<'a, R> {
         Ok(Self::parse_group_lookup(&output.stdout, group_name))
     }
 
+    pub(in crate::core) fn lookup_group_without_focus(
+        &self,
+        group_name: &str,
+        stored_ref: Option<&str>,
+    ) -> Result<GroupLookup> {
+        let output = self.cmux(vec![
+            "workspace-group".into(),
+            "list".into(),
+            "--json".into(),
+        ])?;
+        let output = Self::ensure_success(output, "cmux workspace-group list")?;
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            anyhow::anyhow!("cmux workspace-group list returned malformed JSON: {error}")
+        })?;
+        let groups = value
+            .get("groups")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("cmux workspace-group list returned no groups array"))?;
+
+        if let Some(stored_ref) = stored_ref {
+            let matches = groups
+                .iter()
+                .filter(|group| group_ref(group) == Some(stored_ref))
+                .count();
+            match matches {
+                1 => return Ok(GroupLookup::Found(stored_ref.into())),
+                2.. => return Ok(GroupLookup::Ambiguous),
+                _ => {}
+            }
+        }
+
+        let matches = groups
+            .iter()
+            .filter(|group| group_name_value(group) == Some(group_name))
+            .filter_map(group_ref)
+            .collect::<Vec<_>>();
+        Ok(match matches.as_slice() {
+            [] => GroupLookup::NotFound,
+            [group] => GroupLookup::Found((*group).into()),
+            _ => GroupLookup::Ambiguous,
+        })
+    }
+
+    pub(in crate::core) fn workspace_names(&self) -> Result<Vec<String>> {
+        let output = self.cmux(vec!["workspace".into(), "list".into(), "--json".into()])?;
+        let output = Self::ensure_success(output, "cmux workspace list")?;
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            anyhow::anyhow!("cmux workspace list returned malformed JSON: {error}")
+        })?;
+        let mut names = Vec::new();
+        collect_workspace_names(&value, &mut names);
+        Ok(names)
+    }
+
     fn focus_group_ref(&self, group: &str) -> Result<()> {
         let output = self.cmux(vec!["workspace-group".into(), "focus".into(), group.into()])?;
         Self::ensure_success(output, "cmux workspace-group focus")?;
@@ -283,6 +344,25 @@ impl<'a, R: CommandRunner> CmuxCommands<'a, R> {
         focus: bool,
         group: Option<(&str, &str)>,
     ) -> Result<String> {
+        let output = self.request_workspace_create(name, description, cwd, layout, focus, group)?;
+        let output = Self::ensure_success(output, "cmux workspace create")?;
+        Self::parse_workspace_ref(&output).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cmux workspace create for '{}' did not return a workspace ref",
+                name
+            )
+        })
+    }
+
+    fn request_workspace_create(
+        &self,
+        name: &str,
+        description: &str,
+        cwd: &std::path::Path,
+        layout: &str,
+        focus: bool,
+        group: Option<(&str, &str)>,
+    ) -> Result<std::process::Output> {
         let mut args = vec![
             "workspace".into(),
             "create".into(),
@@ -305,14 +385,7 @@ impl<'a, R: CommandRunner> CmuxCommands<'a, R> {
                 placement.into(),
             ]);
         }
-        let output = self.cmux(args)?;
-        let output = Self::ensure_success(output, "cmux workspace create")?;
-        Self::parse_workspace_ref(&output).ok_or_else(|| {
-            anyhow::anyhow!(
-                "cmux workspace create for '{}' did not return a workspace ref",
-                name
-            )
-        })
+        self.cmux(args)
     }
 
     fn create_group(&self, name: &str, anchor_workspace: &str) -> Result<String> {
@@ -375,6 +448,81 @@ impl<'a, R: CommandRunner> CmuxCommands<'a, R> {
         let output = self.cmux(vec!["workspace".into(), "close".into(), workspace.into()])?;
         Self::ensure_success(output, "cmux workspace close")?;
         Ok(())
+    }
+
+    pub(in crate::core) fn create_repo_workspace(
+        &self,
+        spec: &RepoWorkspaceSpec,
+        group: &str,
+    ) -> Result<String> {
+        let output = self.request_workspace_create(
+            &spec.workspace_name,
+            &spec.description,
+            &spec.cwd,
+            &spec.layout,
+            true,
+            Some((group, "end")),
+        )?;
+        if !output.status.success() {
+            let primary = anyhow::anyhow!(
+                "cmux workspace create failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return match Self::parse_workspace_ref(&output) {
+                Some(workspace) => match self.close_workspace_ref(&workspace) {
+                    Ok(()) => Err(primary),
+                    Err(rollback_error) => Err(anyhow::anyhow!(
+                        "{primary:#}; additionally failed to roll back cmux workspace '{workspace}': {rollback_error:#}"
+                    )),
+                },
+                None => Err(primary),
+            };
+        }
+        if let Some(workspace) = Self::parse_workspace_ref(&output) {
+            return Ok(workspace);
+        }
+
+        let primary = anyhow::anyhow!(
+            "cmux workspace create for '{}' did not return a workspace ref",
+            spec.workspace_name
+        );
+        match self.workspace_refs_named(&spec.workspace_name) {
+            Ok(refs) if refs.len() == 1 => match self.close_workspace_ref(&refs[0]) {
+                Ok(()) => Err(primary),
+                Err(rollback_error) => Err(anyhow::anyhow!(
+                    "{primary:#}; additionally failed to roll back cmux workspace '{}': {rollback_error:#}",
+                    refs[0]
+                )),
+            },
+            Ok(refs) if refs.is_empty() => Err(anyhow::anyhow!(
+                "{primary:#}; additionally could not identify the created cmux workspace for rollback"
+            )),
+            Ok(_) => Err(anyhow::anyhow!(
+                "{primary:#}; additionally found multiple exact-name cmux workspaces and refused to guess during rollback"
+            )),
+            Err(rollback_error) => Err(anyhow::anyhow!(
+                "{primary:#}; additionally failed to inspect cmux workspaces for rollback: {rollback_error:#}"
+            )),
+        }
+    }
+
+    fn workspace_refs_named(&self, name: &str) -> Result<Vec<String>> {
+        let output = self.cmux(vec!["workspace".into(), "list".into(), "--json".into()])?;
+        let output = Self::ensure_success(output, "cmux workspace list")?;
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            anyhow::anyhow!("cmux workspace list returned malformed JSON: {error}")
+        })?;
+        let mut records = Vec::new();
+        collect_workspace_records(&value, &mut records);
+        Ok(records
+            .into_iter()
+            .filter(|record| record.name == name)
+            .map(|record| record.reference)
+            .collect())
+    }
+
+    pub(in crate::core) fn close_repo_workspace(&self, workspace: &str) -> Result<()> {
+        self.close_workspace_ref(workspace)
     }
 
     fn rollback_group_creation(&self, group: Option<&str>, workspaces: &[String]) {
@@ -484,6 +632,67 @@ impl<'a, R: CommandRunner> CmuxCommands<'a, R> {
             group,
             repo_workspaces,
         })
+    }
+}
+
+fn group_ref(group: &Value) -> Option<&str> {
+    group
+        .get("ref")
+        .or_else(|| group.get("workspace_group"))
+        .or_else(|| group.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| CmuxCommands::<crate::runner::RealRunner>::is_workspace_group_ref(value))
+}
+
+fn group_name_value(group: &Value) -> Option<&str> {
+    group
+        .get("name")
+        .or_else(|| group.get("title"))
+        .and_then(Value::as_str)
+}
+
+fn collect_workspace_names(value: &Value, names: &mut Vec<String>) {
+    let mut records = Vec::new();
+    collect_workspace_records(value, &mut records);
+    names.extend(records.into_iter().map(|record| record.name));
+}
+
+struct WorkspaceRecord {
+    name: String,
+    reference: String,
+}
+
+fn collect_workspace_records(value: &Value, records: &mut Vec<WorkspaceRecord>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_workspace_records(value, records);
+            }
+        }
+        Value::Object(object) => {
+            let workspace_ref = object
+                .get("ref")
+                .or_else(|| object.get("workspace"))
+                .or_else(|| object.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| CmuxCommands::<crate::runner::RealRunner>::is_workspace_ref(value));
+            if let Some(reference) = workspace_ref {
+                if let Some(name) = object
+                    .get("name")
+                    .or_else(|| object.get("title"))
+                    .and_then(Value::as_str)
+                {
+                    records.push(WorkspaceRecord {
+                        name: name.into(),
+                        reference: reference.into(),
+                    });
+                }
+            }
+            for value in object.values() {
+                collect_workspace_records(value, records);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -770,5 +979,64 @@ mod tests {
             runner.take_calls()[7].args,
             vec!["workspace-group", "delete", "workspace_group:2"]
         );
+    }
+
+    #[test]
+    fn repo_workspace_with_missing_ref_is_recovered_by_exact_name_and_closed() {
+        let runner = MockRunner::new();
+        runner.push_response(output(0, b"created without ref\n", b""));
+        runner.push_response(output(
+            0,
+            br#"{"workspaces":[{"name":"zootree-fair-fox-api","ref":"workspace:9"}]}"#,
+            b"",
+        ));
+        runner.push_response(output(0, b"", b""));
+        let spec = RepoWorkspaceSpec {
+            repo_name: "api".into(),
+            workspace_name: "zootree-fair-fox-api".into(),
+            description: "api".into(),
+            cwd: "/tmp/fair-fox/api".into(),
+            layout: "{}".into(),
+        };
+
+        let error = CmuxCommands::new(&runner)
+            .create_repo_workspace(&spec, "workspace_group:2")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not return a workspace ref"));
+        let calls = runner.take_calls();
+        assert_eq!(calls[1].args, vec!["workspace", "list", "--json"]);
+        assert_eq!(calls[2].args, vec!["workspace", "close", "workspace:9"]);
+    }
+
+    #[test]
+    fn failed_repo_workspace_create_only_rolls_back_a_returned_stable_ref() {
+        let runner = MockRunner::new();
+        runner.push_response(output(1, b"workspace:9\n", b"layout failed"));
+        runner.push_response(output(0, b"", b""));
+        let spec = RepoWorkspaceSpec {
+            repo_name: "api".into(),
+            workspace_name: "zootree-fair-fox-api".into(),
+            description: "api".into(),
+            cwd: "/tmp/fair-fox/api".into(),
+            layout: "{}".into(),
+        };
+
+        let error = CmuxCommands::new(&runner)
+            .create_repo_workspace(&spec, "workspace_group:2")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("layout failed"));
+        let calls = runner.take_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].args, vec!["workspace", "close", "workspace:9"]);
+
+        let runner = MockRunner::new();
+        runner.push_response(output(1, b"", b"layout failed"));
+        let error = CmuxCommands::new(&runner)
+            .create_repo_workspace(&spec, "workspace_group:2")
+            .unwrap_err();
+        assert!(error.to_string().contains("layout failed"));
+        assert_eq!(runner.take_calls().len(), 1);
     }
 }

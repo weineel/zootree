@@ -85,6 +85,24 @@ pub fn complete_repo(current: &OsStr) -> Vec<CompletionCandidate> {
     complete_repo_with(&mgr, current)
 }
 
+pub fn complete_single_repo_spec_with(
+    mgr: &ConfigManager,
+    current: &OsStr,
+) -> Vec<CompletionCandidate> {
+    if current.to_string_lossy().contains(':') {
+        Vec::new()
+    } else {
+        complete_repo_with(mgr, current)
+    }
+}
+
+pub fn complete_single_repo_spec(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Ok(mgr) = ConfigManager::new() else {
+        return vec![];
+    };
+    complete_single_repo_spec_with(&mgr, current)
+}
+
 pub fn complete_template_with(mgr: &ConfigManager, current: &OsStr) -> Vec<CompletionCandidate> {
     let prefix = current.to_string_lossy();
     let Ok(names) = mgr.list_templates() else {

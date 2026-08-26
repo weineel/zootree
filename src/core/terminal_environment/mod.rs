@@ -35,6 +35,38 @@ pub struct CloseReport {
     pub warnings: Vec<String>,
 }
 
+pub(crate) struct PreparedRepositoryAddition {
+    original_state: StoredTerminalEnvironmentState,
+    plan: Option<PreparedRepositoryAdditionPlan>,
+}
+
+enum PreparedRepositoryAdditionPlan {
+    Zellij(zellij::PreparedRepositoryAddition),
+    Cmux(cmux::PreparedRepositoryAddition),
+    Herdr(herdr::PreparedRepositoryAddition),
+}
+
+pub(crate) struct AppliedRepositoryAddition {
+    stored_state: StoredTerminalEnvironmentState,
+    rollback: Option<AppliedRepositoryAdditionRollback>,
+}
+
+enum AppliedRepositoryAdditionRollback {
+    Zellij(zellij::AppliedRepositoryAddition),
+    Cmux(cmux::AppliedRepositoryAddition),
+    Herdr(herdr::AppliedRepositoryAddition),
+}
+
+impl AppliedRepositoryAddition {
+    pub(crate) fn stored_state(&self) -> &StoredTerminalEnvironmentState {
+        &self.stored_state
+    }
+
+    pub(crate) fn was_updated(&self) -> bool {
+        self.rollback.is_some()
+    }
+}
+
 /// Stable synchronous lifecycle facade for a workspace's terminal environment.
 ///
 /// Workspace callers use only this adapter-neutral facade; adapter-specific
@@ -159,6 +191,126 @@ impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
                     self.in_zellij,
                 )
                 .close(workspace, stored_payload, warnings)
+            }
+        }
+    }
+
+    pub(crate) fn prepare_repository_addition(
+        &self,
+        workspace: &WorkspaceConfig,
+        repo_name: &str,
+        worktree_path: &str,
+    ) -> Result<PreparedRepositoryAddition> {
+        let original_state = workspace.multiplexer_state.clone();
+        let decoded = decode_stored_state(&workspace.multiplexer_state);
+        let plan = match selected_adapter(workspace, &decoded) {
+            MultiplexerKind::Herdr => {
+                let (stored_payload, warnings) = herdr_state(decoded);
+                herdr::prepare_repository_addition(
+                    self.runner,
+                    workspace,
+                    repo_name,
+                    worktree_path,
+                    stored_payload,
+                    warnings,
+                )?
+                .map(PreparedRepositoryAdditionPlan::Herdr)
+            }
+            MultiplexerKind::Cmux => {
+                let (stored_payload, warnings) = cmux_state(decoded);
+                cmux::prepare_repository_addition(
+                    self.config_manager,
+                    self.runner,
+                    workspace,
+                    repo_name,
+                    worktree_path,
+                    stored_payload,
+                    warnings,
+                )?
+                .map(PreparedRepositoryAdditionPlan::Cmux)
+            }
+            MultiplexerKind::Zellij => {
+                let (stored_payload, warnings) = zellij_state(decoded);
+                zellij::ZellijAdapter::new(
+                    self.config_manager,
+                    self.global_config,
+                    self.runner,
+                    self.in_zellij,
+                )
+                .prepare_repository_addition(
+                    workspace,
+                    repo_name,
+                    worktree_path,
+                    stored_payload,
+                    warnings,
+                )?
+                .map(PreparedRepositoryAdditionPlan::Zellij)
+            }
+        };
+        Ok(PreparedRepositoryAddition {
+            original_state,
+            plan,
+        })
+    }
+
+    pub(crate) fn apply_repository_addition(
+        &self,
+        prepared: PreparedRepositoryAddition,
+    ) -> Result<AppliedRepositoryAddition> {
+        let Some(plan) = prepared.plan else {
+            return Ok(AppliedRepositoryAddition {
+                stored_state: prepared.original_state,
+                rollback: None,
+            });
+        };
+
+        let (stored_state, rollback) = match plan {
+            PreparedRepositoryAdditionPlan::Zellij(prepared) => {
+                let applied = zellij::ZellijAdapter::new(
+                    self.config_manager,
+                    self.global_config,
+                    self.runner,
+                    self.in_zellij,
+                )
+                .apply_repository_addition(prepared)?;
+                let state = applied.stored_state.clone();
+                (state, AppliedRepositoryAdditionRollback::Zellij(applied))
+            }
+            PreparedRepositoryAdditionPlan::Cmux(prepared) => {
+                let applied = cmux::apply_repository_addition(self.runner, prepared)?;
+                let state = applied.stored_state.clone();
+                (state, AppliedRepositoryAdditionRollback::Cmux(applied))
+            }
+            PreparedRepositoryAdditionPlan::Herdr(prepared) => {
+                let applied = herdr::apply_repository_addition(self.runner, prepared)?;
+                let state = applied.stored_state.clone();
+                (state, AppliedRepositoryAdditionRollback::Herdr(applied))
+            }
+        };
+        Ok(AppliedRepositoryAddition {
+            stored_state,
+            rollback: Some(rollback),
+        })
+    }
+
+    pub(crate) fn rollback_repository_addition(
+        &self,
+        applied: &AppliedRepositoryAddition,
+    ) -> Result<()> {
+        match applied.rollback.as_ref() {
+            None => Ok(()),
+            Some(AppliedRepositoryAdditionRollback::Zellij(applied)) => zellij::ZellijAdapter::new(
+                self.config_manager,
+                self.global_config,
+                self.runner,
+                self.in_zellij,
+            )
+            .rollback_repository_addition(applied),
+            Some(AppliedRepositoryAdditionRollback::Cmux(applied)) => {
+                cmux::rollback_repository_addition(self.runner, applied)
+            }
+            Some(AppliedRepositoryAdditionRollback::Herdr(applied)) => {
+                herdr::rollback_repository_addition(self.runner, applied)
             }
         }
     }

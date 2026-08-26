@@ -135,6 +135,9 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
         Commands::Reopen(args) => {
             zootree::cli::workspace::handle_reopen(&args)?;
         }
+        Commands::AddRepo(args) => {
+            zootree::cli::add_repo::handle_add_repo(&args)?;
+        }
         Commands::Info(args) => {
             zootree::cli::info::handle_info(&args)?;
         }

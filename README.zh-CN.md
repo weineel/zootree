@@ -101,6 +101,7 @@ zootree 支持 5 种 shell 的补全：bash、zsh、fish、PowerShell、elvish�
 - 所有子命令和 flag
 - `zootree start <TAB>` — pending 状态的 workspace
 - `zootree open <TAB>` / `zootree done <TAB>` — in-progress 状态的 workspace
+- `zootree add-repo <TAB>` — in-progress 状态的 workspace；`--repo <TAB>` 补全已注册 repo
 - `zootree cancel <TAB>` — pending 或 in-progress 状态的 workspace
 - `zootree reopen <TAB>` — done 或 canceled 状态的 workspace
 - `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — 已注册的 repo
@@ -228,6 +229,9 @@ zootree reopen [name]                # 将已归档 workspace 恢复为 in-progr
   --no-multiplexer                   # 恢复后不激活终端环境
   --run-agent [alias|command]        # 新建终端环境时启动 agent
 
+zootree add-repo [workspace]         # 给 in-progress workspace 增加一个已注册 repo
+  --repo <repo[:target-branch]>      # 指定 repo 和可选目标分支
+
 zootree done [name]                  # 完成工作空间
   --no-merge                         # 不合并
   --no-clean                         # 不清理
@@ -309,6 +313,8 @@ cmux 是新配置推荐的终端复用器；如果省略 `[multiplexer].kind`，
 
 `reopen` 将 `done` 或 `canceled` workspace 恢复为 `in_progress`。命令会先规划所有 repo：优先复用本地任务分支，其次在不执行 fetch 的前提下使用 remote-tracking 任务分支；两者都不存在时，交互模式让用户选择从 repo 当前 revision 或指定分支重建任务分支。脚本必须通过 `--from current` 和/或可重复的 `--from <repo>:<branch>` 明确选择。匹配的现有 worktree 可以复用；覆盖任何已占用路径都需要交互确认或显式 `--overwrite <repo>`。新建和覆盖的 worktree 会重新复制文件并执行 `post_create`；所有 repo 成功后，zootree 记录 `reopened`、迁移到 `in_progress`、执行 `post_start` 并激活终端环境。reopen 后的 workspace 使用当前 `~/.config/zootree/config.toml` 中的全局 `[multiplexer]` 配置，并丢弃 archived terminal state；只有覆盖 worktree 前关闭旧环境时才使用 archived terminal 数据。可用 `--dry-run` 查看完整只读计划。
 
+`add-repo` 每次只向 `in_progress` workspace 增加一个已经注册的 repo。Target branch 依次取自 `--repo name:branch`、repo 默认分支、repo 当前分支；本地分支不存在时直接报错。worktree 创建、合并后的 `copy_files`、`post_create`、已有终端单元、membership 和 `repo_added` 事件属于同一个事务。失败时只清理由本次尝试创建的终端单元、worktree 和 Workspace branch。它不会创建缺失的终端环境，不会启动或移动 agent，不会更新 `recently` template，也不会执行全局 `post_start`。
+
 ### 仓库配置 (~/.config/zootree/repos/<name>.toml)
 
 ```toml
@@ -344,6 +350,8 @@ Hook 可用环境变量：
 - `ZOOTREE_WORKTREE_PATH` - worktree 路径
 - `ZOOTREE_WORKSPACE_DIR` - 工作空间目录
 
+`add-repo` 优先执行 repo 级 `post_create`，未配置时回退到全局 `post_create`。全局 `post_start` 是 Workspace 启动 hook，只在 `start` 时执行，增加 repo 时不会执行。
+
 ### Zellij 布局模板 (~/.config/zootree/layouts/<name>.kdl)
 
 ```kdl
@@ -362,6 +370,8 @@ layout {
 - `@WORKSPACE_NAME@` - 工作空间名
 - `@WORKSPACE_DIR@` - 工作空间目录
 
+增量执行 `add-repo` 时，所选 Zellij layout 必须包含且只包含一个有效的 `// @repeat-per-repo` marker，后面紧跟 repo `tab` block。zootree 只渲染该 block 并追加新 tab；marker 缺失或重复会在创建 worktree 前报错。
+
 ### cmux group 布局
 
 当 `[multiplexer] kind = "cmux"` 时，zootree 会为每个 zootree workspace 创建一个 cmux workspace group。
@@ -370,6 +380,7 @@ layout {
 - group anchor 左侧运行 `zootree info <workspace> --watch`。
 - group anchor 右侧只有一个 terminal：多 repo 且使用 `--run-agent` 时运行 agent；不加 `--run-agent` 时是普通 shell。
 - group 内每个 repo 一个 workspace。
+- `add-repo` 只会在已有 group 末尾追加并聚焦一个 repo workspace，不会重建或 attach；group 不存在时跳过终端变更。
 - 每个 repo workspace 使用 50/50 分栏：左侧是 agent-or-shell terminal，右侧上下各是一个普通 shell。
 - 单 repo 时，`--run-agent` 在左侧运行 agent；多 repo 时 agent 在 group anchor 运行，每个 repo 左侧都是普通 shell。不加 `--run-agent` 时，左侧也是普通 shell。cmux 默认 repo 布局不再启动 lazygit。
 
@@ -380,6 +391,7 @@ Group-aware cmux 当前只支持 `layout = "default"`。非 default cmux layout 
 当 `[multiplexer] kind = "herdr"` 时，zootree 要求 Herdr 0.8.0+，并在显式配置的 named session 中把一个 zootree workspace 映射为一个 Herdr workspace。
 
 - zootree 创建一个 `overview` tab 和每个 repo 对应的 tab。overview 使用 50/50 分栏，左侧运行 `zootree info <workspace> --watch`；每个 repo tab 左侧是 primary shell，右侧上下各一个 shell。
+- `add-repo` 只会在已有 Herdr workspace 中追加并聚焦一个 repo tab，不会 attach client；workspace 不存在时跳过终端变更。
 - zootree 只拥有并关闭该 Herdr workspace；不会启动或停止 Herdr server/named session，也不会让 Herdr 管理 Git worktree。
 - `start` 与 `open` 通过持久化 workspace ID 和精确 label 恢复。已有环境中用户调整过的 tab/pane 只会被聚焦，不会被修复或重建。
 - 从 Herdr 外部激活时会 attach 到配置的 named session；从 Herdr 内部调用时绝不嵌套 client，若调用者位于其他 session，则返回明确的 `herdr session attach <session>` 指引。

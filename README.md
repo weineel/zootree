@@ -104,6 +104,7 @@ Restart your shell (or `source` the rc file) to activate.
 - All subcommands and flags
 - `zootree start <TAB>` — pending workspaces
 - `zootree open <TAB>` / `zootree done <TAB>` — in-progress workspaces
+- `zootree add-repo <TAB>` — in-progress workspaces; `--repo <TAB>` completes registered repos
 - `zootree cancel <TAB>` — pending or in-progress workspaces
 - `zootree reopen <TAB>` — done or canceled workspaces
 - `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — registered repos
@@ -233,6 +234,9 @@ zootree reopen [name]                # Reopen an archived workspace as in-progre
   --no-multiplexer                   # Don't activate the terminal environment after recovery
   --run-agent [alias|command]        # Launch an agent if a terminal environment is created
 
+zootree add-repo [workspace]         # Add one registered repo to an in-progress workspace
+  --repo <repo[:target-branch]>      # Select repo and optional target branch
+
 zootree done [name]                  # Finish a workspace
   --no-merge                         # Skip merge
   --no-clean                         # Skip cleanup
@@ -315,6 +319,8 @@ The `[multiplexer]` configuration key and saved `[multiplexer_state]` field rema
 
 `reopen` returns a `done` or `canceled` workspace to `in_progress`. It first plans every repository: an existing local task branch is reused, otherwise a remote-tracking task branch is preferred without fetching; if neither exists, interactive use asks whether to recreate the task branch from the repo's current revision or a specified branch. Scripts must make that choice with `--from current` and/or repeatable `--from <repo>:<branch>`. Existing matching worktrees can be reused; replacing any occupied path requires an interactive confirmation or explicit `--overwrite <repo>`. New and overwritten worktrees rerun file copying and `post_create`; after all repositories succeed, zootree records `reopened`, moves the workspace to `in_progress`, runs `post_start`, and activates the terminal environment. The reopened workspace uses the current global `[multiplexer]` configuration from `~/.config/zootree/config.toml` and discards its archived terminal state; archived terminal data is used only when an overwrite must first close the old environment. Use `--dry-run` to inspect the full read-only plan.
 
+`add-repo` adds exactly one already registered repository to an `in_progress` workspace. It resolves the target branch from `--repo name:branch`, then the repo default, then the repo's current branch; missing local branches are errors. Worktree creation, merged `copy_files`, `post_create`, an existing terminal unit, membership, and the `repo_added` event form one transaction. On failure, zootree removes only the terminal unit, worktree, and Workspace branch created by that attempt. It never creates a missing terminal environment, starts or moves an agent, updates the `recently` template, or runs global `post_start`.
+
 Logs rotate daily. `log.dir` changes the directory used by both the logger and `zootree logs`, and `log.max_files` limits how many daily log files are retained. Size-based rotation such as `max_size` is not supported by the current tracing appender.
 
 ### Repo config (~/.config/zootree/repos/<name>.toml)
@@ -352,6 +358,8 @@ Available environment variables in hooks:
 - `ZOOTREE_WORKTREE_PATH` - Worktree path
 - `ZOOTREE_WORKSPACE_DIR` - Workspace directory
 
+For `add-repo`, a repo-level `post_create` takes precedence over the global `post_create` fallback. Global `post_start` is a Workspace activation hook and runs only during `start`, never when adding a repository.
+
 ### Zellij layout templates (~/.config/zootree/layouts/<name>.kdl)
 
 ```kdl
@@ -370,6 +378,8 @@ Available variables:
 - `@WORKSPACE_NAME@` - Workspace name
 - `@WORKSPACE_DIR@` - Workspace directory
 
+Incremental `add-repo` requires the selected Zellij layout to contain exactly one valid `// @repeat-per-repo` marker followed by the repo `tab` block. zootree renders only that block for the new repo and appends the resulting tab. A missing or duplicate marker is a preflight error; no worktree is created.
+
 ### cmux group layout
 
 When `[multiplexer] kind = "cmux"`, zootree creates one cmux workspace group per zootree workspace.
@@ -378,6 +388,7 @@ When `[multiplexer] kind = "cmux"`, zootree creates one cmux workspace group per
 - The group anchor runs `zootree info <workspace> --watch` on the left.
 - The group anchor's right side is a single terminal: with multiple repos, `--run-agent` runs the agent there; without `--run-agent`, it is a regular shell.
 - The group contains one workspace per repo.
+- `add-repo` appends one focused repo workspace to an existing group without rebuilding or attaching to it. If the group is absent, terminal mutation is skipped.
 - Each repo workspace uses a 50/50 split: one agent-or-shell terminal on the left, and two regular shells stacked on the right.
 - With one repo, `--run-agent` runs on the left. With multiple repos, the agent runs in the group anchor and each repo's left terminal is a regular shell. Without `--run-agent`, the left terminal is also a regular shell. The default cmux repo layout does not launch lazygit.
 
@@ -388,6 +399,7 @@ Group-aware cmux currently supports only `layout = "default"`. Non-default cmux 
 When `[multiplexer] kind = "herdr"`, zootree requires Herdr 0.8.0+ and maps one zootree workspace to one Herdr workspace in the explicitly configured named session.
 
 - zootree creates an `overview` tab plus one tab per repository. The overview uses a 50/50 split with `zootree info <workspace> --watch` on the left; each repository tab has a primary shell on the left and two shells stacked on the right.
+- `add-repo` appends and focuses one repo tab in an existing Herdr workspace without attaching a client. If the workspace is absent, terminal mutation is skipped.
 - zootree owns and closes only that Herdr workspace. It does not start or stop the Herdr server or named session, and it does not use Herdr to manage Git worktrees.
 - `start` and `open` recover by stored workspace ID and exact label. Existing user-modified tabs and panes are focused without being repaired or recreated.
 - Outside Herdr, activation attaches to the configured named session. Inside Herdr, it never nests another client; a caller in another session receives an explicit `herdr session attach <session>` instruction.

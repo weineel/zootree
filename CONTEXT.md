@@ -12,6 +12,18 @@ _Avoid_: Project, task workspace
 The lifecycle action that returns a done or canceled Workspace to in progress so work can continue.
 _Avoid_: Restore, resume, reactivate
 
+**Workspace repository**:
+A registered repository included in a Workspace. For an in-progress Workspace, membership includes its development checkout and its place in any existing Terminal environment.
+_Avoid_: Attached repo, workspace member
+
+**Target branch**:
+The existing branch in a registered repository from which a Workspace branch starts and into which it is later integrated.
+_Avoid_: Base branch, destination branch
+
+**Workspace branch**:
+The development branch named by a Workspace and created in each Workspace repository. Its ownership is established only when zootree creates it.
+_Avoid_: Feature branch, worktree branch
+
 **Terminal environment**:
 The complete set of terminals managed as one lifecycle object for a zootree workspace, independent of the terminal multiplexer's native object model.
 _Avoid_: Multiplexer session, terminal session

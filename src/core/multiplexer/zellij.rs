@@ -197,6 +197,98 @@ impl<'a, R: CommandRunner> ZellijCommands<'a, R> {
         }
         Ok(())
     }
+
+    pub(in crate::core) fn tab_names(&self, session_name: &str) -> Result<Vec<String>> {
+        let output = self.zellij(vec![
+            "--session".into(),
+            session_name.into(),
+            "action".into(),
+            "query-tab-names".into(),
+        ])?;
+        if !output.status.success() {
+            bail!(
+                "zellij query-tab-names failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub(in crate::core) fn create_tab(
+        &self,
+        session_name: &str,
+        layout_path: &Path,
+        tab_name: &str,
+    ) -> Result<String> {
+        let output = self.zellij(vec![
+            "--session".into(),
+            session_name.into(),
+            "action".into(),
+            "new-tab".into(),
+            "--layout".into(),
+            layout_path.to_string_lossy().into_owned(),
+            "--name".into(),
+            tab_name.into(),
+        ])?;
+        if !output.status.success() {
+            bail!(
+                "zellij new-tab failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        let tab_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !tab_id.is_empty() && tab_id.chars().all(|character| character.is_ascii_digit()) {
+            return Ok(tab_id);
+        }
+
+        let primary_error = anyhow::anyhow!(
+            "zellij new-tab did not return a numeric tab ID: '{}'",
+            tab_id
+        );
+        let matches = match self.tab_names(session_name) {
+            Ok(names) => names.into_iter().filter(|name| name == tab_name).count(),
+            Err(inspection_error) => {
+                return Err(anyhow::anyhow!(
+                    "{primary_error:#}; rollback residue: failed to inspect Zellij tabs after creation: {inspection_error:#}"
+                ));
+            }
+        };
+        match matches {
+            0 => Err(anyhow::anyhow!(
+                "{primary_error:#}; rollback residue: the created Zellij tab could not be identified"
+            )),
+            1 => Err(anyhow::anyhow!(
+                "{primary_error:#}; rollback residue: a tab named '{tab_name}' now exists in session '{session_name}', but it could not be closed safely without a stable tab ID"
+            )),
+            _ => Err(anyhow::anyhow!(
+                "{primary_error:#}; rollback residue: tab name '{tab_name}' is ambiguous in session '{session_name}'"
+            )),
+        }
+    }
+
+    pub(in crate::core) fn close_tab(&self, session_name: &str, tab_id: &str) -> Result<()> {
+        let output = self.zellij(vec![
+            "--session".into(),
+            session_name.into(),
+            "action".into(),
+            "close-tab".into(),
+            "--tab-id".into(),
+            tab_id.into(),
+        ])?;
+        if !output.status.success() {
+            bail!(
+                "zellij close-tab failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -340,5 +432,64 @@ mod tests {
             runner.take_calls()[0].args,
             vec!["delete-session", "--force", "zootree-fair-fox"]
         );
+    }
+
+    #[test]
+    fn create_tab_passes_the_name_and_returns_the_numeric_id() {
+        let runner = MockRunner::new();
+        runner.push_response(output(0, b"7\n", b""));
+
+        let tab_id = ZellijCommands::new(&runner, false)
+            .create_tab("zootree-fair-fox", Path::new("/tmp/backend.kdl"), "backend")
+            .unwrap();
+
+        assert_eq!(tab_id, "7");
+        assert_eq!(
+            runner.take_calls()[0].args,
+            vec![
+                "--session",
+                "zootree-fair-fox",
+                "action",
+                "new-tab",
+                "--layout",
+                "/tmp/backend.kdl",
+                "--name",
+                "backend"
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_success_response_reports_residue_without_closing_by_focus() {
+        let runner = MockRunner::new();
+        runner.push_response(output(0, b"created\n", b""));
+        runner.push_response(output(0, b"overview\nbackend\n", b""));
+
+        let error = ZellijCommands::new(&runner, false)
+            .create_tab("zootree-fair-fox", Path::new("/tmp/backend.kdl"), "backend")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("numeric tab ID"));
+        assert!(error.to_string().contains("rollback residue"));
+        assert!(error.to_string().contains("stable tab ID"));
+        let calls = runner.take_calls();
+        assert_eq!(
+            calls[1].args,
+            vec!["--session", "zootree-fair-fox", "action", "query-tab-names"]
+        );
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn failed_create_does_not_inspect_or_close_tabs() {
+        let runner = MockRunner::new();
+        runner.push_response(output(1, b"", b"layout rejected"));
+
+        let error = ZellijCommands::new(&runner, false)
+            .create_tab("zootree-fair-fox", Path::new("/tmp/backend.kdl"), "backend")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("layout rejected"));
+        assert_eq!(runner.take_calls().len(), 1);
     }
 }

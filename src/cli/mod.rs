@@ -1,3 +1,4 @@
+pub mod add_repo;
 pub mod completions;
 pub mod config;
 pub mod create_flow;
@@ -44,6 +45,8 @@ pub enum Commands {
     Open(workspace::OpenArgs),
     #[command(about = "Reopen a done or canceled workspace")]
     Reopen(workspace::ReopenArgs),
+    #[command(about = "Add a registered repository to an in-progress workspace")]
+    AddRepo(add_repo::AddRepoArgs),
     #[command(about = "Show detailed info about a workspace")]
     Info(info::InfoArgs),
     #[command(about = "Complete a workspace (merge, clean up worktrees)")]

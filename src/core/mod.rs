@@ -13,4 +13,5 @@ pub mod reopen;
 pub mod repo_names;
 pub mod repo_status;
 pub mod terminal_environment;
+pub mod workspace_repository;
 pub mod worktree_status;
