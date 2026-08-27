@@ -1,5 +1,6 @@
 use chrono::Local;
 use std::ffi::OsStr;
+use std::process::Command;
 use tempfile::TempDir;
 use zootree::config::global::{GlobalConfig, HooksConfig, MultiplexerConfig};
 use zootree::config::repo::RepoConfig;
@@ -371,6 +372,71 @@ fn dynamic_zsh_registration_dispatches_to_complete_env() {
     assert!(
         !s.contains("completions:Generate"),
         "zsh script looks like AOT output (contains subcommand list): {s}"
+    );
+}
+
+#[test]
+fn cancel_completion_runs_through_dynamic_binary() {
+    let home = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(home.path().join(".config/zootree"));
+    mgr.ensure_dirs().unwrap();
+    save(
+        &mgr,
+        WorkspaceStatus::Pending,
+        "cancel-pending-fixture",
+        "Pending cancel completion",
+    );
+    save(
+        &mgr,
+        WorkspaceStatus::InProgress,
+        "cancel-running-fixture",
+        "Running cancel completion",
+    );
+    save(
+        &mgr,
+        WorkspaceStatus::Done,
+        "cancel-done-fixture",
+        "Done cancel completion",
+    );
+    save(
+        &mgr,
+        WorkspaceStatus::Canceled,
+        "cancel-canceled-fixture",
+        "Canceled cancel completion",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zootree"))
+        .env("HOME", home.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "zootree", "cancel", ""])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dynamic completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let candidates: Vec<&str> = stdout.lines().collect();
+
+    assert!(
+        candidates.contains(&"cancel-pending-fixture:Pending cancel completion (pending)"),
+        "pending workspace missing from candidates: {stdout}"
+    );
+    assert!(
+        candidates.contains(&"cancel-running-fixture:Running cancel completion (in_progress)"),
+        "in-progress workspace missing from candidates: {stdout}"
+    );
+    assert!(
+        !stdout.contains("cancel-done-fixture"),
+        "done workspace should not be a cancel candidate: {stdout}"
+    );
+    assert!(
+        !stdout.contains("cancel-canceled-fixture"),
+        "canceled workspace should not be a cancel candidate: {stdout}"
     );
 }
 

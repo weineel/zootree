@@ -122,11 +122,14 @@ repo path, or template repos) next to each candidate.
 If completions don't activate after install, verify the dynamic interceptor:
 
 ```bash
-COMPLETE=zsh zootree -- zootree start ''
+COMPLETE=zsh _CLAP_COMPLETE_INDEX=2 _CLAP_IFS=$'\n' zootree -- zootree cancel ''
 ```
 
 This should output candidates one per line. If empty, ensure you have
-workspaces with the expected status (`zootree list`).
+workspaces with the expected status (`zootree list`). If the command prints
+candidates but Tab still does nothing, reload the current shell with
+`source ~/.zshrc` (or rerun `eval "$(zootree completions zsh)"` after
+`compinit`).
 
 ## Quick Start
 

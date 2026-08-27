@@ -119,10 +119,13 @@ repo 路径、或 template 涵盖的 repo 列表）。
 补全无响应时，可直接验证动态拦截器：
 
 ```bash
-COMPLETE=zsh zootree -- zootree start ''
+COMPLETE=zsh _CLAP_COMPLETE_INDEX=2 _CLAP_IFS=$'\n' zootree -- zootree cancel ''
 ```
 
 应当每行输出一个候选项。若为空，确认是否有匹配状态的 workspace（`zootree list`）。
+如果该命令能输出候选，但按 Tab 仍无响应，请在当前 shell 中执行
+`source ~/.zshrc`（或在 `compinit` 后重新执行
+`eval "$(zootree completions zsh)"`）。
 
 ## 快速开始
 
