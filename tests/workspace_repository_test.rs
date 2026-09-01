@@ -362,7 +362,7 @@ future_field = "keep-me"
 }
 
 #[test]
-fn add_prefers_repo_post_create_and_passes_the_full_hook_context() {
+fn add_prefers_repo_post_create_and_passes_the_full_hook_invocation() {
     let (_temp, config_manager, workspace) = setup();
     let mut repo = config_manager.load_repo_config("backend").unwrap();
     repo.hooks.post_create = Some(HookValue::Simple("repo-hook".into()));
@@ -396,6 +396,35 @@ fn add_prefers_repo_post_create_and_passes_the_full_hook_context() {
     assert_eq!(hooks.len(), 1);
     assert_eq!(hooks[0].args, vec!["-c", "repo-hook"]);
     assert_eq!(hooks[0].cwd.as_deref(), Some(result.worktree_path.as_str()));
+    assert_eq!(
+        hooks[0].env.get("ZOOTREE_HOOK").map(String::as_str),
+        Some("post_create")
+    );
+    assert_eq!(
+        hooks[0].env.get("ZOOTREE_OPERATION").map(String::as_str),
+        Some("add-repo")
+    );
+    assert_eq!(
+        hooks[0]
+            .env
+            .get("ZOOTREE_HOOK_CONFIG_SCOPE")
+            .map(String::as_str),
+        Some("repo")
+    );
+    assert_eq!(
+        hooks[0]
+            .env
+            .get("ZOOTREE_WORKSPACE_STATUS")
+            .map(String::as_str),
+        Some("in_progress")
+    );
+    assert_eq!(
+        hooks[0]
+            .env
+            .get("ZOOTREE_REPO_SOURCE_DIR")
+            .map(String::as_str),
+        Some("/repos/backend")
+    );
     assert_eq!(
         hooks[0].env.get("ZOOTREE_WORKSPACE").map(String::as_str),
         Some("calm-river")
@@ -462,6 +491,13 @@ fn add_uses_global_post_create_when_the_repo_hook_is_absent() {
         .collect::<Vec<_>>();
     assert_eq!(hooks.len(), 1);
     assert_eq!(hooks[0].args, vec!["-c", "global-hook"]);
+    assert_eq!(
+        hooks[0]
+            .env
+            .get("ZOOTREE_HOOK_CONFIG_SCOPE")
+            .map(String::as_str),
+        Some("global")
+    );
 }
 
 #[test]

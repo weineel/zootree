@@ -13,7 +13,9 @@ use crate::core::completers::{
 };
 use crate::core::copy_files;
 use crate::core::git::GitOps;
-use crate::core::hook::{HookContext, HookEngine};
+use crate::core::hook::{
+    HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
+};
 use crate::core::reopen::{
     build_reopen_plan, execute_reopen_plan, format_reopen_plan, ReopenBase, ReopenLifecyclePlan,
     ReopenOptions, ReopenPrompt, ReopenSources, WorktreeAction,
@@ -448,21 +450,21 @@ fn start_workspace_with<R: CommandRunner>(
                 )?;
             }
 
-            let hook = repo_config
-                .hooks
-                .post_create
-                .as_ref()
-                .or(global.hooks.post_create.as_ref());
-            if let Some(h) = hook {
-                let ctx = HookContext {
-                    workspace: workspace.name.clone(),
-                    repo: Some(repo_entry.name.clone()),
-                    branch: workspace.branch.clone(),
-                    target_branch: Some(target_branch.clone()),
-                    worktree_path: Some(worktree_path.clone()),
-                    workspace_dir: ws_dir.clone(),
-                };
-                hook_engine.execute(h, &ctx)?;
+            if let Some(invocation) = HookInvocation::for_repository(
+                repo_config.hooks.post_create.as_ref(),
+                global.hooks.post_create.as_ref(),
+                HookStage::PostCreate,
+                HookOperation::Start,
+                WorkspaceStatus::Pending,
+                &workspace,
+                RepositoryHookContext {
+                    name: &repo_entry.name,
+                    source_dir: &repo_path,
+                    worktree_path: &worktree_path,
+                    target_branch: Some(&target_branch),
+                },
+            ) {
+                hook_engine.execute(&invocation)?;
             }
         }
 
@@ -492,16 +494,14 @@ fn start_workspace_with<R: CommandRunner>(
     rollback.disarm();
     workspace_instruction_index::sync(&workspace);
 
-    if let Some(h) = &global.hooks.post_start {
-        let ctx = HookContext {
-            workspace: workspace.name.clone(),
-            repo: None,
-            branch: workspace.branch.clone(),
-            target_branch: None,
-            worktree_path: None,
-            workspace_dir: ws_dir.clone(),
-        };
-        hook_engine.execute(h, &ctx)?;
+    if let Some(invocation) = HookInvocation::for_workspace(
+        global.hooks.post_start.as_ref(),
+        HookStage::PostStart,
+        HookOperation::Start,
+        WorkspaceStatus::InProgress,
+        &workspace,
+    ) {
+        hook_engine.execute(&invocation)?;
     }
 
     Ok(workspace)
@@ -1294,18 +1294,16 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
 
     // pre_done hook
     if !args.skip_hooks {
-        if let Err(e) = hook_engine.execute_if_set(
-            &global.hooks.pre_done,
-            &HookContext {
-                workspace: workspace.name.clone(),
-                repo: None,
-                branch: workspace.branch.clone(),
-                target_branch: None,
-                worktree_path: None,
-                workspace_dir: ws_dir.clone(),
-            },
+        if let Some(invocation) = HookInvocation::for_workspace(
+            global.hooks.pre_done.as_ref(),
+            HookStage::PreDone,
+            HookOperation::Done,
+            WorkspaceStatus::InProgress,
+            &workspace,
         ) {
-            warn_or_bail(args.force, e, "pre_done hook failed")?;
+            if let Err(e) = hook_engine.execute(&invocation) {
+                warn_or_bail(args.force, e, "pre_done hook failed")?;
+            }
         }
     }
 
@@ -1375,24 +1373,22 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
 
         // Clean
         if !args.no_clean {
-            let hook = repo_config
-                .hooks
-                .pre_remove
-                .as_ref()
-                .or(global.hooks.pre_remove.as_ref());
-            if let Some(h) = hook {
-                if !args.skip_hooks {
-                    if let Err(e) = hook_engine.execute(
-                        h,
-                        &HookContext {
-                            workspace: workspace.name.clone(),
-                            repo: Some(repo_entry.name.clone()),
-                            branch: workspace.branch.clone(),
-                            target_branch: Some(target_branch.clone()),
-                            worktree_path: Some(worktree_path.clone()),
-                            workspace_dir: ws_dir.clone(),
-                        },
-                    ) {
+            if !args.skip_hooks {
+                if let Some(invocation) = HookInvocation::for_repository(
+                    repo_config.hooks.pre_remove.as_ref(),
+                    global.hooks.pre_remove.as_ref(),
+                    HookStage::PreRemove,
+                    HookOperation::Done,
+                    WorkspaceStatus::InProgress,
+                    &workspace,
+                    RepositoryHookContext {
+                        name: &repo_entry.name,
+                        source_dir: &repo_path,
+                        worktree_path: &worktree_path,
+                        target_branch: Some(&target_branch),
+                    },
+                ) {
+                    if let Err(e) = hook_engine.execute(&invocation) {
                         warn_or_bail(args.force, e, "pre_remove hook failed")?;
                     }
                 }
@@ -1482,18 +1478,16 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 
     // pre_cancel hook
     if !args.skip_hooks {
-        if let Err(e) = hook_engine.execute_if_set(
-            &global.hooks.pre_cancel,
-            &HookContext {
-                workspace: workspace.name.clone(),
-                repo: None,
-                branch: workspace.branch.clone(),
-                target_branch: None,
-                worktree_path: None,
-                workspace_dir: ws_dir.clone(),
-            },
+        if let Some(invocation) = HookInvocation::for_workspace(
+            global.hooks.pre_cancel.as_ref(),
+            HookStage::PreCancel,
+            HookOperation::Cancel,
+            WorkspaceStatus::InProgress,
+            &workspace,
         ) {
-            warn_or_bail(args.force, e, "pre_cancel hook failed")?;
+            if let Err(e) = hook_engine.execute(&invocation) {
+                warn_or_bail(args.force, e, "pre_cancel hook failed")?;
+            }
         }
     }
 
@@ -1517,24 +1511,22 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
             let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
 
             // pre_remove hook
-            let hook = repo_config
-                .hooks
-                .pre_remove
-                .as_ref()
-                .or(global.hooks.pre_remove.as_ref());
-            if let Some(h) = hook {
-                if !args.skip_hooks {
-                    if let Err(e) = hook_engine.execute(
-                        h,
-                        &HookContext {
-                            workspace: workspace.name.clone(),
-                            repo: Some(repo_entry.name.clone()),
-                            branch: workspace.branch.clone(),
-                            target_branch: repo_entry.target_branch.clone(),
-                            worktree_path: Some(worktree_path.clone()),
-                            workspace_dir: ws_dir.clone(),
-                        },
-                    ) {
+            if !args.skip_hooks {
+                if let Some(invocation) = HookInvocation::for_repository(
+                    repo_config.hooks.pre_remove.as_ref(),
+                    global.hooks.pre_remove.as_ref(),
+                    HookStage::PreRemove,
+                    HookOperation::Cancel,
+                    WorkspaceStatus::InProgress,
+                    &workspace,
+                    RepositoryHookContext {
+                        name: &repo_entry.name,
+                        source_dir: &repo_path,
+                        worktree_path: &worktree_path,
+                        target_branch: repo_entry.target_branch.as_deref(),
+                    },
+                ) {
+                    if let Err(e) = hook_engine.execute(&invocation) {
                         warn_or_bail(args.force, e, "pre_remove hook failed")?;
                     }
                 }
@@ -1785,6 +1777,28 @@ group = "workspace_group:old"
         assert_eq!(status, WorkspaceStatus::Pending);
         let calls = runner.take_calls();
         assert_eq!(
+            calls[2].env.get("ZOOTREE_HOOK").map(String::as_str),
+            Some("post_create")
+        );
+        assert_eq!(
+            calls[2].env.get("ZOOTREE_OPERATION").map(String::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            calls[2]
+                .env
+                .get("ZOOTREE_WORKSPACE_STATUS")
+                .map(String::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            calls[2]
+                .env
+                .get("ZOOTREE_REPO_SOURCE_DIR")
+                .map(String::as_str),
+            Some("/repo/api")
+        );
+        assert_eq!(
             calls[3].args,
             vec![
                 "-C",
@@ -1795,6 +1809,66 @@ group = "workspace_group:old"
                 &format!("{}/api", workspace_dir.to_string_lossy()),
             ]
         );
+    }
+
+    #[test]
+    fn start_runs_post_start_with_the_persisted_in_progress_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
+        config_mgr.ensure_dirs().unwrap();
+        config_mgr
+            .save_repo_config("api", &repo_config("/repo/api"))
+            .unwrap();
+        let workspace_dir = temp.path().join("workspaces/calm-river");
+        let workspace = list_workspace(
+            WorkspaceStatus::Pending,
+            "calm-river",
+            "Start workspace hook",
+            "zootree/calm-river",
+            &workspace_dir.to_string_lossy(),
+            vec![repo("api", Some("main"))],
+        )
+        .workspace;
+        config_mgr
+            .save_workspace(&WorkspaceStatus::Pending, &workspace)
+            .unwrap();
+        let mut global = GlobalConfig::default();
+        global.hooks.post_start = Some(crate::config::global::HookValue::Simple(
+            "after-start".into(),
+        ));
+        let runner = MockRunner::new();
+        runner.push_response(success_stdout("refs/heads/main\n"));
+        runner.push_response(success_output());
+        runner.push_response(success_output());
+
+        start_workspace_with(
+            &config_mgr,
+            &global,
+            &runner,
+            &StartArgs {
+                name: Some("calm-river".into()),
+                no_multiplexer: true,
+                run_agent: None,
+            },
+        )
+        .unwrap();
+
+        let calls = runner.take_calls();
+        let hook = calls.iter().find(|call| call.program == "sh").unwrap();
+        assert_eq!(hook.args, vec!["-c", "after-start"]);
+        assert_eq!(
+            hook.env.get("ZOOTREE_HOOK").map(String::as_str),
+            Some("post_start")
+        );
+        assert_eq!(
+            hook.env.get("ZOOTREE_OPERATION").map(String::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            hook.env.get("ZOOTREE_WORKSPACE_STATUS").map(String::as_str),
+            Some("in_progress")
+        );
+        assert_eq!(hook.cwd.as_deref(), Some(workspace_dir.to_str().unwrap()));
     }
 
     #[test]

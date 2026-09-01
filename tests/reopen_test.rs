@@ -696,8 +696,22 @@ fn post_create_failure_keeps_workspace_archived_and_rolls_back_created_worktree(
     let (status, persisted) = manager.load_workspace("calm-river").unwrap();
     assert_eq!(status, WorkspaceStatus::Canceled);
     assert!(persisted.events.is_empty());
+    let calls = runner.take_calls();
+    let hook = calls.iter().find(|call| call.program == "sh").unwrap();
     assert_eq!(
-        runner.take_calls().last().unwrap().args,
+        hook.env.get("ZOOTREE_HOOK").map(String::as_str),
+        Some("post_create")
+    );
+    assert_eq!(
+        hook.env.get("ZOOTREE_OPERATION").map(String::as_str),
+        Some("reopen")
+    );
+    assert_eq!(
+        hook.env.get("ZOOTREE_WORKSPACE_STATUS").map(String::as_str),
+        Some("canceled")
+    );
+    assert_eq!(
+        calls.last().unwrap().args,
         vec![
             "-C".to_string(),
             "/repos/frontend".to_string(),
@@ -741,7 +755,21 @@ fn post_start_failure_is_partial_success_after_reopen_transition() {
     let (status, persisted) = manager.load_workspace("calm-river").unwrap();
     assert_eq!(status, WorkspaceStatus::InProgress);
     assert_eq!(persisted.events.last().unwrap().action, "reopened");
-    assert_eq!(runner.take_calls().len(), 4);
+    let calls = runner.take_calls();
+    assert_eq!(calls.len(), 4);
+    let hook = calls.iter().find(|call| call.program == "sh").unwrap();
+    assert_eq!(
+        hook.env.get("ZOOTREE_HOOK").map(String::as_str),
+        Some("post_start")
+    );
+    assert_eq!(
+        hook.env.get("ZOOTREE_OPERATION").map(String::as_str),
+        Some("reopen")
+    );
+    assert_eq!(
+        hook.env.get("ZOOTREE_WORKSPACE_STATUS").map(String::as_str),
+        Some("in_progress")
+    );
 }
 
 #[test]

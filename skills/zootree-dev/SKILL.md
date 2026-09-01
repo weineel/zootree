@@ -36,7 +36,7 @@ src/
 │   ├── mod.rs
 │   ├── agent_cli.rs # agent 默认值、alias 解析与共享 catalog
 │   ├── git.rs       # GitOps: worktree/merge/push 等 git 操作
-│   ├── hook.rs      # HookEngine + HookContext
+│   ├── hook.rs      # HookEngine + typed HookInvocation
 │   ├── layout.rs    # LayoutRenderer: KDL 模板变量替换
 │   ├── logging.rs   # tracing 日志目录、daily rotation 与保留策略初始化
 │   ├── multiplexer/
@@ -95,6 +95,12 @@ pub struct MockRunner {     // 测试用
 ```
 
 所有 `core/` 模块的函数接受 `&R: CommandRunner` 泛型参数。
+
+### Hook invocation 门面
+
+`src/core/hook.rs` 以类型化 `HookInvocation` 作为 Hook module 的唯一执行 interface。Workspace 与 repo invocation 分别通过 `for_workspace` / `for_repository` 构造；`HookStage`、`HookOperation` 和 `WorkspaceStatus` 明确执行阶段与持久化状态。repo 构造器接收 repo/global 两个候选 Hook，在 module 内统一执行 repo-first/global-fallback 并生成配置来源，调用者不能单独伪造 provenance。
+
+`HookEngine::execute` 根据 invocation 统一派生 cwd 和环境变量。每次执行先通过 `CommandSpec.env_remove` 清除所有官方 `ZOOTREE_*` Hook 变量，再只注入当前 scope 适用的值；普通父进程环境仍继承。repo invocation 同时暴露注册仓库 Source checkout 与 Workspace worktree，workspace invocation 不暴露 repo-only 变量。完整环境合同和 lifecycle 矩阵记录在 `docs/adr/0005-make-hook-environments-deterministic.md`。
 
 ### Terminal environment 生命周期门面
 
@@ -219,7 +225,7 @@ fn test_something() {
 }
 ```
 
-Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 
@@ -255,6 +261,7 @@ Terminal environment 的 activate/close contract 放在 `tests/terminal_environm
 - **rename_all**: workspace status 使用 `#[serde(rename_all = "snake_case")]`
 - **workspace status 展示**: 用户可见 status 字符串统一使用 `WorkspaceStatus::as_str()`，不要从 `Debug` 派生后手动 lowercase
 - **untagged enum**: `HookValue` 使用 `#[serde(untagged)]` 支持三种格式
+- **Hook invocation**: lifecycle caller 只通过 `HookInvocation::for_workspace` / `for_repository` 构造上下文，并调用 `HookEngine::execute`；repo/global 优先级、cwd、环境映射和官方变量清理由 Hook module 统一负责
 - **multiplexer 分组**: 所有终端复用器配置统一在 `MultiplexerConfig` 中（`src/config/global.rs`），字段用 `#[serde(default)]` 嵌入各配置 struct；默认 `kind = "zellij"`；Zellij 支持 `layouts/<name>.kdl`，cmux group-aware 模式当前只支持 `layout = "default"`，Herdr 首版仅配置显式 named `session`
 - **multiplexer kind 展示**: 用户可见的 adapter 名称统一使用 `MultiplexerKind::as_str()`，不要在调用模块重复维护枚举到字符串的映射
 - **cmux group state**: cmux mode maps one zootree workspace to one cmux workspace group. `workspace-group create --from <first-repo>` creates a default header/anchor; zootree then creates its own anchor workspace with the `zootree info` layout, uses `workspace-group set-anchor`, and closes the generated default anchor. Legacy `cmux_group` / `cmux_repo_workspaces` / `cmux_workspace` / `cmux_anchor_workspace` remain readable；成功 activate 后统一写入 `multiplexer_state` 的 `version = 1`、`adapter = "cmux"` 和 private payload，不再写 legacy shape。
@@ -276,8 +283,10 @@ Terminal environment 的 activate/close contract 放在 `tests/terminal_environm
 ### 添加新的 Hook 事件
 
 1. 在 `src/config/global.rs` 的 `HooksConfig` 中添加 `pub <hook_name>: Option<HookValue>`
-2. 在对应功能点调用 `hook_engine.execute_if_set(&config.hooks.<hook_name>, &ctx)`
-3. 构造 `HookContext` 时填充相关字段
+2. 在 `src/core/hook.rs` 添加对应 `HookStage` variant 与稳定字符串值，并把新增官方环境变量同步加入清理清单
+3. 在 lifecycle caller 用 `HookInvocation::for_workspace` 或 `for_repository` 构造精确的 Trigger operation 与持久化状态；repo invocation 同时传 repo/global 候选配置
+4. 通过 `HookEngine::execute` 执行，并在 `tests/hook_test.rs` 与对应 lifecycle 测试补齐矩阵、cwd、环境和失败边界
+5. 同步两个 README、`skills/zootree-usage/references/configuration.md` 与 ADR contract
 
 ### 给新命令添加动态补全
 

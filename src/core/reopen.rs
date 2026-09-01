@@ -5,7 +5,9 @@ use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::copy_files;
 use crate::core::git::GitOps;
-use crate::core::hook::{HookContext, HookEngine};
+use crate::core::hook::{
+    HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
+};
 use crate::core::workspace_instruction_index;
 use crate::runner::CommandRunner;
 use anyhow::{bail, Context, Result};
@@ -438,23 +440,21 @@ pub fn execute_reopen_plan<R: CommandRunner>(
             }
 
             if !skip_hooks {
-                let hook = repo_config
-                    .hooks
-                    .post_create
-                    .as_ref()
-                    .or(global.hooks.post_create.as_ref());
-                if let Some(hook) = hook {
-                    hook_engine.execute(
-                        hook,
-                        &HookContext {
-                            workspace: plan.workspace.name.clone(),
-                            repo: Some(repo.repo_name.clone()),
-                            branch: plan.workspace.branch.clone(),
-                            target_branch: repo.target_branch.clone(),
-                            worktree_path: Some(repo.worktree_path.clone()),
-                            workspace_dir: workspace_dir.to_string_lossy().into_owned(),
-                        },
-                    )?;
+                if let Some(invocation) = HookInvocation::for_repository(
+                    repo_config.hooks.post_create.as_ref(),
+                    global.hooks.post_create.as_ref(),
+                    HookStage::PostCreate,
+                    HookOperation::Reopen,
+                    plan.from_status.clone(),
+                    &plan.workspace,
+                    RepositoryHookContext {
+                        name: &repo.repo_name,
+                        source_dir: &repo.repo_path,
+                        worktree_path: &repo.worktree_path,
+                        target_branch: repo.target_branch.as_deref(),
+                    },
+                ) {
+                    hook_engine.execute(&invocation)?;
                 }
             }
         }
@@ -511,24 +511,20 @@ pub fn execute_reopen_plan<R: CommandRunner>(
     workspace_instruction_index::sync(&plan.workspace);
 
     if !skip_hooks {
-        hook_engine
-            .execute_if_set(
-                &global.hooks.post_start,
-                &HookContext {
-                    workspace: plan.workspace.name.clone(),
-                    repo: None,
-                    branch: plan.workspace.branch.clone(),
-                    target_branch: None,
-                    worktree_path: None,
-                    workspace_dir: workspace_dir.to_string_lossy().into_owned(),
-                },
-            )
-            .map_err(|error| {
+        if let Some(invocation) = HookInvocation::for_workspace(
+            global.hooks.post_start.as_ref(),
+            HookStage::PostStart,
+            HookOperation::Reopen,
+            WorkspaceStatus::InProgress,
+            &plan.workspace,
+        ) {
+            hook_engine.execute(&invocation).map_err(|error| {
                 anyhow::anyhow!(
                     "workspace '{}' reopened and remains in_progress, but post_start hook failed: {error:#}",
                     plan.workspace.name
                 )
             })?;
+        }
     }
 
     Ok(plan.workspace)

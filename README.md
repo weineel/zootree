@@ -352,18 +352,24 @@ post_create = "echo hello"
 pre_remove = { file = "~/.config/zootree/hooks/cleanup.sh" }
 
 # Inline script
-pre_done = { inline = "echo 'cleaning up' && rm -rf $ZOOTREE_WORKTREE_PATH" }
+pre_done = { inline = "echo checking $ZOOTREE_WORKSPACE_DIR" }
 ```
 
-Available environment variables in hooks:
-- `ZOOTREE_WORKSPACE` - Workspace name
-- `ZOOTREE_REPO` - Repository name
-- `ZOOTREE_BRANCH` - Branch name
-- `ZOOTREE_TARGET_BRANCH` - Target branch
-- `ZOOTREE_WORKTREE_PATH` - Worktree path
-- `ZOOTREE_WORKSPACE_DIR` - Workspace directory
+Every hook receives:
 
-For `add-repo`, a repo-level `post_create` takes precedence over the global `post_create` fallback. Global `post_start` is a Workspace activation hook and runs only during `start`, never when adding a repository.
+- `ZOOTREE_HOOK` - Hook stage (`post_create`, `post_start`, `pre_done`, `pre_cancel`, or `pre_remove`)
+- `ZOOTREE_OPERATION` - Trigger operation (`start`, `reopen`, `add-repo`, `done`, or `cancel`)
+- `ZOOTREE_HOOK_SCOPE` - Execution scope (`workspace` or `repo`)
+- `ZOOTREE_HOOK_CONFIG_SCOPE` - Selected configuration scope (`global` or `repo`)
+- `ZOOTREE_WORKSPACE`, `ZOOTREE_WORKSPACE_TITLE`, `ZOOTREE_WORKSPACE_DESCRIPTION` - Workspace identity and user-authored context
+- `ZOOTREE_WORKSPACE_STATUS` - Persisted status when the hook starts
+- `ZOOTREE_WORKSPACE_DIR` - Expanded Workspace root directory
+- `ZOOTREE_BRANCH` - Workspace branch
+- `ZOOTREE_VERSION` - Version of the running zootree binary
+
+Repository-scoped hooks additionally receive `ZOOTREE_REPO`, `ZOOTREE_REPO_SOURCE_DIR`, `ZOOTREE_WORKTREE_PATH`, and `ZOOTREE_TARGET_BRANCH` when available. They run with the Workspace repository checkout as cwd; Workspace-scoped hooks run with the Workspace root as cwd. zootree removes inherited official `ZOOTREE_*` hook variables before injecting the current invocation, so an absent repo-only variable never carries stale parent context.
+
+For repository hooks, repository configuration takes precedence over the global fallback. Global `post_start` runs during `start` and `reopen`, but never when adding a repository.
 
 ### Zellij layout templates (~/.config/zootree/layouts/<name>.kdl)
 

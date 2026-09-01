@@ -344,18 +344,24 @@ post_create = "echo hello"
 pre_remove = { file = "~/.config/zootree/hooks/cleanup.sh" }
 
 # 内联脚本
-pre_done = { inline = "echo 'cleaning up' && rm -rf $ZOOTREE_WORKTREE_PATH" }
+pre_done = { inline = "echo checking $ZOOTREE_WORKSPACE_DIR" }
 ```
 
-Hook 可用环境变量：
-- `ZOOTREE_WORKSPACE` - 工作空间名称
-- `ZOOTREE_REPO` - 仓库名称
-- `ZOOTREE_BRANCH` - 分支名
-- `ZOOTREE_TARGET_BRANCH` - 目标分支
-- `ZOOTREE_WORKTREE_PATH` - worktree 路径
-- `ZOOTREE_WORKSPACE_DIR` - 工作空间目录
+所有 Hook 都会收到：
 
-`add-repo` 优先执行 repo 级 `post_create`，未配置时回退到全局 `post_create`。全局 `post_start` 是 Workspace 启动 hook，只在 `start` 时执行，增加 repo 时不会执行。
+- `ZOOTREE_HOOK` - Hook 阶段（`post_create`、`post_start`、`pre_done`、`pre_cancel` 或 `pre_remove`）
+- `ZOOTREE_OPERATION` - 触发操作（`start`、`reopen`、`add-repo`、`done` 或 `cancel`）
+- `ZOOTREE_HOOK_SCOPE` - 执行范围（`workspace` 或 `repo`）
+- `ZOOTREE_HOOK_CONFIG_SCOPE` - 实际选中的配置范围（`global` 或 `repo`）
+- `ZOOTREE_WORKSPACE`、`ZOOTREE_WORKSPACE_TITLE`、`ZOOTREE_WORKSPACE_DESCRIPTION` - Workspace 身份与用户描述
+- `ZOOTREE_WORKSPACE_STATUS` - Hook 开始时已经持久化的状态
+- `ZOOTREE_WORKSPACE_DIR` - 展开后的 Workspace 根目录
+- `ZOOTREE_BRANCH` - Workspace branch
+- `ZOOTREE_VERSION` - 当前运行的 zootree 版本
+
+repo 级 Hook 还会收到 `ZOOTREE_REPO`、`ZOOTREE_REPO_SOURCE_DIR`、`ZOOTREE_WORKTREE_PATH`，以及可用时的 `ZOOTREE_TARGET_BRANCH`。repo 级 Hook 的 cwd 是对应 Workspace repository checkout；workspace 级 Hook 的 cwd 是 Workspace 根目录。zootree 会先移除父进程继承的全部官方 `ZOOTREE_*` Hook 变量，再注入本次 invocation 的真实值，因此缺失的 repo-only 变量不会携带陈旧上下文。
+
+repo 级 Hook 优先使用 repo 配置，未配置时回退到全局配置。全局 `post_start` 会在 `start` 与 `reopen` 中执行，但增加 repo 时不会执行。
 
 ### Zellij 布局模板 (~/.config/zootree/layouts/<name>.kdl)
 

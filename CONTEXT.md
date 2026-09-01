@@ -16,6 +16,14 @@ _Avoid_: Restore, resume, reactivate
 A registered repository included in a Workspace. For an in-progress Workspace, membership includes its development checkout and its place in any existing Terminal environment.
 _Avoid_: Attached repo, workspace member
 
+**Registered repository**:
+A repository known globally to zootree and available for inclusion in Workspaces. Its Source checkout is separate from every Workspace repository checkout.
+_Avoid_: Workspace repository, repo config
+
+**Source checkout**:
+The configured checkout belonging to a Registered repository, used as the source for Workspace repository Git operations and setup inputs.
+_Avoid_: Workspace worktree, original repo, base repo
+
 **Workspace instruction index**:
 A workspace-root guidance document that directs an agent to the available repository-local instructions for every Workspace repository. It is derived from current Workspace repository membership and does not copy those instructions.
 _Avoid_: Combined instructions, copied instructions
@@ -27,6 +35,18 @@ _Avoid_: Base branch, destination branch
 **Workspace branch**:
 The development branch named by a Workspace and created in each Workspace repository. Its ownership is established only when zootree creates it.
 _Avoid_: Feature branch, worktree branch
+
+**Hook stage**:
+A named point in a Workspace lifecycle where zootree invokes configured automation. Multiple Trigger operations may reach the same Hook stage.
+_Avoid_: Hook event, lifecycle event
+
+**Hook invocation**:
+One execution of configured automation at a Hook stage, scoped to either a Workspace or one Workspace repository and attributed to one Trigger operation.
+_Avoid_: Hook event, lifecycle event
+
+**Trigger operation**:
+The Workspace operation whose workflow reaches a Hook stage. It identifies why automation is running, independently of where it runs in the lifecycle.
+_Avoid_: Hook stage, event
 
 **Terminal environment**:
 The complete set of terminals managed as one lifecycle object for a zootree workspace, independent of the terminal multiplexer's native object model.

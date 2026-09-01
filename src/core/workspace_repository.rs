@@ -8,7 +8,9 @@ use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatu
 use crate::config::ConfigManager;
 use crate::core::copy_files;
 use crate::core::git::GitOps;
-use crate::core::hook::{HookContext, HookEngine};
+use crate::core::hook::{
+    HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
+};
 use crate::core::terminal_environment::TerminalEnvironment;
 use crate::core::workspace_instruction_index;
 use crate::runner::CommandRunner;
@@ -161,23 +163,21 @@ pub fn add<R: CommandRunner>(
             )?;
         }
 
-        if let Some(hook) = repo_config
-            .hooks
-            .post_create
-            .as_ref()
-            .or(global_config.hooks.post_create.as_ref())
-        {
-            HookEngine::new(runner).execute(
-                hook,
-                &HookContext {
-                    workspace: workspace.name.clone(),
-                    repo: Some(request.repo.clone()),
-                    branch: workspace.branch.clone(),
-                    target_branch: Some(target_branch.clone()),
-                    worktree_path: Some(worktree_path.clone()),
-                    workspace_dir: workspace_dir.clone(),
-                },
-            )?;
+        if let Some(invocation) = HookInvocation::for_repository(
+            repo_config.hooks.post_create.as_ref(),
+            global_config.hooks.post_create.as_ref(),
+            HookStage::PostCreate,
+            HookOperation::AddRepo,
+            WorkspaceStatus::InProgress,
+            &workspace,
+            RepositoryHookContext {
+                name: &request.repo,
+                source_dir: &repo_path,
+                worktree_path: &worktree_path,
+                target_branch: Some(&target_branch),
+            },
+        ) {
+            HookEngine::new(runner).execute(&invocation)?;
         }
 
         Ok(())

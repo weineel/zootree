@@ -115,4 +115,6 @@ pre_remove = { file = "~/.config/zootree/hooks/cleanup.sh" }
 pre_done = { inline = "echo 'checking...' && cargo test" }
 ```
 
-Hook 可用的环境变量：`ZOOTREE_WORKSPACE`、`ZOOTREE_REPO`、`ZOOTREE_BRANCH`、`ZOOTREE_TARGET_BRANCH`、`ZOOTREE_WORKTREE_PATH`、`ZOOTREE_WORKSPACE_DIR`。
+所有 Hook 都会收到 `ZOOTREE_HOOK`、`ZOOTREE_OPERATION`、`ZOOTREE_HOOK_SCOPE`、`ZOOTREE_HOOK_CONFIG_SCOPE`、`ZOOTREE_WORKSPACE`、`ZOOTREE_WORKSPACE_TITLE`、`ZOOTREE_WORKSPACE_DESCRIPTION`、`ZOOTREE_WORKSPACE_STATUS`、`ZOOTREE_WORKSPACE_DIR`、`ZOOTREE_BRANCH` 与 `ZOOTREE_VERSION`。repo 级 Hook 还会收到 `ZOOTREE_REPO`、`ZOOTREE_REPO_SOURCE_DIR`、`ZOOTREE_WORKTREE_PATH`，以及可用时的 `ZOOTREE_TARGET_BRANCH`。
+
+repo 级 Hook 的 cwd 是对应 worktree，workspace 级 Hook 的 cwd 是 Workspace 根目录。执行前会移除父进程继承的全部官方 Hook 变量，再注入本次调用的真实上下文。repo 配置优先于全局 fallback；`post_start` 在 `start` 与 `reopen` 中执行，`add-repo` 不执行它。
