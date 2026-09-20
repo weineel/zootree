@@ -310,6 +310,11 @@ pub fn draft_from_args<R: CommandRunner>(
     });
     let title = args.title.clone().unwrap_or_default();
     let mut draft = CreateDraft::new(title, name, global);
+    if let Some(kind) = &args.multiplexer {
+        let mut multiplexer = global.multiplexer.clone();
+        multiplexer.kind = kind.clone();
+        draft.multiplexer = Some(multiplexer);
+    }
     draft.description = args.description.clone().unwrap_or_default();
     if let Some(branch) = &args.branch {
         draft.set_branch(branch.clone());
@@ -324,7 +329,6 @@ pub fn draft_from_args<R: CommandRunner>(
         )?;
     } else if let Some(template_name) = &args.template {
         let template = config_mgr.load_template(template_name)?;
-        draft.multiplexer = Some(template.multiplexer.clone());
         if template.repos.is_empty() {
             anyhow::bail!("template '{}' has no repos", template_name);
         }

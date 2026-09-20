@@ -46,6 +46,7 @@ fn create_args_with(
     template: Option<&str>,
 ) -> CreateArgs {
     CreateArgs {
+        multiplexer: None,
         title: title.map(str::to_string),
         name: None,
         description: None,
@@ -59,6 +60,7 @@ fn create_args_with(
 
 fn create_args_full() -> CreateArgs {
     CreateArgs {
+        multiplexer: None,
         title: Some("auth cleanup".into()),
         name: Some("open-reef".into()),
         description: Some("clean up auth flow".into()),
@@ -274,7 +276,7 @@ fn draft_from_args_template_only_touches_template_repos() {
 }
 
 #[test]
-fn draft_from_args_template_carries_multiplexer_snapshot() {
+fn draft_from_args_template_uses_global_multiplexer_snapshot() {
     let tmp = TempDir::new().unwrap();
     let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
     mgr.ensure_dirs().unwrap();
@@ -307,8 +309,7 @@ fn draft_from_args_template_carries_multiplexer_snapshot() {
             .unwrap_or_else(|| global.multiplexer.clone()),
     );
 
-    assert_eq!(draft.multiplexer, Some(multiplexer.clone()));
-    assert_eq!(workspace.multiplexer, multiplexer);
+    assert_eq!(workspace.multiplexer, global.multiplexer);
 }
 
 #[test]
@@ -931,4 +932,43 @@ fn persist_selected_pending_repos_resolves_submit_time_name_collision() {
         MultiplexerConfig::default(),
     );
     assert_eq!(workspace.repos[0].name, "zootree-2");
+}
+
+#[test]
+fn cli_backend_overrides_global_and_template_without_changing_backend_settings() {
+    let tmp = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    mgr.save_repo_config("frontend", &repo_config("/repo/frontend", Some("main")))
+        .unwrap();
+    mgr.save_template(
+        "recently",
+        &TemplateConfig {
+            repos: vec!["frontend".into()],
+            multiplexer: MultiplexerConfig::default(),
+        },
+    )
+    .unwrap();
+    let mut global = GlobalConfig::default();
+    global.multiplexer.kind = MultiplexerKind::Cmux;
+    global.multiplexer.herdr.session = "work".into();
+    global.multiplexer.zellij.layout = Some("personal".into());
+    for title in [None, Some("task")] {
+        let mut args = create_args_with(title, None, Some("recently"));
+        args.multiplexer = Some(MultiplexerKind::Herdr);
+        args.start = true;
+        let draft = draft_from_args(&args, &mgr, &MockRunner::new(), &global, None, &[]).unwrap();
+        let selected = draft
+            .multiplexer
+            .clone()
+            .unwrap_or_else(|| global.multiplexer.clone());
+        let workspace = workspace_from_draft(&draft, "2026-09-20T10:00:00+08:00", None, selected);
+        assert_eq!(workspace.multiplexer.kind, MultiplexerKind::Herdr);
+        assert_eq!(workspace.multiplexer.herdr.session, "work");
+        assert_eq!(
+            workspace.multiplexer.zellij.layout.as_deref(),
+            Some("personal")
+        );
+        assert!(draft.after_create.should_start());
+    }
 }

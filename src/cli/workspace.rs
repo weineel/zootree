@@ -3,7 +3,7 @@ use crate::cli::create_flow::{
     persist_selected_pending_repos, resolve_agent_cli_for_draft, workspace_from_draft,
     AfterCreateMode, CreateDraftError, CreateWizardOutput,
 };
-use crate::config::global::GlobalConfig;
+use crate::config::global::{GlobalConfig, MultiplexerKind};
 use crate::config::template::TemplateConfig;
 use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
@@ -241,6 +241,7 @@ fn save_recently_template(config_mgr: &ConfigManager, workspace: &WorkspaceConfi
 fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()> {
     if mode.should_start() {
         let start_args = StartArgs {
+            multiplexer: None,
             name: Some(name.to_string()),
             no_multiplexer: false,
             run_agent: mode.run_agent_arg(),
@@ -385,6 +386,10 @@ fn start_workspace_with<R: CommandRunner>(
     let (status, mut workspace) = config_mgr.load_workspace(&name)?;
     if !matches!(status, WorkspaceStatus::Pending) {
         anyhow::bail!("workspace '{}' is not in pending state", name);
+    }
+
+    if let Some(kind) = &args.multiplexer {
+        workspace.multiplexer.kind = kind.clone();
     }
 
     let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
@@ -880,6 +885,12 @@ fn report_terminal_environment_warnings(workspace_name: &str, warnings: Vec<Stri
 
 #[derive(Args)]
 pub struct CreateArgs {
+    #[arg(
+        long,
+        value_enum,
+        help = "Select and save the terminal multiplexer for this workspace"
+    )]
+    pub multiplexer: Option<MultiplexerKind>,
     #[arg(long, help = "Workspace title (interactive if omitted)")]
     pub title: Option<String>,
     #[arg(long, help = "Workspace name (auto-generated if omitted)")]
@@ -932,6 +943,12 @@ pub struct ListArgs {
 #[derive(Args)]
 pub struct StartArgs {
     #[arg(
+        long,
+        value_enum,
+        help = "Select and save the terminal multiplexer for this workspace"
+    )]
+    pub multiplexer: Option<MultiplexerKind>,
+    #[arg(
         help = "Workspace name to start (interactive if omitted)",
         add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Pending))
     )]
@@ -963,6 +980,12 @@ pub struct OpenArgs {
 
 #[derive(Args)]
 pub struct ReopenArgs {
+    #[arg(
+        long,
+        value_enum,
+        help = "Select and save the terminal multiplexer for this workspace"
+    )]
+    pub multiplexer: Option<MultiplexerKind>,
     #[arg(
         help = "Workspace name to reopen (interactive if omitted)",
         add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::Archived))
@@ -1093,6 +1116,7 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
         None => anyhow::bail!("workspace name is required when stdin is not interactive"),
     };
     let options = ReopenOptions {
+        multiplexer: args.multiplexer.clone(),
         sources: ReopenSources::parse(&args.from)?,
         overwrite_repos: args.overwrite.iter().cloned().collect::<BTreeSet<_>>(),
     };
@@ -1760,6 +1784,7 @@ group = "workspace_group:old"
             &GlobalConfig::default(),
             &runner,
             &StartArgs {
+                multiplexer: None,
                 name: Some("fair-fox".into()),
                 no_multiplexer: true,
                 run_agent: None,
@@ -1846,6 +1871,7 @@ group = "workspace_group:old"
             &global,
             &runner,
             &StartArgs {
+                multiplexer: None,
                 name: Some("calm-river".into()),
                 no_multiplexer: true,
                 run_agent: None,
@@ -1904,6 +1930,7 @@ group = "workspace_group:old"
             &GlobalConfig::default(),
             &runner,
             &StartArgs {
+                multiplexer: None,
                 name: Some("calm-river".into()),
                 no_multiplexer: true,
                 run_agent: None,
@@ -2272,7 +2299,7 @@ group = "workspace_group:old"
             vec![repo("api", Some("main"))],
         )
         .workspace;
-        workspace.multiplexer.kind = MultiplexerKind::Cmux;
+        workspace.multiplexer.kind = MultiplexerKind::Zellij;
         config_mgr
             .save_workspace(&WorkspaceStatus::Pending, &workspace)
             .unwrap();
@@ -2286,6 +2313,7 @@ group = "workspace_group:old"
             &GlobalConfig::default(),
             &start_runner,
             &StartArgs {
+                multiplexer: Some(MultiplexerKind::Cmux),
                 name: Some("partial-start".into()),
                 no_multiplexer: false,
                 run_agent: None,
@@ -2302,6 +2330,7 @@ group = "workspace_group:old"
         let (status, after_failure) = config_mgr.load_workspace("partial-start").unwrap();
         assert_eq!(status, WorkspaceStatus::InProgress);
         assert!(after_failure.multiplexer_state.is_empty());
+        assert_eq!(after_failure.multiplexer.kind, MultiplexerKind::Cmux);
         assert!(workspace_dir.exists());
         let start_calls = start_runner.take_calls();
         assert!(!start_calls
@@ -2354,7 +2383,8 @@ group = "workspace_group:old"
             vec![repo("api", Some("main"))],
         )
         .workspace;
-        workspace.multiplexer.kind = MultiplexerKind::Cmux;
+        workspace.multiplexer.kind = MultiplexerKind::Zellij;
+        workspace.multiplexer.herdr.session = "saved-session".into();
         config_mgr
             .save_workspace(&WorkspaceStatus::Pending, &workspace)
             .unwrap();
@@ -2367,6 +2397,7 @@ group = "workspace_group:old"
             &GlobalConfig::default(),
             &start_runner,
             &StartArgs {
+                multiplexer: Some(MultiplexerKind::Cmux),
                 name: Some("deferred-terminal".into()),
                 no_multiplexer: true,
                 run_agent: None,
@@ -2375,6 +2406,8 @@ group = "workspace_group:old"
         .unwrap();
 
         assert!(warnings.is_empty());
+        assert_eq!(started.multiplexer.kind, MultiplexerKind::Cmux);
+        assert_eq!(started.multiplexer.herdr.session, "saved-session");
         assert!(started.multiplexer_state.is_empty());
         assert!(start_runner
             .take_calls()

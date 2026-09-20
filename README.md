@@ -212,6 +212,7 @@ zootree config agents --json         # Print the same catalog as JSON
 
 ```bash
 zootree create [options]             # Create a workspace
+  --multiplexer zellij|cmux|herdr     # Select and save the workspace terminal backend
   --title <title>                    # Title
   --name <name>                      # Workspace name
   --repos <repos>                    # Repo list (repo:branch format)
@@ -219,6 +220,7 @@ zootree create [options]             # Create a workspace
   --template <name>                  # Use a template
 
 zootree start [name]                 # Start a workspace
+  --multiplexer zellij|cmux|herdr     # Select and save the workspace terminal backend
   --no-multiplexer                   # Don't launch the configured terminal multiplexer
   --run-agent [alias|command]        # Launch a coding agent (see Configuration → Agent CLI)
 
@@ -229,6 +231,7 @@ zootree list                         # List workspaces as compact cards
 zootree open [name]                  # Open an existing workspace
 
 zootree reopen [name]                # Reopen an archived workspace as in-progress
+  --multiplexer zellij|cmux|herdr     # Select and save the workspace terminal backend
   --from current                     # Recreate every missing task branch from each repo's current revision
   --from <repo>:<branch>             # Override the recovery base for one repo (repeatable)
   --overwrite <repo>                 # Replace an occupied canonical worktree path (repeatable)
@@ -316,11 +319,13 @@ max_files = 5
 
 cmux is the recommended multiplexer for new setups. If `[multiplexer].kind` is omitted, zootree keeps the compatibility default `zellij`.
 
+`create` and `reopen` default to the current global `[multiplexer]` configuration; creation ignores terminal settings stored in templates, including `recently`. `create/start/reopen --multiplexer zellij|cmux|herdr` overrides only the backend kind and saves the selection to the workspace without editing global configuration. `start` preserves the workspace snapshot, including layouts and the Herdr session; `create/reopen` take those settings from the current global configuration. `open` uses the saved selection. Combine `--multiplexer` with `--no-multiplexer` on `start/reopen` to save the choice and defer activation until `open`. The create wizard and `create --start/--run-agent` preserve an explicit selection.
+
 The `[multiplexer]` configuration key and saved `[multiplexer_state]` field remain stable for configuration compatibility. zootree treats the saved state as opaque runtime locating and recovery hints, not as the terminal environment's identity; users should not edit its internal fields.
 
-`start` and `open` both idempotently activate the configured terminal environment. If activation fails after `start` has created the worktrees, the workspace remains `in_progress`; fix the terminal issue and retry with `zootree open <name>`. `--no-multiplexer` skips only that `start` invocation. `done` and `cancel` archive the workspace before attempting best-effort terminal cleanup, so cleanup warnings never undo the final workspace status.
+`start` and `open` both idempotently activate the configured terminal environment. If activation fails after `start` has created the worktrees, the workspace remains `in_progress`; fix the terminal issue and retry with `zootree open <name>`. `--no-multiplexer` skips terminal activation only for that `start/reopen` invocation. `done` and `cancel` archive the workspace before attempting best-effort terminal cleanup, so cleanup warnings never undo the final workspace status.
 
-`reopen` returns a `done` or `canceled` workspace to `in_progress`. It first plans every repository: an existing local task branch is reused, otherwise a remote-tracking task branch is preferred without fetching; if neither exists, interactive use asks whether to recreate the task branch from the repo's current revision or a specified branch. Scripts must make that choice with `--from current` and/or repeatable `--from <repo>:<branch>`. Existing matching worktrees can be reused; replacing any occupied path requires an interactive confirmation or explicit `--overwrite <repo>`. New and overwritten worktrees rerun file copying and `post_create`; after all repositories succeed, zootree records `reopened`, moves the workspace to `in_progress`, runs `post_start`, and activates the terminal environment. The reopened workspace uses the current global `[multiplexer]` configuration from `~/.config/zootree/config.toml` and discards its archived terminal state; archived terminal data is used only when an overwrite must first close the old environment. Use `--dry-run` to inspect the full read-only plan.
+`reopen` returns a `done` or `canceled` workspace to `in_progress`. It first plans every repository: an existing local task branch is reused, otherwise a remote-tracking task branch is preferred without fetching; if neither exists, interactive use asks whether to recreate the task branch from the repo's current revision or a specified branch. Scripts must make that choice with `--from current` and/or repeatable `--from <repo>:<branch>`. Existing matching worktrees can be reused; replacing any occupied path requires an interactive confirmation or explicit `--overwrite <repo>`. New and overwritten worktrees rerun file copying and `post_create`; after all repositories succeed, zootree records `reopened`, moves the workspace to `in_progress`, runs `post_start`, and activates the terminal environment. The reopened workspace uses the current global `[multiplexer]` configuration from `~/.config/zootree/config.toml`, with an optional `--multiplexer` kind override, and discards its archived terminal state; archived terminal data is used only when an overwrite must first close the old environment. Use `--dry-run` to inspect the full read-only plan.
 
 `add-repo` adds exactly one already registered repository to an `in_progress` workspace. It resolves the target branch from `--repo name:branch`, then the repo default, then the repo's current branch; missing local branches are errors. Worktree creation, merged `copy_files`, `post_create`, an existing terminal unit, membership, and the `repo_added` event form one transaction. On failure, zootree removes only the terminal unit, worktree, and Workspace branch created by that attempt. It never creates a missing terminal environment, starts or moves an agent, updates the `recently` template, or runs global `post_start`.
 

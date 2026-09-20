@@ -37,6 +37,8 @@ dir = "~/.config/zootree/logs"
 max_files = 5
 ```
 
+`create/reopen` 默认从当前全局 `[multiplexer]` 取配置；`create` 忽略模板（包括 `recently`）中的终端配置。使用 `create/start/reopen --multiplexer zellij|cmux|herdr` 可只覆盖类型并保存到 workspace，不修改全局文件。`start` 保留 workspace 已保存的布局/session，`create/reopen` 使用全局的布局/session。`open` 使用 workspace 已保存的选择。
+
 运行时默认值是 `workspace_root = "~/zootree-workspaces"`、`branch_prefix = "zootree"` 和 `multiplexer.kind = "zellij"`。新配置推荐显式设置 `kind = "cmux"`。
 
 配置文件辅助命令：

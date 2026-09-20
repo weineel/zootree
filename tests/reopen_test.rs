@@ -93,6 +93,8 @@ fn reopen_cli_accepts_recovery_and_lifecycle_options() {
         "--skip-hooks",
         "--dry-run",
         "--no-multiplexer",
+        "--multiplexer",
+        "cmux",
         "--run-agent",
         "codex",
     ]);
@@ -106,6 +108,7 @@ fn reopen_cli_accepts_recovery_and_lifecycle_options() {
     assert!(args.skip_hooks);
     assert!(args.dry_run);
     assert!(args.no_multiplexer);
+    assert_eq!(args.multiplexer, Some(MultiplexerKind::Cmux));
     assert_eq!(args.run_agent, Some(Some("codex".into())));
 }
 
@@ -364,11 +367,14 @@ group = "workspace_group:old"
         "worktree /repos/frontend\0HEAD 1111111\0branch refs/heads/main\0",
     ));
     let mut prompt = NonInteractiveReopenPrompt;
-    let plan = build_reopen_plan(
+    let mut plan = build_reopen_plan(
         &manager,
         &runner,
         "calm-river",
-        &ReopenOptions::default(),
+        &ReopenOptions {
+            multiplexer: Some(MultiplexerKind::Zellij),
+            ..Default::default()
+        },
         &mut prompt,
     )
     .unwrap();
@@ -377,14 +383,25 @@ group = "workspace_group:old"
     global.multiplexer.kind = MultiplexerKind::Herdr;
     global.multiplexer.herdr.session = "current-session".into();
 
+    global.multiplexer.zellij.layout = Some("custom".into());
+    plan.apply_current_terminal_config(&global);
+    let mut expected = global.multiplexer.clone();
+    expected.kind = MultiplexerKind::Zellij;
+    assert_eq!(plan.workspace.multiplexer, expected);
+    assert!(format_reopen_plan(&plan, &ReopenLifecyclePlan::default())
+        .contains("terminal config: current global config + --multiplexer (zellij)"));
+    let (status, untouched) = manager.load_workspace("calm-river").unwrap();
+    assert_eq!(status, WorkspaceStatus::Canceled);
+    assert_eq!(untouched, archived);
+
     let reopened = execute_reopen_plan(&manager, &global, &runner, plan, true).unwrap();
 
     assert_eq!(reopened.name, "calm-river");
-    assert_eq!(reopened.multiplexer, global.multiplexer);
+    assert_eq!(reopened.multiplexer, expected);
     assert!(reopened.multiplexer_state.is_empty());
     let (status, persisted) = manager.load_workspace("calm-river").unwrap();
     assert_eq!(status, WorkspaceStatus::InProgress);
-    assert_eq!(persisted.multiplexer, global.multiplexer);
+    assert_eq!(persisted.multiplexer, expected);
     assert!(persisted.multiplexer_state.is_empty());
     assert_eq!(
         persisted.events.last().unwrap().action,

@@ -1,4 +1,4 @@
-use crate::config::global::GlobalConfig;
+use crate::config::global::{GlobalConfig, MultiplexerKind};
 use crate::config::name::validate_config_name;
 use crate::config::workspace::Event;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
@@ -29,6 +29,7 @@ pub struct ReopenSources {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReopenOptions {
+    pub multiplexer: Option<MultiplexerKind>,
     pub sources: ReopenSources,
     pub overwrite_repos: BTreeSet<String>,
 }
@@ -63,6 +64,7 @@ pub struct ReopenPlan {
     pub workspace: WorkspaceConfig,
     pub repos: Vec<RepoReopenPlan>,
     archived_workspace: WorkspaceConfig,
+    multiplexer_override: Option<MultiplexerKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +87,9 @@ impl Default for ReopenLifecyclePlan {
 impl ReopenPlan {
     pub fn apply_current_terminal_config(&mut self, global: &GlobalConfig) {
         self.workspace.multiplexer = global.multiplexer.clone();
+        if let Some(kind) = &self.multiplexer_override {
+            self.workspace.multiplexer.kind = kind.clone();
+        }
         self.workspace.multiplexer_state = Default::default();
     }
 }
@@ -367,6 +372,7 @@ pub fn build_reopen_plan<R: CommandRunner, P: ReopenPrompt>(
     Ok(ReopenPlan {
         from_status,
         archived_workspace: workspace.clone(),
+        multiplexer_override: options.multiplexer.clone(),
         workspace,
         repos,
     })
@@ -572,8 +578,13 @@ pub fn format_reopen_plan(plan: &ReopenPlan, lifecycle: &ReopenLifecyclePlan) ->
         ));
     }
     let multiplexer = plan.workspace.multiplexer.kind.as_str();
+    let config_source = if plan.multiplexer_override.is_some() {
+        "current global config + --multiplexer"
+    } else {
+        "current global config"
+    };
     output.push_str(&format!(
-        "  terminal config: current global config ({multiplexer})\n"
+        "  terminal config: {config_source} ({multiplexer})\n"
     ));
     if plan
         .repos

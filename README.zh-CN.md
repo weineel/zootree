@@ -207,6 +207,7 @@ zootree config agents --json         # 以 JSON 输出同一份 catalog
 
 ```bash
 zootree create [options]             # 创建工作空间
+  --multiplexer zellij|cmux|herdr     # 选择并保存 workspace 的终端类型
   --title <title>                    # 标题
   --name <name>                      # 工作空间名称
   --repos <repos>                    # 仓库列表 (repo:branch 格式)
@@ -214,6 +215,7 @@ zootree create [options]             # 创建工作空间
   --template <name>                  # 使用模板
 
 zootree start [name]                 # 启动工作空间
+  --multiplexer zellij|cmux|herdr     # 选择并保存 workspace 的终端类型
   --no-multiplexer                   # 不启动已配置的终端复用器
   --run-agent [alias|command]        # 启动 coding agent（详见「配置 → Agent CLI」）
 
@@ -224,6 +226,7 @@ zootree list                         # 以紧凑卡片形式列出工作空间
 zootree open [name]                  # 打开已有工作空间
 
 zootree reopen [name]                # 将已归档 workspace 恢复为 in-progress
+  --multiplexer zellij|cmux|herdr     # 选择并保存 workspace 的终端类型
   --from current                     # 从各 repo 的当前 revision 重建缺失的任务分支
   --from <repo>:<branch>             # 指定某个 repo 的恢复基线（可重复）
   --overwrite <repo>                 # 覆盖已占用的规范 worktree 路径（可重复）
@@ -310,11 +313,13 @@ max_files = 5
 
 cmux 是新配置推荐的终端复用器；如果省略 `[multiplexer].kind`，zootree 保持兼容默认值 `zellij`。
 
+`create` 与 `reopen` 默认使用当前全局 `[multiplexer]` 配置；创建时忽略模板（包括 `recently`）中的终端配置。`create/start/reopen --multiplexer zellij|cmux|herdr` 只覆盖类型，并将选择保存到 workspace，不修改全局配置。`start` 以 workspace 已保存的配置为基础，因此会保留当时的布局和 Herdr session；`create/reopen` 从当前全局配置取这些详细设置。`open` 沿用已保存的选择。`start/reopen` 可以同时指定 `--multiplexer` 和 `--no-multiplexer`，保存选择但暂不启动终端；之后用 `open` 激活。创建向导和 `create --start/--run-agent` 均保留显式选择。
+
 为保持配置兼容，`[multiplexer]` 配置键和持久化的 `[multiplexer_state]` 字段名保持不变。zootree 将持久化状态视为不透明的运行时定位与恢复提示，而不是终端环境的唯一身份；用户不应修改其内部字段。
 
-`start` 与 `open` 都会幂等激活已配置的终端环境。如果 `start` 已创建 worktree 后激活失败，workspace 会保持 `in_progress`；修复终端问题后可运行 `zootree open <name>` 重试。`--no-multiplexer` 只跳过当次 `start`。`done` 与 `cancel` 会先归档 workspace，再 best-effort 清理终端环境，因此清理 warning 不会回滚最终状态。
+`start` 与 `open` 都会幂等激活已配置的终端环境。如果 `start` 已创建 worktree 后激活失败，workspace 会保持 `in_progress`；修复终端问题后可运行 `zootree open <name>` 重试。`--no-multiplexer` 只跳过当次 `start/reopen` 的终端激活。`done` 与 `cancel` 会先归档 workspace，再 best-effort 清理终端环境，因此清理 warning 不会回滚最终状态。
 
-`reopen` 将 `done` 或 `canceled` workspace 恢复为 `in_progress`。命令会先规划所有 repo：优先复用本地任务分支，其次在不执行 fetch 的前提下使用 remote-tracking 任务分支；两者都不存在时，交互模式让用户选择从 repo 当前 revision 或指定分支重建任务分支。脚本必须通过 `--from current` 和/或可重复的 `--from <repo>:<branch>` 明确选择。匹配的现有 worktree 可以复用；覆盖任何已占用路径都需要交互确认或显式 `--overwrite <repo>`。新建和覆盖的 worktree 会重新复制文件并执行 `post_create`；所有 repo 成功后，zootree 记录 `reopened`、迁移到 `in_progress`、执行 `post_start` 并激活终端环境。reopen 后的 workspace 使用当前 `~/.config/zootree/config.toml` 中的全局 `[multiplexer]` 配置，并丢弃 archived terminal state；只有覆盖 worktree 前关闭旧环境时才使用 archived terminal 数据。可用 `--dry-run` 查看完整只读计划。
+`reopen` 将 `done` 或 `canceled` workspace 恢复为 `in_progress`。命令会先规划所有 repo：优先复用本地任务分支，其次在不执行 fetch 的前提下使用 remote-tracking 任务分支；两者都不存在时，交互模式让用户选择从 repo 当前 revision 或指定分支重建任务分支。脚本必须通过 `--from current` 和/或可重复的 `--from <repo>:<branch>` 明确选择。匹配的现有 worktree 可以复用；覆盖任何已占用路径都需要交互确认或显式 `--overwrite <repo>`。新建和覆盖的 worktree 会重新复制文件并执行 `post_create`；所有 repo 成功后，zootree 记录 `reopened`、迁移到 `in_progress`、执行 `post_start` 并激活终端环境。reopen 后的 workspace 使用当前 `~/.config/zootree/config.toml` 中的全局 `[multiplexer]` 配置（类型可由 `--multiplexer` 覆盖），并丢弃 archived terminal state；只有覆盖 worktree 前关闭旧环境时才使用 archived terminal 数据。可用 `--dry-run` 查看完整只读计划。
 
 `add-repo` 每次只向 `in_progress` workspace 增加一个已经注册的 repo。Target branch 依次取自 `--repo name:branch`、repo 默认分支、repo 当前分支；本地分支不存在时直接报错。worktree 创建、合并后的 `copy_files`、`post_create`、已有终端单元、membership 和 `repo_added` 事件属于同一个事务。失败时只清理由本次尝试创建的终端单元、worktree 和 Workspace branch。它不会创建缺失的终端环境，不会启动或移动 agent，不会更新 `recently` template，也不会执行全局 `post_start`。
 

@@ -84,6 +84,8 @@ zootree config agents --json
 
 ### 创建
 
+`create/start/reopen` 均支持 `--multiplexer zellij|cmux|herdr`，选择会保存到 workspace。`start/reopen` 可同时传 `--no-multiplexer`，保存选择但跳过当次终端启动，之后用 `open` 激活。`reopen --dry-run` 只预览，不保存选择。
+
 工作空间创建后状态为 `pending`。Agent 执行时使用完整参数，避免进入 wizard。
 
 ```bash
