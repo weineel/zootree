@@ -138,6 +138,9 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
         Commands::AddRepo(args) => {
             zootree::cli::add_repo::handle_add_repo(&args)?;
         }
+        Commands::Edit(args) => {
+            zootree::cli::edit::handle_edit(&args)?;
+        }
         Commands::Info(args) => {
             zootree::cli::info::handle_info(&args)?;
         }

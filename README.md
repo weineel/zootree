@@ -107,6 +107,7 @@ Restart your shell (or `source` the rc file) to activate.
 - `zootree add-repo <TAB>` — in-progress workspaces; `--repo <TAB>` completes registered repos
 - `zootree cancel <TAB>` — pending or in-progress workspaces
 - `zootree reopen <TAB>` — done or canceled workspaces
+- `zootree edit <TAB>` — any workspace
 - `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — registered repos
 - `zootree template save --from <TAB>` — any workspace
 - `zootree create --template <TAB>` — saved templates
@@ -239,6 +240,9 @@ zootree reopen [name]                # Reopen an archived workspace as in-progre
   --skip-hooks                       # Skip post_create and post_start hooks
   --no-multiplexer                   # Don't activate the terminal environment after recovery
   --run-agent [alias|command]        # Launch an agent if a terminal environment is created
+
+zootree edit [name] [--path]         # Edit a workspace config with $VISUAL/$EDITOR, or print its path (name required)
+                                     # Saved TOML and name are checked, never reverted; changes apply on the next open/reopen
 
 zootree add-repo [workspace]         # Add one registered repo to an in-progress workspace
   --repo <repo[:target-branch]>      # Select repo and optional target branch

@@ -136,6 +136,18 @@ zootree info my-workspace
 zootree open my-workspace
 ```
 
+### 编辑 workspace 配置
+
+```bash
+# 依次使用 $VISUAL、$EDITOR、vi 打开任意状态 workspace 的配置；保存后校验 TOML 与 name
+zootree edit my-workspace
+
+# 仅输出配置文件路径（必须指定 name）
+zootree edit my-workspace --path
+```
+
+校验失败只报错，不回滚。已归档（done、canceled）的配置也可编辑，但可能影响 `reopen`；修改在下次 `open`/`reopen` 时生效，不会同步到正在运行的终端环境。
+
 ### 完成
 
 合并分支、清理工作树并归档。

@@ -56,6 +56,10 @@ _Avoid_: Multiplexer session, terminal session
 The user-managed settings that apply across zootree workspaces and registered repositories.
 _Avoid_: Config directory, repository configuration
 
+**Workspace configuration**:
+The zootree-managed record of one Workspace's metadata, lifecycle state, and Terminal environment recovery hints. Users may edit it directly.
+_Avoid_: Workspace config file, workspace state
+
 ## Lifecycle boundary
 
 Workspace workflows activate or close a Terminal environment through the single public lifecycle facade. Zellij and cmux reconciliation, layout preparation, runtime references, and command translation remain internal implementation details.

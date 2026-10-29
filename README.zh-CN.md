@@ -104,6 +104,7 @@ zootree 支持 5 种 shell 的补全：bash、zsh、fish、PowerShell、elvish�
 - `zootree add-repo <TAB>` — in-progress 状态的 workspace；`--repo <TAB>` 补全已注册 repo
 - `zootree cancel <TAB>` — pending 或 in-progress 状态的 workspace
 - `zootree reopen <TAB>` — done 或 canceled 状态的 workspace
+- `zootree edit <TAB>` — 任意状态的 workspace
 - `zootree repo edit <TAB>` / `zootree repo remove|delete <TAB>` — 已注册的 repo
 - `zootree template save --from <TAB>` — 任意 workspace
 - `zootree create --template <TAB>` — 已保存的 template
@@ -234,6 +235,9 @@ zootree reopen [name]                # 将已归档 workspace 恢复为 in-progr
   --skip-hooks                       # 跳过 post_create 与 post_start hook
   --no-multiplexer                   # 恢复后不激活终端环境
   --run-agent [alias|command]        # 新建终端环境时启动 agent
+
+zootree edit [name] [--path]         # 用 $VISUAL/$EDITOR 编辑 workspace 配置，或打印其路径（需指定 name）
+                                     # 保存后校验 TOML 与 name，不回滚；修改在下次 open/reopen 时生效
 
 zootree add-repo [workspace]         # 给 in-progress workspace 增加一个已注册 repo
   --repo <repo[:target-branch]>      # 指定 repo 和可选目标分支

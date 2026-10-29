@@ -6,7 +6,7 @@ pub mod workspace;
 
 use anyhow::{Context, Result};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct ConfigManager {
     pub base_dir: PathBuf,
@@ -253,17 +253,45 @@ impl ConfigManager {
         &self,
         name: &str,
     ) -> Result<(workspace::WorkspaceStatus, workspace::WorkspaceConfig)> {
+        let (status, path) = self.locate_workspace_config(name)?;
+        let content = std::fs::read_to_string(&path)?;
+        let config: workspace::WorkspaceConfig = toml::from_str(&content)?;
+        Ok((status, config))
+    }
+
+    /// Locate a Workspace configuration without parsing it, so a malformed
+    /// one can still be found and repaired.
+    pub fn locate_workspace_config(
+        &self,
+        name: &str,
+    ) -> Result<(workspace::WorkspaceStatus, PathBuf)> {
         name::validate_config_name("workspace", name)?;
         use workspace::WorkspaceStatus::*;
         for status in [Pending, InProgress, Done, Canceled] {
             let path = self.workspace_config_path(&status, name)?;
             if path.exists() {
-                let content = std::fs::read_to_string(&path)?;
-                let config: workspace::WorkspaceConfig = toml::from_str(&content)?;
-                return Ok((status, config));
+                return Ok((status, path));
             }
         }
         anyhow::bail!("workspace '{}' not found", name)
+    }
+
+    /// Check that a hand-edited Workspace configuration still parses and
+    /// names the workspace it is stored for. Only these two things are checked.
+    pub fn check_edited_workspace_config(&self, name: &str, path: &Path) -> Result<()> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read workspace config {}", path.display()))?;
+        let config: workspace::WorkspaceConfig = toml::from_str(&content)
+            .with_context(|| format!("failed to parse workspace config {}", path.display()))?;
+        if config.name != name {
+            anyhow::bail!(
+                "workspace config {} has name '{}' but must be '{}'",
+                path.display(),
+                config.name,
+                name
+            );
+        }
+        Ok(())
     }
 
     pub fn move_workspace(

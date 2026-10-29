@@ -18,6 +18,7 @@ src/
 │   ├── mod.rs       # Cli struct + Commands enum (clap derive)
 │   ├── config.rs    # config path/show/edit recovery + agents 人类/JSON 输出
 │   ├── repo.rs      # repo add/list/edit/remove
+│   ├── edit.rs      # edit [name] [--path]: 打开 Workspace configuration 并在编辑后校验
 │   ├── add_repo.rs  # add-repo 参数、交互选择、结果输出与 core transaction 调用
 │   ├── create_flow.rs # create draft、当前 repo 发现、校验与 WorkspaceConfig 转换
 │   ├── workspace.rs # create/start/list/open/reopen/done/cancel
@@ -149,6 +150,8 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 - 所有 save/load 使用 `toml` crate 进行序列化
 - workspace 列表读取使用稳定排序：按传入 status 顺序遍历，每个 status 内按 workspace name 排序
 - 需要同时使用 workspace status 和配置时，优先用 `list_workspaces_with_status`，避免先 `list_workspaces` 再逐个 `load_workspace`
+
+- `locate_workspace_config()` 只定位不解析，使损坏的 Workspace configuration 仍可被找到并修复；`check_edited_workspace_config()` 仅校验可解析且 `name` 与文件名一致
 
 ### 命令路由
 
