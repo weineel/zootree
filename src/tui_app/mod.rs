@@ -194,6 +194,12 @@ pub trait InlineApp {
 }
 
 pub fn run_inline<A: InlineApp>(mut app: A) -> anyhow::Result<PromptOutcome<A::Output>> {
+    // Programmatic callers (pipes, other tools) must never hang on a prompt.
+    if !std::io::IsTerminal::is_terminal(&io::stdin()) {
+        anyhow::bail!(
+            "interactive input is required but stdin is not a terminal; pass all arguments explicitly"
+        );
+    }
     install_panic_hook();
 
     enable_raw_mode()?;

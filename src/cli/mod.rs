@@ -4,6 +4,7 @@ pub mod config;
 pub mod create_flow;
 pub mod edit;
 pub mod info;
+pub mod json_view;
 pub mod prune;
 pub mod repo;
 pub mod template;

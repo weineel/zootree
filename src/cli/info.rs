@@ -22,6 +22,9 @@ pub struct InfoArgs {
     )]
     pub name: Option<String>,
 
+    #[arg(long, conflicts_with = "watch", help = "Print machine-readable JSON")]
+    pub json: bool,
+
     #[arg(long, help = "Watch mode: render as a TUI and auto-refresh")]
     pub watch: bool,
 
@@ -38,6 +41,7 @@ pub fn handle_info(args: &InfoArgs) -> Result<()> {
 
     let name = match &args.name {
         Some(n) => n.clone(),
+        None if args.json => anyhow::bail!("--json requires a workspace name"),
         None => {
             let all = config_mgr.list_workspaces(None)?;
             if all.is_empty() {
@@ -53,6 +57,13 @@ pub fn handle_info(args: &InfoArgs) -> Result<()> {
     };
 
     let (status, workspace) = config_mgr.load_workspace(&name)?;
+
+    if args.json {
+        let global = config_mgr.load_global_config().unwrap_or_default();
+        let detail = crate::cli::json_view::workspace_detail(&status, &workspace, &global);
+        println!("{}", crate::cli::json_view::to_pretty_json(&detail)?);
+        return Ok(());
+    }
 
     if args.watch {
         // `workspace` / `status` above were just a reachability check; the TUI

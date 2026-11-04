@@ -228,6 +228,7 @@ zootree start [name]                 # Start a workspace
 zootree list                         # List workspaces as compact cards
   --status pending|in-progress|done|canceled
   --oneline                          # Use legacy one-line output for fzf/scripts
+  --json                             # Machine-readable JSON (also: `info <name> --json`, `repo list --json`)
 
 zootree open [name]                  # Open an existing workspace
 

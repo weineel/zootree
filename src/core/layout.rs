@@ -220,6 +220,20 @@ pub fn build_agent_cli_kdl(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<
     }
 }
 
+/// Split an agent template into argv with `$prompt` substituted, without
+/// shell-quoting. Callers that need to exec the agent directly use this.
+pub fn build_agent_cli_argv(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<Vec<String>> {
+    let tokens = shlex::split(agent_cli_tpl)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse agent_cli: {}", agent_cli_tpl))?;
+    if tokens.is_empty() {
+        anyhow::bail!("agent_cli is empty");
+    }
+    Ok(tokens
+        .into_iter()
+        .map(|t| t.replace("$prompt", prompt))
+        .collect())
+}
+
 pub fn build_agent_cli_command(agent_cli_tpl: &str, prompt: &str) -> anyhow::Result<String> {
     let tokens = shlex::split(agent_cli_tpl)
         .ok_or_else(|| anyhow::anyhow!("failed to parse agent_cli: {}", agent_cli_tpl))?;

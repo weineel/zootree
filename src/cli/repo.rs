@@ -28,7 +28,10 @@ pub enum RepoCommands {
         default_target_branch: Option<String>,
     },
     #[command(about = "List registered repositories")]
-    List,
+    List {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
     #[command(about = "Edit a repository config file")]
     Edit {
         #[arg(
@@ -103,7 +106,16 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
             println!("repo '{}' registered at {}", repo_name, abs_path.display());
             Ok(())
         }
-        RepoCommands::List => {
+        RepoCommands::List { json: true } => {
+            let mut out = Vec::new();
+            for name in config_mgr.list_repos()? {
+                let config = config_mgr.load_repo_config(&name)?;
+                out.push(crate::cli::json_view::repo_entry(&name, &config));
+            }
+            println!("{}", crate::cli::json_view::to_pretty_json(&out)?);
+            Ok(())
+        }
+        RepoCommands::List { json: false } => {
             let repos = config_mgr.list_repos()?;
             if repos.is_empty() {
                 println!("no repos registered");

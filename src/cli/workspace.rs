@@ -553,6 +553,15 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
 
     let workspaces = config_mgr.list_workspaces_with_status(Some(status_filter.as_slice()))?;
 
+    if args.json {
+        let out: Vec<_> = workspaces
+            .iter()
+            .map(|entry| crate::cli::json_view::workspace_summary(&entry.status, &entry.config))
+            .collect();
+        println!("{}", crate::cli::json_view::to_pretty_json(&out)?);
+        return Ok(());
+    }
+
     if workspaces.is_empty() {
         println!("no workspaces found");
         return Ok(());
@@ -938,6 +947,9 @@ pub struct ListArgs {
 
     #[arg(long, help = "Use the legacy one-line output format")]
     pub oneline: bool,
+
+    #[arg(long, conflicts_with = "oneline", help = "Print machine-readable JSON")]
+    pub json: bool,
 }
 
 #[derive(Args)]

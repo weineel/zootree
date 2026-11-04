@@ -223,6 +223,7 @@ zootree start [name]                 # 启动工作空间
 zootree list                         # 以紧凑卡片形式列出工作空间
   --status pending|in-progress|done|canceled
   --oneline                          # 使用旧版单行输出，便于 fzf/脚本处理
+  --json                             # 机器可读 JSON（另有 `info <name> --json`、`repo list --json`）
 
 zootree open [name]                  # 打开已有工作空间
 

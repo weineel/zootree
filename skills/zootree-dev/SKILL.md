@@ -153,6 +153,10 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 - `locate_workspace_config()` 只定位不解析，使损坏的 Workspace configuration 仍可被找到并修复；`check_edited_workspace_config()` 仅校验可解析且 `name` 与文件名一致
 
+### 机器可读输出
+
+`list --json`、`info <name> --json`、`repo list --json` 的结构由 `src/cli/json_view.rs` 的纯函数构建，属于对外稳定契约（Orca 等调用方依赖）。`info --json` 带有已解析的 `agent_command`（argv）。交互式提示在 stdin 不是终端时（`run_inline`）直接报错，保证被程序调用时不会挂起。
+
 ### 命令路由
 
 `main.rs` 先识别 `config path/show/edit` 并在全局配置解析与文件日志初始化前调用 `handle_bootstrap_command`，保证配置缺失或损坏时仍可恢复。其余命令完成常规初始化后匹配 `Commands` 枚举并调用对应的 `handle_*` 函数：
