@@ -4,7 +4,7 @@
 
 **Blocked by:** 08 — [zootree] 其余修改端点:start、reopen、add-repo、create、归档删除、repo 注册和移除; 15 — [orca] Daemon 客户端替换命令行执行器:只读看板、事件驱动、版本与启动失败体验
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 看板上的所有修改操作都通过 Operation 完成
 - [ ] 进行中的卡片显示实时进度与日志,完成后显示结果,失败时显示完整错误输出
