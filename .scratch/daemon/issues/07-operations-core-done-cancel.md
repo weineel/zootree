@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — [zootree] 为 done 和 cancel 抽出服务层,并引入请求上下文; 06 — [zootree] 只读 API:Workspace、repo、agent,以及信封、错误码、版本协商
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] done 和 cancel 请求立即返回 Operation 标识,操作在后台完成
 - [ ] 查询接口返回状态、累计输出和成功或失败结果,失败时带完整错误输出
