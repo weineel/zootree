@@ -9,6 +9,7 @@ mod auth;
 pub mod client;
 pub mod endpoint;
 pub mod error;
+mod mutations;
 pub mod operations;
 mod server;
 mod transport;

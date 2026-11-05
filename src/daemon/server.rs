@@ -2,7 +2,9 @@ use super::auth::{self, Authenticator};
 use super::error::{self, ApiError, PROTOCOL_HEADER};
 use super::operations::{self, OperationRegistry, RunnerFactory};
 use super::transport::Listener;
-use super::{api, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use super::{
+    api, mutations, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
+};
 use crate::config::ConfigManager;
 use crate::service::RequestContext;
 use anyhow::Result;
@@ -45,6 +47,7 @@ fn router(state: AppState) -> Router {
         .route("/workspaces/{name}/done", post(done))
         .route("/workspaces/{name}/cancel", post(cancel))
         .route("/operations/{id}", get(operation))
+        .merge(mutations::routes())
         .fallback(not_found)
         .layer(middleware::from_fn(negotiate_version))
         .layer(middleware::from_fn_with_state(
