@@ -12,14 +12,17 @@
 //!   not listening, unproven, incompatible) means local execution, with a
 //!   notice only for an incompatible protocol.
 //! - Nothing here starts a Daemon.
-//! - A failure to reach the Daemon before the request is accepted falls back
-//!   to local execution. After acceptance the command never falls back (the
-//!   work may already be running); it waits, or fails.
+//! - A failure to reach the Daemon before the request has been written out
+//!   falls back to local execution. Once the whole request is written, any
+//!   failure (no answer, a cut connection, an unreadable answer) is an error
+//!   that points at `zootree operations`: the Daemon may have accepted it, and
+//!   running it locally too could do the work twice. After acceptance the
+//!   command never falls back either; it waits, or fails.
 //! - Ctrl-C only stops waiting. `zootree operations cancel <id>` stops the
 //!   Operation.
 
 use crate::config::ConfigManager;
-use crate::daemon::client::{self, EventStream, HttpStatusError};
+use crate::daemon::client::{self, EventStream, HttpStatusError, RequestSent};
 use crate::daemon::PROTOCOL_VERSION;
 use crate::daemon::{self, DaemonOptions, DaemonState};
 use crate::service::start::AttachRequest;
@@ -252,7 +255,9 @@ impl DaemonClient {
             if response.body.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            return response.json().map_err(CallError::Transport);
+            return response
+                .json()
+                .map_err(|e| CallError::Transport(e.context(RequestSent)));
         }
         let parsed = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
         let error = &parsed["error"];
@@ -610,6 +615,15 @@ impl DaemonClient {
         }
         let view = match self.call(method, path, Some(&body)) {
             Ok(view) => view,
+            // The whole request went out, so the Daemon may have accepted it.
+            // Running it locally now could do the work twice.
+            Err(CallError::Transport(e)) if e.downcast_ref::<RequestSent>().is_some() => {
+                return Err(e.context(format!(
+                    "the request to {path} was sent to the zootree daemon but its answer did not arrive; \
+                     it may have been accepted, so it was not run locally. \
+                     Check `zootree operations` before trying again"
+                )));
+            }
             Err(CallError::Transport(e)) => {
                 Unavailable::Down(format!("{e:#}")).fall_back();
                 return Ok(None);

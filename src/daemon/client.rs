@@ -105,9 +105,28 @@ pub fn request_raw(
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    parse_response(&raw)
+    // From here on the Daemon may already have accepted the request. Any
+    // failure is tagged so a caller knows it must not simply send it again.
+    let answer = (|| {
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw)?;
+        parse_response(&raw)
+    })();
+    answer.map_err(|e| e.context(RequestSent))
+}
+
+/// Marks a failure that happened after the whole request had been written:
+/// the Daemon may have accepted it. Find it with
+/// `error.downcast_ref::<RequestSent>()`. Failures before that point (no
+/// connection, a failed write) do not carry it, and sending the request again
+/// is then safe.
+#[derive(Debug)]
+pub struct RequestSent;
+
+impl std::fmt::Display for RequestSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the request was sent but no complete answer arrived")
+    }
 }
 
 fn parse_response(raw: &[u8]) -> Result<HttpResponse> {

@@ -984,3 +984,185 @@ fn start_and_add_repo_go_through_the_daemon() {
     assert!(kinds.contains(&"add-repo".to_string()), "{kinds:?}");
     stop(daemon);
 }
+
+// ---- no local fallback once the request was sent -----------------------------
+
+/// A Daemon that reads a state-changing request completely and then hangs up
+/// without answering, like one that took the request and died or stalled.
+struct SilentDaemon {
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SilentDaemon {
+    fn start(home: &Home) -> Self {
+        let paths = DaemonOptions::new(home.mgr.base_dir.clone())
+            .paths()
+            .unwrap();
+        paths.ensure_dir().unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        Discovery {
+            pid: std::process::id(),
+            endpoint: paths.socket.clone(),
+            token: "fake-token".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            protocol_version: 1,
+        }
+        .write(&paths.discovery)
+        .unwrap();
+        let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (log, flag) = (requests.clone(), stop.clone());
+        let thread = std::thread::spawn(move || {
+            while !flag.load(Ordering::SeqCst) {
+                let Ok((conn, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                let (log, flag) = (log.clone(), flag.clone());
+                std::thread::spawn(move || Self::serve(conn, log, flag));
+            }
+        });
+        Self {
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn serve(
+        mut conn: std::os::unix::net::UnixStream,
+        log: Arc<Mutex<Vec<String>>>,
+        flag: Arc<AtomicBool>,
+    ) {
+        let _ = conn.set_nonblocking(false);
+        let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        let (head_end, content_length) = loop {
+            let Ok(n) = conn.read(&mut buf) else { return };
+            if n == 0 {
+                return; // a liveness probe
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                break (end + 4, length);
+            }
+        };
+        while raw.len() < head_end + content_length {
+            let Ok(n) = conn.read(&mut buf) else { return };
+            if n == 0 {
+                return;
+            }
+            raw.extend_from_slice(&buf[..n]);
+        }
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let mut parts = text.lines().next().unwrap_or_default().split_whitespace();
+        let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        log.lock().unwrap().push(format!("{method} {path}"));
+        match path {
+            "/status" => {
+                let body = compatible_status().to_string();
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+            "/events" => {
+                let frame = "event: ready\nid: 0\ndata: {\"seq\":0,\"replay\":false}\n\n";
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{frame}\r\n",
+                    frame.len()
+                );
+                while !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            // The request is complete and logged; hang up without an answer.
+            _ => {}
+        }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for SilentDaemon {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[test]
+fn a_request_that_was_sent_is_never_rerun_locally_when_the_answer_fails() {
+    let home = Home::new();
+    home.workspace("prog", WorkspaceStatus::InProgress, &[]);
+    let fake = SilentDaemon::start(&home);
+
+    let output = home.run(&["cancel", "prog", "--no-clean", "--force", "--skip-hooks"]);
+
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        home.stdout(&output),
+        home.stderr(&output)
+    );
+    let text = format!("{}{}", home.stdout(&output), home.stderr(&output));
+    assert!(text.contains("zootree operations"), "{text}");
+    assert!(
+        text.contains("not run locally") || text.contains("did not run"),
+        "{text}"
+    );
+    assert!(
+        fake.requests()
+            .contains(&"POST /workspaces/prog/cancel".to_string()),
+        "{:?}",
+        fake.requests()
+    );
+    // The local fallback would have archived it.
+    assert_eq!(
+        home.mgr.load_workspace("prog").unwrap().0,
+        WorkspaceStatus::InProgress
+    );
+}
+
+#[test]
+fn a_failure_before_the_request_is_written_still_falls_back_to_local_execution() {
+    let home = Home::new();
+    home.workspace("prog", WorkspaceStatus::InProgress, &[]);
+    // A discovery file whose listener is gone: nothing can be sent.
+    let paths = DaemonOptions::new(home.mgr.base_dir.clone())
+        .paths()
+        .unwrap();
+    paths.ensure_dir().unwrap();
+    Discovery {
+        pid: 1,
+        endpoint: paths.socket.clone(),
+        token: "t".into(),
+        started_at: "2026-01-01T00:00:00Z".into(),
+        protocol_version: 1,
+    }
+    .write(&paths.discovery)
+    .unwrap();
+
+    let output = home.run(&["cancel", "prog", "--no-clean", "--force", "--skip-hooks"]);
+    assert_success(&home, &output);
+    assert_eq!(
+        home.mgr.load_workspace("prog").unwrap().0,
+        WorkspaceStatus::Canceled
+    );
+}
