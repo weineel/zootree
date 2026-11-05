@@ -587,9 +587,12 @@ pub struct CancelBody {
 /// synchronous service call that produces the Operation's result.
 pub struct Job {
     pub env: EnvSnapshot,
-    pub work:
-        Box<dyn FnOnce(&ConfigManager, &DynRunner, &RequestContext<'_>) -> Result<Value> + Send>,
+    pub work: JobWork,
 }
+
+/// The synchronous service call of a [`Job`].
+pub type JobWork =
+    Box<dyn FnOnce(&ConfigManager, &DynRunner, &RequestContext<'_>) -> Result<Value> + Send>;
 
 fn outcome_json(outcome: &crate::service::lifecycle::LifecycleOutcome) -> Value {
     json!({ "workspace": outcome.workspace, "dry_run": outcome.dry_run })

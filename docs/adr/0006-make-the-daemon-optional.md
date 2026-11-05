@@ -1,3 +1,7 @@
 # Make the daemon optional and keep the CLI first-class
 
 The zootree Daemon serves several Consumers (the command line, Orca, later a web page) with one shared view of Workspaces, Operations, and change events, but it is never required for correctness. Every state-changing path takes a per-Workspace file lock and writes atomically, so the CLI running in-process and the Daemon can mutate the same Workspace safely, and manual edits of Workspace configuration remain supported. The CLI does not start the Daemon on its own; long-lived Consumers and `zootree daemon start` do. We rejected making the Daemon the only entry point because recovery commands (ADR-0002), editor and prompt flows, and hand-edited Workspace files must work without it, and a sole entry point would add version-skew, cancellation, and stale-cache problems without removing the need for locking. Because the CLI is already built on the same service layer the Daemon calls, moving to a sole entry point later stays cheap.
+
+## Addendum: the background process is not run through `CommandRunner`
+
+`zootree daemon start` spawns the Daemon with `std::process::Command` instead of `CommandRunner`. `CommandRunner` runs a command to completion and returns its output, or hands over the terminal for an interactive one; neither fits a detached, long-lived process that must outlive the CLI in its own process group. This is the only intended exception to the `CommandRunner` rule in `AGENTS.md`; its tests start the Daemon in-process or use a fake endpoint instead of a `MockRunner`.

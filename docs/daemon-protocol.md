@@ -50,8 +50,9 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 
 - `protocol_version`：Daemon 的协议版本，当前为 1。只在删除方法、改变字段语义或改变鉴权方式时提升。
 - `min_compatible_protocol_version`：Daemon 仍然服务的最老客户端协议版本，当前为 1。
-- 客户端可选地在每个请求里带请求头 `X-Zootree-Protocol-Version: <整数>`。不带则放行；不是非负整数返回 400 `bad_request`；小于最低兼容版本返回 426 `client_too_old`（客户端需升级）；大于 Daemon 的版本返回 426 `client_too_new`（需要升级并重启 Daemon）。`/status` 豁免此检查，使客户端总能读到版本信息来解释不兼容。
+- 客户端必须在每个请求里带请求头 `X-Zootree-Protocol-Version: <整数>`（`/status` 除外）。不带返回 426 `protocol_version_required`（客户端需升级，消息里写明该头）；不是非负整数返回 400 `bad_request`；小于最低兼容版本返回 426 `client_too_old`（客户端需升级）；大于 Daemon 的版本返回 426 `client_too_new`（需要升级并重启 Daemon）。`/status` 豁免此检查，使客户端总能读到版本信息来解释不兼容。
 - 客户端用 `/status` 判断是否可用：要求 `min_compatible_protocol_version ≤ 自身协议版本 ≤ protocol_version`。命令行客户端在区间不重叠时给出 stderr 提示并本地执行；缺少必需能力时静默本地执行。
+- 客户端提交修改请求后的重试规则：请求体完整写出之前失败（连不上、写失败）可以改为本地执行；请求体写完之后任何失败（读响应超时、连接被切断、响应无法解析）都不得重发或回退本地，因为 Daemon 可能已接受该 Operation，应报错并提示用 `GET /operations`（命令行 `zootree operations`）核对。
 - 响应对未知字段宽容：客户端必须忽略不认识的字段；新增字段、新增错误码、新增能力都不需要提升协议版本。
 - 版本信息只在 `/status` 与发现文件里，普通响应没有信封级的版本字段。
 
@@ -79,6 +80,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 | `internal_error` | 500 | Daemon 内部失败 |
 | `client_too_old` | 426 | 客户端协议版本低于最低兼容版本 |
 | `client_too_new` | 426 | 客户端协议版本高于 Daemon 的 |
+| `protocol_version_required` | 426 | 请求缺少 `X-Zootree-Protocol-Version` 头（`/status` 除外的所有端点，含 `/events` 与 `/shutdown`）；鉴权先于此检查 |
 | `confirmation_required` | - | 仅出现在失败 Operation 的 `error` 里：`cancel` 遇到未提交改动，错误对象带 `repos`（有未提交改动的 repo 名数组）。带 `confirmed_uncommitted: true` 或 `force: true` 重试；Daemon 从不提示 |
 | `operation_failed` | - | 仅出现在失败 Operation 的 `error` 里：操作已执行但失败，`message` 是完整错误链 |
 
@@ -185,7 +187,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 
 `stopped_at` 是最后报告的步骤名或 `null`；`cleanup` 为 `rolled_back`（start 的回滚已完成）、`rollback_failed` 或 `none`（该操作没有回滚，已完成的步骤保持生效）；`merge` 被杀时 `notes` 会提示目标仓库可能留有半完成的合并。取消到达时没有命令可打断，或工作先完成了，Operation 保持真实结果（`succeeded` / `failed`），`cancel_requested` 仍为 true。
 
-适用范围：目前只有 `done` 与 `cancel` 两类 Operation 的子进程命令接入取消令牌。其他类型接受取消请求并置 `cancel_requested`，但不会被中断，按真实结果结束。
+适用范围：所有类型的 Operation（`done`、`cancel`、`start`、`reopen`、`add-repo`、`create`、`prune`、`repo-add`、`repo-remove`）共用同一条提交路径，子进程命令都接入取消令牌。但只有 `start`（以及带 start 的 `create`）有回滚；其余类型被打断时 `cleanup` 为 `none`，已完成的步骤保持生效。没有子进程命令可打断的工作（例如纯配置读写）不会被中断，按真实结果结束。
 
 ## 8. 事件流（`GET /events`）
 
@@ -216,7 +218,7 @@ Daemon 自己的 Operation 结束时，先发 `workspace.changed`（或 `workspa
 
 ### 订阅与续传
 
-订阅顺序为 “先监听、再快照、最后就绪”：先在锁内固定位置，再读快照，再发 `ready`，之后推送位置之后的事件。快照与固定位置之间发生的变化会作为事件再出现一次，不会丢。
+订阅顺序为 “先监听、再建基线与快照、最后就绪”：先在锁内固定位置，再让外部变化检测同步记下基线（已有基线则跳过），再读快照，再发 `ready`，之后推送位置之后的事件。快照与固定位置之间发生的变化会作为事件再出现一次；基线在快照之前建立，所以快照之后的外部改动要么已在快照里，要么被下一轮扫描报告，不存在既不在快照里也没有事件的窗口。
 
 - 全新订阅（无 `Last-Event-ID`）：`snapshot` → `ready{replay:false}` → 实时事件。
 - 带 `Last-Event-ID: n` 重连且 `n` 仍在缓冲内：`replay` → 序号大于 `n` 的缓冲事件 → `ready{replay:true}` → 实时事件，没有 `snapshot`。`n` 等于当前序号时 `count` 为 0。
@@ -233,7 +235,8 @@ Daemon 自己的 Operation 结束时，先发 `workspace.changed`（或 `workspa
 `PATH`、`SSH_AUTH_SOCK`、`SSH_AGENT_PID`、`ZELLIJ`、`ZELLIJ_SESSION_NAME`、`HERDR_ENV`、`HERDR_SOCKET_PATH`
 
 - 省略 `env`：使用 Daemon 自己环境里的这七个变量（不会得到空 PATH）。
-- 给了 `env`（哪怕是 `{}`）：只用给出的变量，所以调用方应带上 `PATH`。命令行客户端总是发送自己环境的白名单快照。
+- 给了 `env`（哪怕是 `{}`）：白名单变量按请求覆盖。快照里有的变量用快照的值；快照里没有的 `SSH_AUTH_SOCK`、`SSH_AGENT_PID`、`ZELLIJ`、`ZELLIJ_SESSION_NAME`、`HERDR_ENV`、`HERDR_SOCKET_PATH` 在子进程里被移除（绝不退回 Daemon 自己的值）；缺失的 `PATH` 例外，保持继承 Daemon 的 `PATH`（ADR-0005），否则子进程找不到 `git`。命令行客户端总是发送自己环境的白名单快照。
+- 白名单之外的变量（`HOME` 等）不受请求影响，始终沿用 Daemon 进程的环境。
 - 终端环境判断（是否已在 zellij / herdr 会话内）也由快照里的变量决定。
 
 ## 10. 生命周期与空闲退出

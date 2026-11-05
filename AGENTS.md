@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-zootree 是 Rust 2021 CLI 工具。`src/main.rs` 负责 CLI 解析、tracing 初始化和命令路由，`src/lib.rs` 声明库模块。`src/cli/` 放 clap 命令与 handler，`src/config/` 放 TOML 配置模型与 `ConfigManager`，`src/core/` 放 git、hook、layout、multiplexer、补全和状态检查等核心逻辑。`src/tui_app/` 是 ratatui/crossterm TUI，`src/runner.rs` 提供 `CommandRunner` 测试注入。集成测试位于 `tests/*_test.rs`，项目技能文档位于 `skills/`。
+zootree 是 Rust 2021 CLI 工具。`src/main.rs` 负责 CLI 解析、tracing 初始化和命令路由，`src/lib.rs` 声明库模块。`src/cli/` 放 clap 命令与 handler，`src/config/` 放 TOML 配置模型与 `ConfigManager`，`src/core/` 放 git、hook、layout、multiplexer、补全和状态检查等核心逻辑。`src/service/` 是 CLI 与 Daemon 共用的服务层（请求对象 + `RequestContext`，不打印、不提示）。`src/daemon/` 是可选本机 Daemon（unix socket 上的 HTTP + JSON、Operation 注册表、事件流、变化检测，见 ADR-0006 与 `docs/daemon-protocol.md`）。`src/cli/daemon.rs`、`src/cli/operations.rs`、`src/cli/remote.rs` 分别是 `daemon start|stop|status`、`operations cancel` 与命令行客户端模式（经 Daemon 执行及回退规则）。`src/tui_app/` 是 ratatui/crossterm TUI，`src/runner.rs` 提供 `CommandRunner` 测试注入。集成测试位于 `tests/*_test.rs`，项目技能文档位于 `skills/`。
 
 ## Build, Test, and Development Commands
 
@@ -16,7 +16,7 @@ zootree 是 Rust 2021 CLI 工具。`src/main.rs` 负责 CLI 解析、tracing 初
 
 ## Coding Style & Naming Conventions
 
-使用 `cargo fmt` 默认格式和 snake_case 文件/函数命名。错误处理统一返回 `anyhow::Result<T>`，用 `anyhow::bail!()` 构造失败；日志使用 `tracing`，不要在核心逻辑中直接 `println!`。外部命令通过 `CommandRunner` 执行，避免直接调用 `std::process::Command`。用户输入路径在使用前用 `shellexpand::tilde()` 展开。新增结构性模块、命令或依赖时，同步更新 `skills/zootree-dev/SKILL.md`。
+使用 `cargo fmt` 默认格式和 snake_case 文件/函数命名。错误处理统一返回 `anyhow::Result<T>`，用 `anyhow::bail!()` 构造失败；日志使用 `tracing`，不要在核心逻辑中直接 `println!`。外部命令通过 `CommandRunner` 执行，避免直接调用 `std::process::Command`。例外：`src/cli/daemon.rs` 用 `std::process::Command` 拉起脱离终端的 Daemon 后台进程，这种分离的长驻进程不适合 `CommandRunner`（它收集输出并等待退出），见 ADR-0006。用户输入路径在使用前用 `shellexpand::tilde()` 展开。新增结构性模块、命令或依赖时，同步更新 `skills/zootree-dev/SKILL.md`。
 
 ## Testing Guidelines
 

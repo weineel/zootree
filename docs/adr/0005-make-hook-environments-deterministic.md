@@ -68,3 +68,7 @@ The contract does not expose agent commands, Terminal environment state, configu
 ## Verification
 
 Tests cover every row of the invocation matrix, both repository and Global configuration selection, exact cwd and environment values, removal of stale official parent variables, and absence of repository-only variables from Workspace invocations. Lifecycle tests preserve existing Hook failure, rollback, and partial-success behavior. Both READMEs and the zootree development skill are updated with the implemented contract.
+
+## Addendum: Environment snapshots from a Daemon request
+
+When a request arrives through the Daemon, the child processes (Hooks, `git`, terminal tools) run with an environment built from the Daemon's own process plus the request's snapshot of seven whitelisted variables: `PATH`, `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `ZELLIJ`, `ZELLIJ_SESSION_NAME`, `HERDR_ENV` and `HERDR_SOCKET_PATH`. The whitelisted variables are overridden per request; everything else (`HOME` and so on) stays the Daemon's. A whitelisted variable missing from the snapshot is removed for the child so the Daemon's own `SSH_AUTH_SOCK` or terminal markers never leak into a caller's operation. `PATH` is the one exception: a snapshot without `PATH` keeps inheriting the Daemon's `PATH`, in line with the inheritance this ADR already requires, because a child without any `PATH` cannot find `git`. A request without `env` uses the Daemon's own whitelisted variables.
