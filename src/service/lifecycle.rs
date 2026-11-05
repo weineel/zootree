@@ -202,7 +202,7 @@ pub(crate) fn archive_done_workspace_and_close_with<R: CommandRunner>(
     ))
 }
 
-fn report_terminal_environment_warnings(
+pub(crate) fn report_terminal_environment_warnings(
     ctx: &RequestContext<'_>,
     workspace_name: &str,
     warnings: Vec<String>,
@@ -215,7 +215,7 @@ fn report_terminal_environment_warnings(
     }
 }
 
-fn require_name(name: &str) -> Result<()> {
+pub(crate) fn require_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         anyhow::bail!("workspace name is required");
     }

@@ -71,7 +71,7 @@ impl<'a, R: CommandRunner> ZellijAdapter<'a, R> {
                 SessionLookup::Unique => {
                     warn_if_agent_was_not_placed(&agent_intent, &mut warnings);
                     zellij.activate_existing(session, &workspace.name)?;
-                    return activation(session, warnings);
+                    return activation(session, warnings, zellij.take_notices());
                 }
                 SessionLookup::Ambiguous => {
                     bail!(
@@ -90,7 +90,7 @@ impl<'a, R: CommandRunner> ZellijAdapter<'a, R> {
                 SessionLookup::Unique => {
                     warn_if_agent_was_not_placed(&agent_intent, &mut warnings);
                     zellij.activate_existing(&display_name, &workspace.name)?;
-                    return activation(&display_name, warnings);
+                    return activation(&display_name, warnings, zellij.take_notices());
                 }
                 SessionLookup::Ambiguous => {
                     bail!(
@@ -110,7 +110,7 @@ impl<'a, R: CommandRunner> ZellijAdapter<'a, R> {
             &mut warnings,
         )?;
         zellij.create_session(&display_name, &workspace.name, &layout_file)?;
-        activation(&display_name, warnings)
+        activation(&display_name, warnings, zellij.take_notices())
     }
 
     pub(super) fn close(
@@ -380,7 +380,7 @@ fn close_named_session<R: CommandRunner>(
     }
 }
 
-fn activation(session: &str, warnings: Vec<String>) -> Result<Activation> {
+fn activation(session: &str, warnings: Vec<String>, notices: Vec<String>) -> Result<Activation> {
     Ok(Activation {
         stored_state: encode_current_state(
             MultiplexerKind::Zellij,
@@ -389,6 +389,7 @@ fn activation(session: &str, warnings: Vec<String>) -> Result<Activation> {
             },
         )?,
         warnings,
+        notices,
     })
 }
 

@@ -7,5 +7,7 @@
 
 pub mod context;
 pub mod lifecycle;
+pub mod reopen;
+pub mod start;
 
 pub use context::{EnvRunner, EnvSnapshot, EventSink, RequestContext, ServiceEvent};

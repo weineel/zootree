@@ -3,33 +3,26 @@ use crate::cli::create_flow::{
     persist_selected_pending_repos, resolve_agent_cli_for_draft, workspace_from_draft,
     AfterCreateMode, CreateDraftError, CreateWizardOutput,
 };
-use crate::config::global::{GlobalConfig, MultiplexerKind};
+use crate::config::global::MultiplexerKind;
 use crate::config::template::TemplateConfig;
-use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
+use crate::config::workspace::{RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{
     complete_agent_cli_alias, complete_repos_list, complete_template, complete_workspace,
     WorkspaceFilter,
 };
-use crate::core::copy_files;
 use crate::core::git::GitOps;
-use crate::core::hook::{
-    HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
-};
-use crate::core::reopen::{
-    build_reopen_plan, execute_reopen_plan, format_reopen_plan, ReopenBase, ReopenLifecyclePlan,
-    ReopenOptions, ReopenPrompt, ReopenSources, WorktreeAction,
-};
+use crate::core::reopen::{ReopenBase, ReopenOptions, ReopenPrompt, ReopenSources};
 use crate::core::repo_status::missing_registered_repo_names;
-use crate::core::terminal_environment::{AgentIntent, CloseReport, TerminalEnvironment};
-use crate::core::workspace_instruction_index;
-use crate::core::worktree_status::{
-    ensure_required_worktrees_exist, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
-};
-use crate::runner::{CommandRunner, RealRunner};
+use crate::core::worktree_status::{missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus};
+use crate::runner::RealRunner;
 use crate::service::lifecycle::{
     cancel_candidate_statuses, cancel_workspace, done_workspace, CancelRequest, DoneRequest,
     UncommittedConfirmationRequired,
+};
+use crate::service::reopen::{reopen_workspace, ReopenRequest};
+use crate::service::start::{
+    open_workspace, start_workspace, OpenRequest, SessionOutcome, StartRequest,
 };
 use crate::service::{EnvSnapshot, EventSink, RequestContext, ServiceEvent};
 use crate::tui;
@@ -40,7 +33,6 @@ use clap::Args;
 use clap_complete::ArgValueCompleter;
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -117,21 +109,6 @@ struct ListWorkspaceItem {
     workspace: WorkspaceConfig,
     worktrees: Vec<RepoWorktreeStatus>,
     missing_repos: Vec<String>,
-}
-
-fn selected_agent_cli_value(
-    run_agent: &Option<Option<String>>,
-    global: &GlobalConfig,
-) -> Result<Option<String>> {
-    match run_agent {
-        None => Ok(None),
-        Some(Some(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        Some(_) => Ok(Some(global.agent_cli.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
-            )
-        })?)),
-    }
 }
 
 pub fn handle_create(args: &CreateArgs) -> Result<()> {
@@ -259,119 +236,10 @@ fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()
 
 pub fn handle_start(args: &StartArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
+    // Load up front so a broken config fails before any selection prompt.
+    config_mgr.load_global_config()?;
     let runner = RealRunner;
 
-    let (workspace, warnings) =
-        start_workspace_and_activate_with(&config_mgr, &global, &runner, args)?;
-    println!("workspace '{}' started", workspace.name);
-    report_terminal_environment_warnings(&workspace.name, warnings);
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct CreatedWorktree {
-    repo_path: String,
-    worktree_path: String,
-}
-
-#[derive(Debug)]
-struct StartRollback {
-    created_worktrees: Vec<CreatedWorktree>,
-    workspace_dir_to_remove: Option<PathBuf>,
-    active: bool,
-}
-
-impl StartRollback {
-    fn new(workspace_dir_to_remove: Option<PathBuf>) -> Self {
-        Self {
-            created_worktrees: Vec::new(),
-            workspace_dir_to_remove,
-            active: true,
-        }
-    }
-
-    fn record_worktree(&mut self, repo_path: String, worktree_path: String) {
-        self.created_worktrees.push(CreatedWorktree {
-            repo_path,
-            worktree_path,
-        });
-    }
-
-    fn disarm(&mut self) {
-        self.active = false;
-    }
-
-    fn rollback<R: CommandRunner>(&mut self, git: &GitOps<'_, R>) -> Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-
-        let mut failures = Vec::new();
-        for created in self.created_worktrees.iter().rev() {
-            if let Err(e) = git.worktree_remove(&created.repo_path, &created.worktree_path, true) {
-                tracing::warn!(
-                    "failed to rollback worktree '{}': {}",
-                    created.worktree_path,
-                    e
-                );
-                failures.push(format!("{}: {:#}", created.worktree_path, e));
-            }
-        }
-
-        if let Some(dir) = &self.workspace_dir_to_remove {
-            match std::fs::remove_dir(dir) {
-                Ok(()) => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to rollback workspace dir '{}': {}",
-                        dir.display(),
-                        e
-                    );
-                    failures.push(format!("{}: {}", dir.display(), e));
-                }
-            }
-        }
-
-        self.active = false;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            anyhow::bail!("rollback failed: {}", failures.join("; "))
-        }
-    }
-}
-
-fn finish_start_failure<T, R: CommandRunner>(
-    err: anyhow::Error,
-    rollback: &mut StartRollback,
-    git: &GitOps<'_, R>,
-) -> Result<T> {
-    if let Err(rollback_err) = rollback.rollback(git) {
-        Err(anyhow::anyhow!(
-            "start failed: {:#}; rollback failed: {:#}",
-            err,
-            rollback_err
-        ))
-    } else {
-        Err(err)
-    }
-}
-
-fn start_workspace_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    runner: &R,
-    args: &StartArgs,
-) -> Result<WorkspaceConfig> {
-    let git = GitOps::new(runner);
-    let hook_engine = HookEngine::new(runner);
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
@@ -388,165 +256,40 @@ fn start_workspace_with<R: CommandRunner>(
         }
     };
 
-    // One lifecycle mutation per Workspace at a time, across processes (ADR-0006).
-    let _workspace_lock = config_mgr.lock_workspace(&name)?;
-    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !matches!(status, WorkspaceStatus::Pending) {
-        anyhow::bail!("workspace '{}' is not in pending state", name);
-    }
-
-    if let Some(kind) = &args.multiplexer {
-        workspace.multiplexer.kind = kind.clone();
-    }
-
-    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
-    let ws_dir_path = PathBuf::from(&ws_dir);
-    let created_workspace_dir = !ws_dir_path.exists();
-    std::fs::create_dir_all(&ws_dir)?;
-    let mut rollback = StartRollback::new(created_workspace_dir.then_some(ws_dir_path));
-
-    let prepare_result = (|| -> Result<()> {
-        if args.run_agent.is_some() {
-            workspace.agent_cli = selected_agent_cli_value(&args.run_agent, global)?;
-        }
-
-        for repo_entry in &workspace.repos {
-            let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-
-            let target_branch = match &repo_entry.target_branch {
-                Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
-                Some(tb) => {
-                    let current = git.current_branch(&repo_path)?;
-                    tracing::warn!(
-                        "target branch '{}' not found in repo '{}', using current branch '{}'",
-                        tb,
-                        repo_entry.name,
-                        current
-                    );
-                    current
-                }
-                None => {
-                    let current = git.current_branch(&repo_path)?;
-                    tracing::warn!(
-                        "target branch not configured for repo '{}', using current branch '{}'",
-                        repo_entry.name,
-                        current
-                    );
-                    current
-                }
-            };
-
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-
-            tracing::info!(
-                "creating worktree for {} at {}",
-                repo_entry.name,
-                worktree_path
-            );
-            git.worktree_add(
-                &repo_path,
-                &workspace.branch,
-                &worktree_path,
-                &target_branch,
-            )?;
-            rollback.record_worktree(repo_path.clone(), worktree_path.clone());
-
-            let patterns =
-                copy_files::merge_copy_files(&global.copy_files, &repo_config.copy_files);
-            if !patterns.is_empty() {
-                copy_files::copy_files_to_worktree(
-                    Path::new(&repo_path),
-                    Path::new(&worktree_path),
-                    &patterns,
-                )?;
-            }
-
-            if let Some(invocation) = HookInvocation::for_repository(
-                repo_config.hooks.post_create.as_ref(),
-                global.hooks.post_create.as_ref(),
-                HookStage::PostCreate,
-                HookOperation::Start,
-                WorkspaceStatus::Pending,
-                &workspace,
-                RepositoryHookContext {
-                    name: &repo_entry.name,
-                    source_dir: &repo_path,
-                    worktree_path: &worktree_path,
-                    target_branch: Some(&target_branch),
-                },
-            ) {
-                hook_engine.execute(&invocation)?;
-            }
-        }
-
-        Ok(())
-    })();
-
-    if let Err(err) = prepare_result {
-        return finish_start_failure(err, &mut rollback, &git);
-    }
-
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "started".into(),
-        timestamp: now,
-        detail: None,
-    });
-    if let Err(err) = config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace) {
-        return finish_start_failure(err, &mut rollback, &git);
-    }
-    if let Err(err) = config_mgr.move_workspace(
-        &name,
-        &WorkspaceStatus::Pending,
-        &WorkspaceStatus::InProgress,
-    ) {
-        return finish_start_failure(err, &mut rollback, &git);
-    }
-    rollback.disarm();
-    workspace_instruction_index::sync(&workspace);
-
-    if let Some(invocation) = HookInvocation::for_workspace(
-        global.hooks.post_start.as_ref(),
-        HookStage::PostStart,
-        HookOperation::Start,
-        WorkspaceStatus::InProgress,
-        &workspace,
-    ) {
-        hook_engine.execute(&invocation)?;
-    }
-
-    Ok(workspace)
-}
-
-fn start_workspace_and_activate_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    runner: &R,
-    args: &StartArgs,
-) -> Result<(WorkspaceConfig, Vec<String>)> {
-    let workspace = start_workspace_with(config_mgr, global, runner, args)?;
-    if args.no_multiplexer {
-        return Ok((workspace, Vec::new()));
-    }
-
-    let warnings = activate_terminal_environment_with(
-        config_mgr,
-        global,
-        &workspace,
-        runner,
-        agent_intent(args.run_agent.clone()),
-    )
-    .map_err(|error| {
+    let request = StartRequest {
+        name,
+        multiplexer: args.multiplexer.clone(),
+        no_multiplexer: args.no_multiplexer,
+        run_agent: args.run_agent.clone(),
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = start_workspace(&config_mgr, &runner, &ctx, &request)?;
+    let warning = run_attach(&outcome, &runner, |error| {
         anyhow::anyhow!(
             "workspace '{}' started and remains in_progress, but terminal environment activation failed: {:#}. Run `zootree open {}` to retry",
-            workspace.name,
+            outcome.workspace,
             error,
-            workspace.name
+            outcome.workspace
         )
     })?;
+    println!("workspace '{}' started", outcome.workspace);
+    report_terminal_environment_warnings(&outcome.workspace, warning.into_iter().collect());
 
-    Ok((workspace, warnings))
+    Ok(())
+}
+
+/// Performs the foreground attach a service function asked for. A failure the
+/// service layer would have wrapped is wrapped by `on_error`.
+fn run_attach(
+    outcome: &SessionOutcome,
+    runner: &RealRunner,
+    on_error: impl FnOnce(anyhow::Error) -> anyhow::Error,
+) -> Result<Option<String>> {
+    match &outcome.attach {
+        Some(attach) => attach.run(runner).map_err(on_error),
+        None => Ok(None),
+    }
 }
 
 pub fn handle_list(args: &ListArgs) -> Result<()> {
@@ -704,7 +447,7 @@ fn render_list_cards(items: &[ListWorkspaceItem]) -> String {
 
 pub fn handle_open(args: &OpenArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
+    config_mgr.load_global_config()?;
     let runner = RealRunner;
 
     let name = match &args.name {
@@ -723,81 +466,12 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
         }
     };
 
-    let warnings = open_workspace_with(&config_mgr, &global, &runner, &name)?;
-    report_terminal_environment_warnings(&name, warnings);
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = open_workspace(&config_mgr, &runner, &ctx, &OpenRequest { name })?;
+    let warning = run_attach(&outcome, &runner, |error| error)?;
+    report_terminal_environment_warnings(&outcome.workspace, warning.into_iter().collect());
     Ok(())
-}
-
-fn open_workspace_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    runner: &R,
-    name: &str,
-) -> Result<Vec<String>> {
-    let (status, workspace) = config_mgr.load_workspace(name)?;
-    if !matches!(status, WorkspaceStatus::InProgress) {
-        anyhow::bail!("workspace '{}' is not in_progress", name);
-    }
-
-    ensure_required_worktrees_exist(&workspace)?;
-
-    activate_terminal_environment_with(config_mgr, global, &workspace, runner, AgentIntent::None)
-}
-
-fn agent_intent(run_agent: Option<Option<String>>) -> AgentIntent {
-    match run_agent {
-        None => AgentIntent::None,
-        Some(None) => AgentIntent::Default,
-        Some(Some(command)) if command.is_empty() => AgentIntent::Default,
-        Some(Some(command)) => AgentIntent::Override(command),
-    }
-}
-
-fn activate_terminal_environment_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &WorkspaceConfig,
-    runner: &R,
-    agent_intent: AgentIntent,
-) -> Result<Vec<String>> {
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    let activation = terminal_environment.activate(workspace, agent_intent)?;
-    let mut updated = workspace.clone();
-    updated.multiplexer_state = activation.stored_state;
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
-    Ok(activation.warnings)
-}
-
-fn require_terminal_environment_closed(report: CloseReport) -> Result<Vec<String>> {
-    if report.closed {
-        return Ok(report.warnings);
-    }
-
-    let detail = if report.warnings.is_empty() {
-        "terminal environment could not be confirmed closed".to_string()
-    } else {
-        report.warnings.join("; ")
-    };
-    anyhow::bail!("terminal environment could not be closed: {detail}")
-}
-
-fn close_terminal_environment_for_reopen_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace_name: &str,
-    runner: &R,
-) -> Result<Vec<String>> {
-    let workspace = match config_mgr.load_workspace(workspace_name)? {
-        (WorkspaceStatus::Done | WorkspaceStatus::Canceled, workspace) => workspace,
-        (status, _) => anyhow::bail!(
-            "cannot close terminal environment before reopen because workspace '{}' is {}",
-            workspace_name,
-            status.as_str()
-        ),
-    };
-
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    require_terminal_environment_closed(terminal_environment.close(&workspace))
 }
 
 fn report_terminal_environment_warnings(workspace_name: &str, warnings: Vec<String>) {
@@ -1025,7 +699,7 @@ impl ReopenPrompt for CliReopenPrompt {
 
 pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
     let config_manager = ConfigManager::new()?;
-    let global = config_manager.load_global_config()?;
+    config_manager.load_global_config()?;
     let runner = RealRunner;
     let interactive = std::io::stdin().is_terminal();
     let name = match &args.name {
@@ -1045,64 +719,34 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
         }
         None => anyhow::bail!("workspace name is required when stdin is not interactive"),
     };
-    let _workspace_lock = config_manager.lock_workspace(&name)?;
-    let options = ReopenOptions {
-        multiplexer: args.multiplexer.clone(),
-        sources: ReopenSources::parse(&args.from)?,
-        overwrite_repos: args.overwrite.iter().cloned().collect::<BTreeSet<_>>(),
+    let request = ReopenRequest {
+        name,
+        options: ReopenOptions {
+            multiplexer: args.multiplexer.clone(),
+            sources: ReopenSources::parse(&args.from)?,
+            overwrite_repos: args.overwrite.iter().cloned().collect::<BTreeSet<_>>(),
+        },
+        run_agent: args.run_agent.clone(),
+        skip_hooks: args.skip_hooks,
+        no_multiplexer: args.no_multiplexer,
+        dry_run: args.dry_run,
     };
     let mut prompt = CliReopenPrompt { interactive };
-    let mut plan = build_reopen_plan(&config_manager, &runner, &name, &options, &mut prompt)?;
-    plan.apply_current_terminal_config(&global);
-    if args.run_agent.is_some() {
-        plan.workspace.agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
-    }
-    let lifecycle = ReopenLifecyclePlan {
-        skip_hooks: args.skip_hooks,
-        activate_terminal_environment: !args.no_multiplexer,
-        run_agent: args.run_agent.is_some(),
-    };
-    print!("{}", format_reopen_plan(&plan, &lifecycle));
-    if args.dry_run {
-        println!("dry run: no changes made");
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = reopen_workspace(&config_manager, &runner, &ctx, &mut prompt, &request)?;
+    if outcome.dry_run {
         return Ok(());
     }
-
-    if plan
-        .repos
-        .iter()
-        .any(|repo| matches!(repo.worktree_action, WorktreeAction::Overwrite { .. }))
-    {
-        let warnings = close_terminal_environment_for_reopen_with(
-            &config_manager,
-            &global,
-            &plan.workspace.name,
-            &runner,
-        )?;
-        report_terminal_environment_warnings(&plan.workspace.name, warnings);
-    }
-
-    let workspace = execute_reopen_plan(&config_manager, &global, &runner, plan, args.skip_hooks)?;
-    let warnings = if args.no_multiplexer {
-        Vec::new()
-    } else {
-        activate_terminal_environment_with(
-            &config_manager,
-            &global,
-            &workspace,
-            &runner,
-            agent_intent(args.run_agent.clone()),
+    let warning = run_attach(&outcome, &runner, |error| {
+        anyhow::anyhow!(
+            "workspace '{}' reopened and remains in_progress, but terminal environment activation failed: {error:#}. Run `zootree open {}` to retry",
+            outcome.workspace,
+            outcome.workspace
         )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "workspace '{}' reopened and remains in_progress, but terminal environment activation failed: {error:#}. Run `zootree open {}` to retry",
-                workspace.name,
-                workspace.name
-            )
-        })?
-    };
-    println!("workspace '{}' reopened", workspace.name);
-    report_terminal_environment_warnings(&workspace.name, warnings);
+    })?;
+    println!("workspace '{}' reopened", outcome.workspace);
+    report_terminal_environment_warnings(&outcome.workspace, warning.into_iter().collect());
     Ok(())
 }
 
@@ -1248,8 +892,9 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::global::{MultiplexerConfig, MultiplexerKind};
+    use crate::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
     use crate::config::workspace::StoredTerminalEnvironmentState;
+    use crate::core::worktree_status::ensure_required_worktrees_exist;
     use crate::runner::MockRunner;
     use crate::service::lifecycle::{
         archive_canceled_workspace, archive_canceled_workspace_and_close_with,
@@ -1260,60 +905,6 @@ mod tests {
     use clap::Parser;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
-
-    #[test]
-    fn reopen_overwrite_accepts_a_confirmed_close_with_fallback_warnings() {
-        let warnings = require_terminal_environment_closed(CloseReport {
-            closed: true,
-            warnings: vec!["stored terminal id was stale; closed by name".into()],
-        })
-        .unwrap();
-
-        assert_eq!(warnings.len(), 1);
-
-        let error = require_terminal_environment_closed(CloseReport {
-            closed: false,
-            warnings: vec!["terminal environment is ambiguous".into()],
-        })
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("terminal environment is ambiguous"));
-    }
-
-    #[test]
-    fn reopen_overwrite_closes_the_archived_terminal_environment() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let mut archived = test_workspace("reopen-old-terminal");
-        archived.multiplexer.kind = MultiplexerKind::Cmux;
-        archived.multiplexer_state = stored_terminal_state(
-            r#"
-version = 1
-adapter = "cmux"
-
-[payload]
-group = "workspace_group:old"
-"#,
-        );
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Canceled, &archived)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_output());
-
-        let warnings = close_terminal_environment_for_reopen_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            "reopen-old-terminal",
-            &runner,
-        )
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        assert_eq!(runner.take_calls()[0].program, "cmux");
-    }
 
     #[derive(Parser)]
     struct TestListCli {
@@ -1372,22 +963,6 @@ group = "workspace_group:old"
         }
     }
 
-    fn success_output() -> Output {
-        Output {
-            status: ExitStatus::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        }
-    }
-
-    fn success_stdout(stdout: &str) -> Output {
-        Output {
-            status: ExitStatus::from_raw(0),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
-        }
-    }
-
     fn failure_output(stderr: &str) -> Output {
         Output {
             status: ExitStatus::from_raw(1 << 8),
@@ -1400,218 +975,12 @@ group = "workspace_group:old"
         toml::from_str(source).unwrap()
     }
 
-    fn stored_terminal_state_table(state: &StoredTerminalEnvironmentState) -> toml::Table {
-        toml::Value::try_from(state)
-            .unwrap()
-            .as_table()
-            .unwrap()
-            .clone()
-    }
-
     fn missing_worktree(repo_name: &str, worktree_path: &str) -> RepoWorktreeStatus {
         RepoWorktreeStatus {
             repo_name: repo_name.into(),
             worktree_path: worktree_path.into(),
             exists: false,
         }
-    }
-
-    #[test]
-    fn start_rolls_back_created_worktree_when_post_create_hook_fails() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let workspace_dir = temp.path().join("workspaces/fair-fox");
-        let mut repo_cfg = repo_config("/repo/api");
-        repo_cfg.hooks.post_create =
-            Some(crate::config::global::HookValue::Simple("exit 42".into()));
-        config_mgr.save_repo_config("api", &repo_cfg).unwrap();
-        let workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "fair-fox",
-            "Fix start rollback",
-            "zootree/fair-fox",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("refs/heads/main\n"));
-        runner.push_response(success_output());
-        runner.push_response(failure_output("boom"));
-        runner.push_response(success_output());
-
-        let err = start_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            &StartArgs {
-                multiplexer: None,
-                name: Some("fair-fox".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap_err();
-        let msg = format!("{:#}", err);
-
-        assert!(msg.contains("hook failed"), "unexpected error: {msg}");
-        assert!(
-            !workspace_dir.exists(),
-            "rollback should remove empty workspace dir created by start"
-        );
-        let (status, _) = config_mgr.load_workspace("fair-fox").unwrap();
-        assert_eq!(status, WorkspaceStatus::Pending);
-        let calls = runner.take_calls();
-        assert_eq!(
-            calls[2].env.get("ZOOTREE_HOOK").map(String::as_str),
-            Some("post_create")
-        );
-        assert_eq!(
-            calls[2].env.get("ZOOTREE_OPERATION").map(String::as_str),
-            Some("start")
-        );
-        assert_eq!(
-            calls[2]
-                .env
-                .get("ZOOTREE_WORKSPACE_STATUS")
-                .map(String::as_str),
-            Some("pending")
-        );
-        assert_eq!(
-            calls[2]
-                .env
-                .get("ZOOTREE_REPO_SOURCE_DIR")
-                .map(String::as_str),
-            Some("/repo/api")
-        );
-        assert_eq!(
-            calls[3].args,
-            vec![
-                "-C",
-                "/repo/api",
-                "worktree",
-                "remove",
-                "--force",
-                &format!("{}/api", workspace_dir.to_string_lossy()),
-            ]
-        );
-    }
-
-    #[test]
-    fn start_runs_post_start_with_the_persisted_in_progress_status() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = temp.path().join("workspaces/calm-river");
-        let workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "calm-river",
-            "Start workspace hook",
-            "zootree/calm-river",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let mut global = GlobalConfig::default();
-        global.hooks.post_start = Some(crate::config::global::HookValue::Simple(
-            "after-start".into(),
-        ));
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("refs/heads/main\n"));
-        runner.push_response(success_output());
-        runner.push_response(success_output());
-
-        start_workspace_with(
-            &config_mgr,
-            &global,
-            &runner,
-            &StartArgs {
-                multiplexer: None,
-                name: Some("calm-river".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap();
-
-        let calls = runner.take_calls();
-        let hook = calls.iter().find(|call| call.program == "sh").unwrap();
-        assert_eq!(hook.args, vec!["-c", "after-start"]);
-        assert_eq!(
-            hook.env.get("ZOOTREE_HOOK").map(String::as_str),
-            Some("post_start")
-        );
-        assert_eq!(
-            hook.env.get("ZOOTREE_OPERATION").map(String::as_str),
-            Some("start")
-        );
-        assert_eq!(
-            hook.env.get("ZOOTREE_WORKSPACE_STATUS").map(String::as_str),
-            Some("in_progress")
-        );
-        assert_eq!(hook.cwd.as_deref(), Some(workspace_dir.to_str().unwrap()));
-    }
-
-    #[test]
-    fn start_syncs_workspace_instruction_indexes_after_state_commit() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = temp.path().join("workspaces/calm-river");
-        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
-        std::fs::write(workspace_dir.join("api/AGENTS.md"), "api rules").unwrap();
-        std::fs::write(workspace_dir.join("api/CLAUDE.md"), "api rules").unwrap();
-        let workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "calm-river",
-            "Sync instruction indexes",
-            "zootree/calm-river",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("refs/heads/main\n"));
-        runner.push_response(success_output());
-
-        start_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            &StartArgs {
-                multiplexer: None,
-                name: Some("calm-river".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
-            "# Workspace repository instructions\n\n\
-- For work in `api/`, read and follow `api/AGENTS.md`.\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace_dir.join("CLAUDE.md")).unwrap(),
-            "@api/CLAUDE.md\n"
-        );
     }
 
     #[test]
@@ -1943,247 +1312,6 @@ group = "workspace_group:old"
         assert_eq!(
             archived.events.last().map(|event| event.action.as_str()),
             Some("canceled")
-        );
-    }
-
-    #[test]
-    fn start_activation_failure_is_partial_success_and_open_retries() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = tmp.path().join("workspaces/partial-start");
-        let mut workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "partial-start",
-            "Partial terminal activation",
-            "zootree/partial-start",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        workspace.multiplexer.kind = MultiplexerKind::Zellij;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let start_runner = MockRunner::new();
-        start_runner.push_response(success_stdout("refs/heads/main\n"));
-        start_runner.push_response(success_output());
-        start_runner.push_response(failure_output("cmux unavailable"));
-
-        let error = start_workspace_and_activate_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &start_runner,
-            &StartArgs {
-                multiplexer: Some(MultiplexerKind::Cmux),
-                name: Some("partial-start".into()),
-                no_multiplexer: false,
-                run_agent: None,
-            },
-        )
-        .unwrap_err();
-
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("started and remains in_progress"),
-            "{message}"
-        );
-        assert!(message.contains("zootree open partial-start"), "{message}");
-        let (status, after_failure) = config_mgr.load_workspace("partial-start").unwrap();
-        assert_eq!(status, WorkspaceStatus::InProgress);
-        assert!(after_failure.multiplexer_state.is_empty());
-        assert_eq!(after_failure.multiplexer.kind, MultiplexerKind::Cmux);
-        assert!(workspace_dir.exists());
-        let start_calls = start_runner.take_calls();
-        assert!(!start_calls
-            .iter()
-            .any(|call| { call.program == "git" && call.args.iter().any(|arg| arg == "remove") }));
-
-        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
-        let open_runner = MockRunner::new();
-        open_runner.push_response(success_stdout(
-            r#"{"groups":[{"name":"Partial terminal activation","ref":"workspace_group:7"}]}"#,
-        ));
-        open_runner.push_response(success_output());
-
-        let warnings = open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &open_runner,
-            "partial-start",
-        )
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        let (_, after_retry) = config_mgr.load_workspace("partial-start").unwrap();
-        let state = stored_terminal_state_table(&after_retry.multiplexer_state);
-        assert_eq!(
-            state.get("version").and_then(toml::Value::as_integer),
-            Some(1)
-        );
-        assert_eq!(
-            state.get("adapter").and_then(toml::Value::as_str),
-            Some("cmux")
-        );
-    }
-
-    #[test]
-    fn no_multiplexer_skips_only_start_and_open_can_activate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = tmp.path().join("workspaces/deferred-terminal");
-        let mut workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "deferred-terminal",
-            "Deferred terminal",
-            "zootree/deferred-terminal",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        workspace.multiplexer.kind = MultiplexerKind::Zellij;
-        workspace.multiplexer.herdr.session = "saved-session".into();
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let start_runner = MockRunner::new();
-        start_runner.push_response(success_stdout("refs/heads/main\n"));
-        start_runner.push_response(success_output());
-
-        let (started, warnings) = start_workspace_and_activate_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &start_runner,
-            &StartArgs {
-                multiplexer: Some(MultiplexerKind::Cmux),
-                name: Some("deferred-terminal".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        assert_eq!(started.multiplexer.kind, MultiplexerKind::Cmux);
-        assert_eq!(started.multiplexer.herdr.session, "saved-session");
-        assert!(started.multiplexer_state.is_empty());
-        assert!(start_runner
-            .take_calls()
-            .iter()
-            .all(|call| call.program == "git"));
-        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
-        let open_runner = MockRunner::new();
-        open_runner.push_response(success_stdout(
-            r#"{"groups":[{"name":"Deferred terminal","ref":"workspace_group:9"}]}"#,
-        ));
-        open_runner.push_response(success_output());
-
-        open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &open_runner,
-            "deferred-terminal",
-        )
-        .unwrap();
-
-        let (_, opened) = config_mgr.load_workspace("deferred-terminal").unwrap();
-        assert!(!opened.multiplexer_state.is_empty());
-        assert_eq!(open_runner.take_calls()[0].program, "cmux");
-    }
-
-    #[test]
-    fn open_persists_canonical_state_and_returns_reconciliation_warning() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let mut workspace = test_workspace("warning-state");
-        workspace.multiplexer.kind = MultiplexerKind::Cmux;
-        workspace.multiplexer_state = stored_terminal_state(
-            r#"
-version = 99
-adapter = "future"
-
-[payload]
-identity = "future:1"
-"#,
-        );
-        config_mgr
-            .save_workspace(&WorkspaceStatus::InProgress, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout(
-            r#"{"groups":[{"name":"warning-state title","ref":"workspace_group:11"}]}"#,
-        ));
-        runner.push_response(success_output());
-
-        let warnings = open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            "warning-state",
-        )
-        .unwrap();
-
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("version 99")));
-        let (_, opened) = config_mgr.load_workspace("warning-state").unwrap();
-        let state = stored_terminal_state_table(&opened.multiplexer_state);
-        assert_eq!(
-            state.get("version").and_then(toml::Value::as_integer),
-            Some(1)
-        );
-        assert_eq!(
-            state.get("adapter").and_then(toml::Value::as_str),
-            Some("cmux")
-        );
-    }
-
-    #[test]
-    fn open_uses_the_same_activation_path_for_zellij() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let mut workspace = test_workspace("zellij-open");
-        workspace.multiplexer.kind = MultiplexerKind::Zellij;
-        workspace.multiplexer_state = stored_terminal_state(
-            r#"
-version = 1
-adapter = "zellij"
-
-[payload]
-session = "zootree-zellij-open"
-"#,
-        );
-        config_mgr
-            .save_workspace(&WorkspaceStatus::InProgress, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("zootree-zellij-open\n"));
-        runner.push_response(success_output());
-
-        open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            "zellij-open",
-        )
-        .unwrap();
-
-        let calls = runner.take_calls();
-        assert_eq!(calls[0].program, "zellij");
-        let (_, opened) = config_mgr.load_workspace("zellij-open").unwrap();
-        let state = stored_terminal_state_table(&opened.multiplexer_state);
-        assert_eq!(
-            state.get("adapter").and_then(toml::Value::as_str),
-            Some("zellij")
         );
     }
 
