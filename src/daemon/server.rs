@@ -45,6 +45,10 @@ fn router(state: AppState) -> Router {
         .route("/workspaces/{name}/done", post(done))
         .route("/workspaces/{name}/cancel", post(cancel))
         .route("/operations/{id}", get(operation))
+        .route(
+            "/operations/{id}/cancel",
+            post(super::cancel::cancel_operation),
+        )
         .fallback(not_found)
         .layer(middleware::from_fn(negotiate_version))
         .layer(middleware::from_fn_with_state(
@@ -170,12 +174,12 @@ async fn submit(
     // Detached on purpose: closing the client connection never stops the work.
     // A panic drops the handle, which records the failure.
     tokio::task::spawn_blocking(move || {
-        let runner = runner.make();
+        let runner = runner.make().with_cancel(handle.cancel_token());
         let sink = handle.sink();
         let ctx = RequestContext::new(&sink, job.env);
         match (job.work)(&mgr, &runner, &ctx) {
             Ok(result) => handle.succeed(result),
-            Err(e) => handle.fail(operations::OperationError::from_service_error(&e)),
+            Err(e) => handle.fail_with(&e),
         }
     });
     Ok((

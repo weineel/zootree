@@ -11,10 +11,11 @@
 //! subscribes where [`OperationRegistry::record_event`] appends; explicit
 //! cancel looks the record up by id.
 
+use super::cancel;
 use super::error::{self, ApiError};
 use super::{Activity, ActivityGuard};
 use crate::config::{ConfigManager, WorkspaceBusy};
-use crate::runner::{CommandRunner, CommandSpec, OutputLine};
+use crate::runner::{CancelToken, CommandRunner, CommandSpec, OutputLine};
 use crate::service::lifecycle::{
     cancel_workspace, done_workspace, CancelRequest, DoneRequest, UncommittedConfirmationRequired,
 };
@@ -105,6 +106,8 @@ enum State {
     Running,
     Succeeded(Value),
     Failed(OperationError),
+    /// Stopped by an explicit cancel request; see [`cancel::canceled_info`].
+    Canceled(Value),
 }
 
 struct Record {
@@ -113,6 +116,9 @@ struct Record {
     workspace: String,
     state: State,
     output: Vec<String>,
+    cancel: CancelToken,
+    /// Last step the service function reported.
+    step: Option<String>,
     started_at: String,
     finished_at: Option<String>,
     finished: Option<Instant>,
@@ -124,6 +130,11 @@ impl Record {
             State::Running => ("running", Value::Null, Value::Null),
             State::Succeeded(v) => ("succeeded", v.clone(), Value::Null),
             State::Failed(e) => ("failed", Value::Null, e.to_json()),
+            State::Canceled(_) => ("canceled", Value::Null, Value::Null),
+        };
+        let canceled = match &self.state {
+            State::Canceled(info) => info.clone(),
+            _ => Value::Null,
         };
         json!({
             "id": self.id,
@@ -133,6 +144,8 @@ impl Record {
             "output": self.output,
             "result": result,
             "error": error,
+            "cancel_requested": self.cancel.is_requested(),
+            "canceled": canceled,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         })
@@ -183,6 +196,8 @@ impl OperationRegistry {
             workspace: workspace.to_string(),
             state: State::Running,
             output: Vec::new(),
+            cancel: CancelToken::new(),
+            step: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             finished_at: None,
             finished: None,
@@ -201,6 +216,19 @@ impl OperationRegistry {
         let mut records = self.records.lock().unwrap();
         self.prune(&mut records);
         records.iter().find(|r| r.id == id).map(Record::view)
+    }
+
+    /// Asks a running Operation to stop. Returns whether it was still
+    /// running, plus its current view; `None` when unknown or dropped.
+    pub fn request_cancel(&self, id: &str) -> Option<(bool, Value)> {
+        let mut records = self.records.lock().unwrap();
+        self.prune(&mut records);
+        let record = records.iter().find(|r| r.id == id)?;
+        let running = matches!(record.state, State::Running);
+        if running {
+            record.cancel.request();
+        }
+        Some((running, record.view()))
     }
 
     /// Appends a service event to the Operation's output. This is where an
@@ -224,8 +252,30 @@ impl OperationRegistry {
         };
         let mut records = self.records.lock().unwrap();
         if let Some(record) = records.iter_mut().find(|r| r.id == id) {
+            if let ServiceEvent::StepStarted(step) = event {
+                record.step = Some(step.clone());
+            } else if let ServiceEvent::Step(step) = event {
+                record.step = Some(step.trim().to_string());
+            }
             record.output.push(line);
         }
+    }
+
+    /// Ends an Operation whose work failed: `canceled` when an explicit
+    /// cancel interrupted a command, `failed` otherwise.
+    fn finish_failed(&self, id: &str, error: &anyhow::Error) {
+        let state = {
+            let records = self.records.lock().unwrap();
+            records
+                .iter()
+                .find(|r| r.id == id)
+                .and_then(|r| cancel::canceled_info(&r.cancel, r.kind, r.step.as_deref(), error))
+                .map(State::Canceled)
+        };
+        self.finish(
+            id,
+            state.unwrap_or_else(|| State::Failed(OperationError::from_service_error(error))),
+        );
     }
 
     fn finish(&self, id: &str, state: State) {
@@ -290,6 +340,24 @@ impl OperationHandle {
         self.registry.finish(&self.id, State::Succeeded(result));
     }
 
+    /// Token an explicit cancel request trips; the Operation's runner honours it.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.registry
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == self.id)
+            .map(|r| r.cancel.clone())
+            .unwrap_or_default()
+    }
+
+    /// Ends the Operation after its work returned `error`.
+    pub fn fail_with(mut self, error: &anyhow::Error) {
+        self.finished = true;
+        self.registry.finish_failed(&self.id, error);
+    }
+
     pub fn fail(mut self, error: OperationError) {
         self.finished = true;
         self.registry.finish(&self.id, State::Failed(error));
@@ -321,11 +389,32 @@ impl EventSink for OperationSink {
 }
 
 /// Boxed runner usable where the service layer wants `R: CommandRunner`.
-pub struct DynRunner(pub Box<dyn CommandRunner>);
+/// With a cancel token every command is cancellable.
+pub struct DynRunner {
+    inner: Box<dyn CommandRunner>,
+    cancel: Option<CancelToken>,
+}
+
+impl DynRunner {
+    pub fn new(inner: Box<dyn CommandRunner>) -> Self {
+        Self {
+            inner,
+            cancel: None,
+        }
+    }
+
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+}
 
 impl CommandRunner for DynRunner {
     fn run(&self, spec: &CommandSpec) -> Result<Output> {
-        self.0.run(spec)
+        match &self.cancel {
+            Some(cancel) => self.inner.run_cancellable(spec, &mut |_| {}, cancel),
+            None => self.inner.run(spec),
+        }
     }
 
     fn run_streaming(
@@ -333,11 +422,23 @@ impl CommandRunner for DynRunner {
         spec: &CommandSpec,
         on_line: &mut dyn FnMut(OutputLine),
     ) -> Result<Output> {
-        self.0.run_streaming(spec, on_line)
+        match &self.cancel {
+            Some(cancel) => self.inner.run_cancellable(spec, on_line, cancel),
+            None => self.inner.run_streaming(spec, on_line),
+        }
+    }
+
+    fn run_cancellable(
+        &self,
+        spec: &CommandSpec,
+        on_line: &mut dyn FnMut(OutputLine),
+        cancel: &CancelToken,
+    ) -> Result<Output> {
+        self.inner.run_cancellable(spec, on_line, cancel)
     }
 
     fn run_interactive(&self, spec: &CommandSpec) -> Result<ExitStatus> {
-        self.0.run_interactive(spec)
+        self.inner.run_interactive(spec)
     }
 }
 
@@ -356,7 +457,7 @@ impl RunnerFactory {
     }
 
     pub fn make(&self) -> DynRunner {
-        DynRunner((self.0)())
+        DynRunner::new((self.0)())
     }
 }
 
