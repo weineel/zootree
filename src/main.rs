@@ -99,6 +99,11 @@ fn main() {
             eprintln!("aborted");
             std::process::exit(1);
         }
+        if let Some(interrupted) = e.downcast_ref::<zootree::cli::remote::Interrupted>() {
+            eprintln!();
+            eprintln!("{interrupted}");
+            std::process::exit(zootree::cli::remote::INTERRUPTED_EXIT_CODE);
+        }
         tracing::error!("{:#}", e);
         std::process::exit(1);
     }
@@ -111,6 +116,9 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
         }
         Commands::Daemon(args) => {
             zootree::cli::daemon::handle_daemon_command(&args.command, config_mgr)?;
+        }
+        Commands::Operations(args) => {
+            zootree::cli::operations::handle_operations_command(&args.command, config_mgr)?;
         }
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;

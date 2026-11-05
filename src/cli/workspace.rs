@@ -2,6 +2,7 @@ use crate::cli::create_flow::{
     create_args_need_wizard, discover_current_repo_candidate, draft_from_args, AfterCreateMode,
     CreateWizardOutput,
 };
+use crate::cli::remote::{self, DaemonClient, ExecOptions, OperationFailure};
 use crate::config::global::MultiplexerKind;
 use crate::config::workspace::{RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
@@ -29,6 +30,7 @@ use crate::tui_app::create_wizard::run_create_wizard;
 use anyhow::Result;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
 
@@ -132,14 +134,110 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
     } else {
         CreateWizardOutput { draft }
     };
+    let mut draft = output.draft;
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if draft_fits_daemon_create(&draft, &global) {
+            // Same validation and repo registration the local path performs
+            // first, so errors and side effects match.
+            let existing = existing_workspace_names(&config_mgr)?;
+            let errors = draft.validate(&existing, &global);
+            if !errors.is_empty() {
+                anyhow::bail!(
+                    "invalid create options: {}",
+                    crate::service::create::format_draft_errors(&errors)
+                );
+            }
+            crate::cli::create_flow::persist_selected_pending_repos(&config_mgr, &mut draft)?;
+            if create_through_daemon(&daemon, &draft)? {
+                return Ok(());
+            }
+        }
+    }
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
-    let outcome = create_workspace_from_draft(&config_mgr, &ctx, output.draft)?;
+    let outcome = create_workspace_from_draft(&config_mgr, &ctx, draft)?;
     let name = outcome.workspace.name.clone();
 
     start_after_create_if_needed(&name, &outcome.after_create)?;
 
     Ok(())
+}
+
+fn existing_workspace_names(config_mgr: &ConfigManager) -> Result<Vec<String>> {
+    Ok(config_mgr
+        .list_workspaces(None::<&[WorkspaceStatus]>)?
+        .iter()
+        .map(|w| w.name.clone())
+        .collect())
+}
+
+/// The Daemon's create request carries the common fields only. A draft whose
+/// workspace directory or multiplexer settings differ from what those fields
+/// would produce is created locally so nothing is silently dropped.
+fn draft_fits_daemon_create(
+    draft: &crate::cli::create_flow::CreateDraft,
+    global: &crate::config::global::GlobalConfig,
+) -> bool {
+    let default_dir = crate::cli::create_flow::default_workspace_dir(global, &draft.name);
+    let multiplexer_ok = match &draft.multiplexer {
+        None => true,
+        Some(multiplexer) => {
+            let mut expected = global.multiplexer.clone();
+            expected.kind = multiplexer.kind.clone();
+            *multiplexer == expected
+        }
+    };
+    draft.workspace_dir == default_dir && multiplexer_ok
+}
+
+/// Creates (and, when the draft asks for it, starts) the Workspace through
+/// the Daemon. `false` means the Daemon could not take it: create locally.
+fn create_through_daemon(
+    daemon: &DaemonClient,
+    draft: &crate::cli::create_flow::CreateDraft,
+) -> Result<bool> {
+    let repos: Vec<Value> = draft
+        .repos
+        .iter()
+        .filter(|repo| repo.selected)
+        .map(|repo| json!({"name": repo.name, "target_branch": repo.target_branch}))
+        .collect();
+    let mut body = json!({
+        "title": draft.title,
+        "name": draft.name,
+        "description": draft.description,
+        "branch": draft.branch,
+        "repos": repos,
+    });
+    if let Some(multiplexer) = &draft.multiplexer {
+        body["multiplexer"] = json!(multiplexer.kind);
+    }
+    match &draft.after_create {
+        AfterCreateMode::CreateOnly => {}
+        AfterCreateMode::Start => body["start"] = json!(true),
+        AfterCreateMode::StartAndRunAgent { run_agent } => {
+            if let Some(value) = remote::run_agent_json(&Some(run_agent.clone())) {
+                body["run_agent"] = value;
+            }
+        }
+    }
+    let Some(finished) = daemon.execute("POST", "/workspaces", body, &ExecOptions::default())?
+    else {
+        return Ok(false);
+    };
+    if finished.result["started"] == json!(true) {
+        let outcome = session_outcome(&finished.result);
+        complete_start(&outcome, &RealRunner)?;
+    }
+    Ok(true)
+}
+
+fn session_outcome(result: &Value) -> SessionOutcome {
+    SessionOutcome {
+        workspace: result["workspace"].as_str().unwrap_or_default().to_string(),
+        dry_run: result["dry_run"] == json!(true),
+        attach: remote::attach_from_result(result),
+    }
 }
 
 fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()> {
@@ -178,6 +276,21 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
         }
     };
 
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        let mut body = json!({"no_multiplexer": args.no_multiplexer});
+        if let Some(multiplexer) = &args.multiplexer {
+            body["multiplexer"] = json!(multiplexer);
+        }
+        if let Some(value) = remote::run_agent_json(&args.run_agent) {
+            body["run_agent"] = value;
+        }
+        let path = format!("/workspaces/{name}/start");
+        if let Some(finished) = daemon.execute("POST", &path, body, &ExecOptions::default())? {
+            // The foreground attach always runs here, in this terminal.
+            return complete_start(&session_outcome(&finished.result), &runner);
+        }
+    }
+
     let request = StartRequest {
         name,
         multiplexer: args.multiplexer.clone(),
@@ -187,7 +300,12 @@ pub fn handle_start(args: &StartArgs) -> Result<()> {
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
     let outcome = start_workspace(&config_mgr, &runner, &ctx, &request)?;
-    let warning = run_attach(&outcome, &runner, |error| {
+    complete_start(&outcome, &runner)
+}
+
+/// What follows a successful start: the foreground attach and the closing line.
+fn complete_start(outcome: &SessionOutcome, runner: &RealRunner) -> Result<()> {
+    let warning = run_attach(outcome, runner, |error| {
         anyhow::anyhow!(
             "workspace '{}' started and remains in_progress, but terminal environment activation failed: {:#}. Run `zootree open {}` to retry",
             outcome.workspace,
@@ -222,6 +340,12 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     } else {
         args.status.clone()
     };
+
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if list_through_daemon(&daemon, args)? {
+            return Ok(());
+        }
+    }
 
     let workspaces = config_mgr.list_workspaces_with_status(Some(status_filter.as_slice()))?;
 
@@ -266,6 +390,113 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     print!("{}", output);
 
     Ok(())
+}
+
+/// Renders `list` from the Daemon's answer. `false`: ask locally instead.
+fn list_through_daemon(daemon: &DaemonClient, args: &ListArgs) -> Result<bool> {
+    let query = if args.status.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = args.status.iter().map(WorkspaceStatus::as_str).collect();
+        format!("?status={}", names.join(","))
+    };
+    let Some(summaries) = daemon.read(&format!("/workspaces{query}")) else {
+        return Ok(false);
+    };
+    if args.json {
+        println!("{}", crate::cli::json_view::to_pretty_json(&summaries)?);
+        return Ok(true);
+    }
+    let Some(entries) = summaries.as_array() else {
+        return Ok(false);
+    };
+    if entries.is_empty() {
+        println!("no workspaces found");
+        return Ok(true);
+    }
+    // Whether a repository's directory still exists is judged on this machine.
+    let Some(repos) = daemon.read("/repos") else {
+        return Ok(false);
+    };
+    let registered: std::collections::BTreeMap<String, String> = repos
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter_map(|r| {
+                    Some((
+                        r["name"].as_str()?.to_string(),
+                        r["path"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut items = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(item) = list_item_from_summary(entry, &registered) else {
+            return Ok(false);
+        };
+        items.push(item);
+    }
+    let output = if args.oneline {
+        render_list_oneline(&items)
+    } else {
+        render_list_cards(&items)
+    };
+    print!("{}", output);
+    Ok(true)
+}
+
+fn list_item_from_summary(
+    entry: &Value,
+    registered: &std::collections::BTreeMap<String, String>,
+) -> Option<ListWorkspaceItem> {
+    let status: WorkspaceStatus = serde_json::from_value(entry["status"].clone()).ok()?;
+    let repos: Vec<RepoEntry> = entry["repos"]
+        .as_array()?
+        .iter()
+        .map(|r| {
+            Some(RepoEntry {
+                name: r["name"].as_str()?.to_string(),
+                target_branch: r["target_branch"].as_str().map(str::to_string),
+            })
+        })
+        .collect::<Option<_>>()?;
+    let workspace = WorkspaceConfig {
+        title: entry["title"].as_str()?.to_string(),
+        name: entry["name"].as_str()?.to_string(),
+        description: String::new(),
+        branch: entry["branch"].as_str()?.to_string(),
+        workspace_dir: entry["workspace_dir"].as_str()?.to_string(),
+        created_at: entry["created_at"].as_str()?.to_string(),
+        agent_cli: None,
+        multiplexer: Default::default(),
+        multiplexer_state: Default::default(),
+        repos,
+        events: Vec::new(),
+    };
+    let worktrees = if matches!(status, WorkspaceStatus::InProgress) {
+        let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+        repo_worktree_statuses(&workspace, &ws_dir)
+    } else {
+        Vec::new()
+    };
+    let missing_repos = workspace
+        .repos
+        .iter()
+        .filter(|repo| match registered.get(&repo.name) {
+            Some(path) => !std::path::Path::new(&shellexpand::tilde(path).into_owned()).exists(),
+            None => true,
+        })
+        .map(|repo| repo.name.clone())
+        .collect();
+    Some(ListWorkspaceItem {
+        status,
+        workspace,
+        worktrees,
+        missing_repos,
+    })
 }
 
 fn format_status(status: &WorkspaceStatus) -> &'static str {
@@ -653,6 +884,39 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
         no_multiplexer: args.no_multiplexer,
         dry_run: args.dry_run,
     };
+    if let Some(daemon) = remote::connect(&config_manager) {
+        let mut body = json!({
+            "from": args.from,
+            "overwrite": args.overwrite,
+            "skip_hooks": args.skip_hooks,
+            "dry_run": args.dry_run,
+            "no_multiplexer": args.no_multiplexer,
+        });
+        if let Some(multiplexer) = &args.multiplexer {
+            body["multiplexer"] = json!(multiplexer);
+        }
+        if let Some(value) = remote::run_agent_json(&args.run_agent) {
+            body["run_agent"] = value;
+        }
+        let path = format!("/workspaces/{}/reopen", request.name);
+        match daemon.execute("POST", &path, body, &ExecOptions::default()) {
+            Ok(Some(finished)) => {
+                if finished.result["dry_run"] == json!(true) {
+                    return Ok(());
+                }
+                return complete_reopen(&session_outcome(&finished.result), &runner);
+            }
+            Ok(None) => {}
+            // The Daemon has no one to ask. The questions come before any
+            // change, so on a terminal the command is simply asked again
+            // locally, where they can be answered.
+            Err(error) if interactive && reopen_needs_answers(&error) => {
+                tracing::debug!("reopen needs answers, running locally: {error:#}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
     let mut prompt = CliReopenPrompt { interactive };
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
@@ -660,7 +924,23 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
     if outcome.dry_run {
         return Ok(());
     }
-    let warning = run_attach(&outcome, &runner, |error| {
+    complete_reopen(&outcome, &runner)
+}
+
+/// True when the Daemon refused because reopen needed an interactive answer
+/// (`--from` or `--overwrite` missing).
+fn reopen_needs_answers(error: &anyhow::Error) -> bool {
+    let Some(failure) = error.downcast_ref::<OperationFailure>() else {
+        return false;
+    };
+    failure.code == "operation_failed"
+        && ["use --from", "requires --overwrite"]
+            .iter()
+            .any(|marker| failure.message.contains(marker))
+}
+
+fn complete_reopen(outcome: &SessionOutcome, runner: &RealRunner) -> Result<()> {
+    let warning = run_attach(outcome, runner, |error| {
         anyhow::anyhow!(
             "workspace '{}' reopened and remains in_progress, but terminal environment activation failed: {error:#}. Run `zootree open {}` to retry",
             outcome.workspace,
@@ -751,6 +1031,28 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
     };
 
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        let body = json!({
+            "no_merge": args.no_merge,
+            "no_clean": args.no_clean,
+            "push": args.push,
+            "strategy": args.strategy.map(|s| s.as_str()),
+            "force": args.force,
+            "skip_hooks": args.skip_hooks,
+            "dry_run": args.dry_run,
+        });
+        let options = ExecOptions {
+            print_summary: true,
+            ..Default::default()
+        };
+        if daemon
+            .execute("POST", &format!("/workspaces/{name}/done"), body, &options)?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+
     let request = DoneRequest {
         name,
         no_merge: args.no_merge,
@@ -787,6 +1089,12 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         }
     };
 
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if cancel_through_daemon(&daemon, &name, args)? {
+            return Ok(());
+        }
+    }
+
     let mut request = CancelRequest {
         name,
         no_clean: args.no_clean,
@@ -814,6 +1122,47 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
             Ok(())
         }
         Ok(_) => Ok(()),
+    }
+}
+
+/// Cancels through the Daemon. The Daemon never asks questions: when it
+/// reports uncommitted changes the question is put here, then the request is
+/// sent again with the answer. `false`: the Daemon could not take it.
+fn cancel_through_daemon(daemon: &DaemonClient, name: &str, args: &CancelArgs) -> Result<bool> {
+    let path = format!("/workspaces/{name}/cancel");
+    let options = ExecOptions {
+        print_summary: true,
+        ..Default::default()
+    };
+    let mut confirmed = false;
+    loop {
+        let body = json!({
+            "no_clean": args.no_clean,
+            "force": args.force,
+            "skip_hooks": args.skip_hooks,
+            "confirmed_uncommitted": confirmed,
+        });
+        match daemon.execute("POST", &path, body, &options) {
+            Ok(finished) => return Ok(finished.is_some()),
+            Err(error) => {
+                let needed = error
+                    .downcast_ref::<OperationFailure>()
+                    .filter(|failure| failure.code == "confirmation_required" && !confirmed)
+                    .map(|failure| failure.repos.clone());
+                let Some(repos) = needed else {
+                    return Err(error);
+                };
+                for repo in &repos {
+                    if !tui::confirm(
+                        &format!("repo '{}' has uncommitted changes. Continue?", repo),
+                        false,
+                    )? {
+                        anyhow::bail!("canceled by user");
+                    }
+                }
+                confirmed = true;
+            }
+        }
     }
 }
 

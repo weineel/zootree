@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
 
+use crate::cli::remote;
 use crate::config::global::GlobalConfig;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
@@ -55,6 +56,16 @@ pub fn handle_info(args: &InfoArgs) -> Result<()> {
             all[idx].name.clone()
         }
     };
+
+    if args.json {
+        // Read-only and cheap: the Daemon answers with the same body.
+        if let Some(detail) = remote::connect(&config_mgr)
+            .and_then(|daemon| daemon.read(&format!("/workspaces/{name}")))
+        {
+            println!("{}", crate::cli::json_view::to_pretty_json(&detail)?);
+            return Ok(());
+        }
+    }
 
     let (status, workspace) = config_mgr.load_workspace(&name)?;
 

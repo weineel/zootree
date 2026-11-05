@@ -531,6 +531,6 @@ fn default_branch(global: &GlobalConfig, name: &str) -> String {
     format!("{}/{}", global.branch_prefix, name)
 }
 
-fn default_workspace_dir(global: &GlobalConfig, name: &str) -> String {
+pub(crate) fn default_workspace_dir(global: &GlobalConfig, name: &str) -> String {
     format!("{}/{}", shellexpand::tilde(&global.workspace_root), name)
 }

@@ -6,7 +6,9 @@ pub mod daemon;
 pub mod edit;
 pub mod info;
 pub mod json_view;
+pub mod operations;
 pub mod prune;
+pub mod remote;
 pub mod repo;
 pub mod template;
 pub mod workspace;
@@ -41,6 +43,8 @@ pub enum Commands {
     Config(config::ConfigArgs),
     #[command(about = "Manage the optional background daemon")]
     Daemon(daemon::DaemonArgs),
+    #[command(about = "Control operations running in the daemon")]
+    Operations(operations::OperationsArgs),
     #[command(about = "Manage registered repositories")]
     Repo(repo::RepoArgs),
     #[command(about = "Create a new workspace")]

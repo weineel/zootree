@@ -267,7 +267,10 @@ zootree template save <name> --from <workspace>
 ```bash
 zootree prune                        # 清理孤立 worktree
 zootree logs                         # 查看日志
+zootree operations cancel <id>       # 让运行中的 daemon 停止某个 Operation
 ```
+
+如果已有兼容的 `zootree daemon` 在运行，`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune` 与 `repo add|list|remove` 会经由它执行，输出与不经过 daemon 时一致。这些命令绝不会自动启动 daemon；没有 daemon（或协议版本不兼容，此时会在 stderr 给出提示）时，它们照旧在本地执行。`edit`、`config *`、交互选择器和终端 attach 始终在你的终端里本地执行。Ctrl-C 只会停止等待（退出码 130），Operation 继续运行，直到你执行 `zootree operations cancel <id>`。
 
 ## 配置文件
 

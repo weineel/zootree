@@ -21,6 +21,8 @@ src/
 │   ├── edit.rs      # edit [name] [--path]: 打开 Workspace configuration 并在编辑后校验
 │   ├── add_repo.rs  # add-repo 参数、交互选择、结果输出与 core transaction 调用
 │   ├── daemon.rs    # daemon start|stop|status 与隐藏的前台入口 daemon run
+│   ├── remote.rs    # 命令行客户端模式：发现 Daemon（三态探测 + 协议/能力检查）、事件流等待、Ctrl-C、环境快照
+│   ├── operations.rs # operations cancel <id>：显式取消 Daemon 里的 Operation
 │   ├── create_flow.rs # create draft、当前 repo 发现、校验与 WorkspaceConfig 转换
 │   ├── workspace.rs # create/start/list/open/reopen/done/cancel
 │   ├── template.rs  # template list/save
@@ -208,6 +210,19 @@ Daemon 绝不执行前台 attach：start/reopen（以及 `create` 带 `start`）
 `events::EventHub` 保存最近 1000 条或 10 分钟（`DaemonOptions::event_retention`）的事件，序号从 1 单调递增，既是 SSE `id` 也在 data 的 `seq` 里。事件名与字段（data 另带 `seq`、`at`）：`workspace.changed{workspace: 完整 json_view 摘要}`、`workspace.removed{name}`、`operation.started{operation_id,kind,workspace,started_at}`、`operation.progress{operation_id,workspace,phase(step|step_started|step_finished|warning),message,ok?}`、`operation.log{operation_id,workspace,message}`、`operation.finished{operation_id,kind,workspace,status,result,error,finished_at}`、`repo.changed{name,action}`（尚无生产者，供 repo 端点使用）。控制帧（无 id，不占序号）：`snapshot{seq,workspaces[全部状态],operations[运行中]}`、`resync{reason(gap_too_large|unknown_position|lagged),seq}`、`replay{from,to,count}`、`ready{seq,replay}`（id=当前序号）。订阅顺序：`begin()` 在锁内固定位置（先监听）→ 读快照 → `ready` → 推送位置之后的事件，所以快照与订阅之间的变化会作为事件再出现一次而不会丢（workspace 事件带完整摘要，重复应用无害）。带 `Last-Event-ID` 重连：位置仍在缓冲内则先发 `replay` 标记、回放之后的事件、`ready{replay:true}`；已被淘汰或大于当前序号（Daemon 重启）则发 `resync` 后接新快照与 `ready`；慢订阅者落后到被淘汰时发 `resync(lagged)` 并断开。`Last-Event-ID` 非数字返回 400。打开的事件流算一个连接，阻止空闲退出；关闭 Daemon 时 `hub.close()` 结束所有流，否则优雅停机会被挂住。
 
 生产者只依赖小接口 `EventProducer::publish(DaemonEvent)`（`AppState::events`）。Operation 的 started/progress/log/finished 由 `OperationRegistry` 在 `start`/`record_event`/`finish` 处发出；`server::submit` 在服务调用结束后（无论成败）用 `events::announce_workspace` 读出该 Workspace 当前状态发 `workspace.changed`（或不存在时 `workspace.removed`），先于 `operation.finished`，所以新增修改端点经 `submit` 自动获得 Workspace 事件，不依赖扫描。外部变化检测（票 10）的挂接点：持有 `Arc<EventHub>` 调 `publish`，用 `EventHub::subscriber_count()` 决定是否扫描。测试用 `client::EventStream` 读 SSE，见 `tests/daemon_events_test.rs`。
+
+### 命令行客户端模式（`src/cli/remote.rs`，ticket 12）
+
+`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune`、`repo add|list|remove` 在 Daemon 运行时经由它执行，输出与本地一致；`edit`、`config *`、`repo edit`、`info`（文本与 `--watch`）、`open`、向导和选择器始终本地（ADR-0002/0006）。规则：
+
+- 发现：`daemon::inspect`（发现文件 + 三态探测，只有 accepting 才用）→ `GET /status` 检查协议区间（`min_compatible ≤ 本客户端 PROTOCOL_VERSION ≤ daemon.protocol_version`）与能力（`read_api`/`operations`/`events`）。无 Daemon、not-listening、unproven、缺能力一律静默本地；协议不兼容在 stderr 给一行提示后本地。普通命令绝不启动 Daemon。所有请求带 `X-Zootree-Protocol-Version`。
+- 提交前先订阅 `/events` 并等到 `ready`，再 POST；按 `operation_id` 过滤 `operation.progress|log|finished` 并按 `CliEventSink` 同样的规则输出（step 到 stdout，warning 走日志，log/step_started/step_finished 仅 `-v`）。流中断或 `resync` 时改为轮询 `GET /operations/{id}`。`done`/`cancel` 的收尾行取 Operation 输出的最后一行（事件流没有对应帧）。
+- 回退只发生在请求被接受之前（连不上、426）。已接受（202）后绝不再本地重跑；忙碌（409）直接报错。
+- 环境快照：`EnvSnapshot::capture()` 作为请求体 `env` 发送（白名单与服务层一致）。
+- Ctrl-C：等待期间 SIGINT 只置标志，命令以 `Interrupted` 错误结束（stderr 提示 Operation id 与 `zootree operations cancel <id>`，退出码 130），Operation 不受影响。`operations cancel <id>` 调 `POST /operations/{id}/cancel` 并等它结束。
+- 需要交互的命令先在本地完成选择/向导再发完整请求：`cancel` 遇 `confirmation_required` 在本地逐个 repo 确认后带 `confirmed_uncommitted` 重发；`reopen` 经 Daemon 时若返回需要 `--from`/`--overwrite` 的错误且 stdin 是终端，则本地重跑以便交互（规划阶段先于任何修改）；`create` 的草稿若 workspace_dir 或 multiplexer 设置无法用请求体表达则本地创建；带 start/run-agent 时用一个 `create`+`start` Operation。start/reopen/create 的前台 attach 用 Operation 结果里的 `attach` 在本地执行。`prune` 逐个 Workspace 发 `DELETE`，丢弃每个 Operation 的合计行，自己打印总数。`repo add` 先把路径转成绝对路径（Daemon 的 cwd 不同）。
+- `serde_json` 启用 `preserve_order`，使经 Daemon 的 `--json` 输出与本地的键顺序一致。
+- 测试：`tests/cli_client_test.rs`（真实二进制 + 进程内 Daemon/假 Daemon，临时 HOME）。
 
 Web 扩展点仅预留（见 `docs/daemon-extension-points.md`）：传输走 `transport::Listener`、鉴权走 `auth::Authenticator`、能力串预留 `web`（默认不声明）、静态资源挂载点在 `server::router`。改这些位置时不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
 
