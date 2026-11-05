@@ -383,6 +383,8 @@ fn start_workspace_with<R: CommandRunner>(
         }
     };
 
+    // One lifecycle mutation per Workspace at a time, across processes (ADR-0006).
+    let _workspace_lock = config_mgr.lock_workspace(&name)?;
     let (status, mut workspace) = config_mgr.load_workspace(&name)?;
     if !matches!(status, WorkspaceStatus::Pending) {
         anyhow::bail!("workspace '{}' is not in pending state", name);
@@ -1127,6 +1129,7 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
         }
         None => anyhow::bail!("workspace name is required when stdin is not interactive"),
     };
+    let _workspace_lock = config_manager.lock_workspace(&name)?;
     let options = ReopenOptions {
         multiplexer: args.multiplexer.clone(),
         sources: ReopenSources::parse(&args.from)?,
@@ -1302,6 +1305,8 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
     };
 
+    // One lifecycle mutation per Workspace at a time, across processes (ADR-0006).
+    let _workspace_lock = config_mgr.lock_workspace(&name)?;
     let (status, mut workspace) = config_mgr.load_workspace(&name)?;
     if !matches!(status, WorkspaceStatus::InProgress) {
         anyhow::bail!("workspace '{}' is not in_progress", name);
@@ -1477,6 +1482,8 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         }
     };
 
+    // One lifecycle mutation per Workspace at a time, across processes (ADR-0006).
+    let _workspace_lock = config_mgr.lock_workspace(&name)?;
     let (status, mut workspace) = config_mgr.load_workspace(&name)?;
     if !is_cancelable_status(&status) {
         anyhow::bail!("workspace '{}' is not active", name);

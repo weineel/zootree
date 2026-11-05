@@ -33,6 +33,7 @@ pub fn handle_add_repo(args: &AddRepoArgs) -> Result<()> {
     let config_manager = ConfigManager::new()?;
     let global_config = config_manager.load_global_config()?;
     let workspace_name = select_workspace(&config_manager, args.workspace.as_deref())?;
+    let _workspace_lock = config_manager.lock_workspace(&workspace_name)?;
     let (status, workspace) = config_manager.load_workspace(&workspace_name)?;
     if status != WorkspaceStatus::InProgress {
         anyhow::bail!("workspace '{}' is not in_progress", workspace_name);

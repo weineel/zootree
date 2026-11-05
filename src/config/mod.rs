@@ -8,6 +8,12 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Held while a lifecycle mutation of one Workspace runs; dropping it releases the lock.
+#[derive(Debug)]
+pub struct WorkspaceLock {
+    _file: std::fs::File,
+}
+
 pub struct ConfigManager {
     pub base_dir: PathBuf,
 }
@@ -168,15 +174,39 @@ impl ConfigManager {
             .join(format!("{}.toml", name)))
     }
 
+    /// Writes a Workspace configuration atomically so concurrent readers never
+    /// observe a truncated file.
     pub fn save_workspace(
         &self,
         status: &workspace::WorkspaceStatus,
         config: &workspace::WorkspaceConfig,
     ) -> Result<()> {
-        let path = self.workspace_config_path(status, &config.name)?;
-        let content = toml::to_string_pretty(config)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        self.save_workspace_atomic(status, config)
+    }
+
+    /// Takes the cross-process lock that serializes lifecycle mutations of one
+    /// Workspace. Fails immediately, naming the situation, when another zootree
+    /// process (CLI or Daemon) already holds it. The lock is released when the
+    /// returned guard is dropped, including when the holder crashes.
+    pub fn lock_workspace(&self, name: &str) -> Result<WorkspaceLock> {
+        name::validate_config_name("workspace", name)?;
+        let dir = self.base_dir.join("workspaces").join(".locks");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{name}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("failed to open workspace lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(WorkspaceLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+                "workspace '{name}' is being modified by another zootree process; try again when it finishes"
+            ),
+            Err(std::fs::TryLockError::Error(error)) => Err(error)
+                .with_context(|| format!("failed to lock workspace {}", path.display())),
+        }
     }
 
     pub(crate) fn save_workspace_atomic(
