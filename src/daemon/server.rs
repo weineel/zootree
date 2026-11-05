@@ -1,6 +1,8 @@
-use super::{Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use super::error::{self, ApiError, PROTOCOL_HEADER};
+use super::{api, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use crate::config::ConfigManager;
 use anyhow::Result;
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -14,27 +16,11 @@ use tokio::sync::Notify;
 #[derive(Clone)]
 pub(super) struct AppState {
     pub token: String,
+    pub base_dir: std::path::PathBuf,
     pub pid: u32,
     pub started_at: String,
     pub activity: Arc<Activity>,
     pub shutdown: Arc<Notify>,
-}
-
-/// Stable string error code plus a human message.
-struct ApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "error": { "code": self.code, "message": self.message } })),
-        )
-            .into_response()
-    }
 }
 
 fn router(state: AppState) -> Router {
@@ -43,7 +29,12 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/shutdown", post(shutdown))
+        .route("/workspaces", get(workspaces))
+        .route("/workspaces/{name}", get(workspace))
+        .route("/repos", get(repos))
+        .route("/agents", get(agents))
         .fallback(not_found)
+        .layer(middleware::from_fn(negotiate_version))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -66,12 +57,85 @@ async fn authenticate(State(state): State<AppState>, request: Request, next: Nex
     if presented != Some(state.token.as_str()) {
         return ApiError {
             status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
+            code: error::UNAUTHORIZED,
             message: "missing or invalid token".to_string(),
         }
         .into_response();
     }
     next.run(request).await
+}
+
+/// Rejects clients that declare an incompatible protocol version. The header
+/// is optional; `/status` is exempt so a client can always learn the Daemon's
+/// versions to explain the mismatch. Runs after authentication.
+async fn negotiate_version(request: Request, next: Next) -> Response {
+    if request.uri().path() != "/status" {
+        if let Some(raw) = request.headers().get(PROTOCOL_HEADER) {
+            let declared = raw.to_str().ok().and_then(|v| v.trim().parse::<u32>().ok());
+            let Some(declared) = declared else {
+                return ApiError::bad_request(format!(
+                    "{PROTOCOL_HEADER} must be a non-negative integer"
+                ))
+                .into_response();
+            };
+            if declared < MIN_COMPATIBLE_PROTOCOL_VERSION {
+                return ApiError::new(
+                    StatusCode::UPGRADE_REQUIRED,
+                    error::CLIENT_TOO_OLD,
+                    format!(
+                        "client protocol version {declared} is older than the minimum {MIN_COMPATIBLE_PROTOCOL_VERSION} this daemon supports; please upgrade the client"
+                    ),
+                )
+                .into_response();
+            }
+            if declared > PROTOCOL_VERSION {
+                return ApiError::new(
+                    StatusCode::UPGRADE_REQUIRED,
+                    error::CLIENT_TOO_NEW,
+                    format!(
+                        "client protocol version {declared} is newer than this daemon's {PROTOCOL_VERSION}; please upgrade the daemon (zootree daemon stop, then start it again)"
+                    ),
+                )
+                .into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
+/// Runs synchronous core work off the async runtime.
+async fn blocking<F>(state: &AppState, work: F) -> Result<Json<serde_json::Value>, ApiError>
+where
+    F: FnOnce(ConfigManager) -> Result<serde_json::Value, ApiError> + Send + 'static,
+{
+    let mgr = ConfigManager::with_base_dir(state.base_dir.clone());
+    tokio::task::spawn_blocking(move || work(mgr))
+        .await
+        .map_err(|e| ApiError::internal(format!("read task failed: {e}")))?
+        .map(Json)
+}
+
+async fn workspaces(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let filter = api::parse_status_filter(request.uri().query())?;
+    blocking(&state, move |mgr| api::list_workspaces(&mgr, &filter)).await
+}
+
+async fn workspace(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    blocking(&state, move |mgr| api::workspace_detail(&mgr, &name)).await
+}
+
+async fn repos(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    blocking(&state, |mgr| api::list_repos(&mgr)).await
+}
+
+async fn agents(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    blocking(&state, |mgr| api::agent_catalog(&mgr)).await
 }
 
 async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -91,11 +155,7 @@ async fn shutdown(State(state): State<AppState>) -> Json<serde_json::Value> {
 }
 
 async fn not_found() -> ApiError {
-    ApiError {
-        status: StatusCode::NOT_FOUND,
-        code: "not_found",
-        message: "no such endpoint".to_string(),
-    }
+    ApiError::not_found("no such endpoint")
 }
 
 /// Runs the server until shutdown is requested, a signal arrives, or the idle

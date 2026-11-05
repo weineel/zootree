@@ -6,7 +6,7 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use zootree::config::ConfigManager;
-use zootree::daemon::client::{request, HttpResponse};
+use zootree::daemon::client::{request, request_with_headers, HttpResponse};
 use zootree::daemon::endpoint::{self, Discovery, Liveness};
 use zootree::daemon::{self, DaemonHandle, DaemonOptions, DaemonState};
 
@@ -345,4 +345,305 @@ fn recent_requests_postpone_idle_exit() {
     }
     assert!(wait_for(|| !daemon.paths.socket.exists()));
     daemon.join().unwrap();
+}
+
+// ---- read-only API ---------------------------------------------------------
+
+mod read_api {
+    use super::*;
+    use std::collections::BTreeMap;
+    use zootree::config::global::{GlobalConfig, HooksConfig, MultiplexerConfig};
+    use zootree::config::repo::RepoConfig;
+    use zootree::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
+
+    fn workspace(name: &str) -> WorkspaceConfig {
+        WorkspaceConfig {
+            title: format!("feat: {name}"),
+            name: name.into(),
+            description: "d".into(),
+            branch: format!("zootree/{name}"),
+            workspace_dir: format!("/tmp/{name}"),
+            created_at: "2026-05-10T14:22:00+08:00".into(),
+            agent_cli: None,
+            multiplexer: MultiplexerConfig::default(),
+            multiplexer_state: Default::default(),
+            repos: vec![RepoEntry {
+                name: "api".into(),
+                target_branch: Some("main".into()),
+            }],
+            events: vec![Event {
+                action: "created".into(),
+                timestamp: "2026-05-10T14:22:00+08:00".into(),
+                detail: None,
+            }],
+        }
+    }
+
+    fn seeded() -> (TempDir, DaemonHandle) {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        mgr.ensure_dirs().unwrap();
+        mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace("alpha"))
+            .unwrap();
+        mgr.save_workspace(&WorkspaceStatus::Pending, &workspace("beta"))
+            .unwrap();
+        mgr.save_workspace(&WorkspaceStatus::Done, &workspace("gamma"))
+            .unwrap();
+        mgr.save_repo_config(
+            "api",
+            &RepoConfig {
+                path: "/src/api".into(),
+                default_target_branch: Some("main".into()),
+                copy_files: Vec::new(),
+                hooks: HooksConfig::default(),
+                lazygit: None,
+            },
+        )
+        .unwrap();
+        let mut aliases = BTreeMap::new();
+        aliases.insert("claude".to_string(), "claude -- $prompt".to_string());
+        mgr.save_global_config(&GlobalConfig {
+            agent_cli: Some("claude".into()),
+            agent_cli_alias: aliases,
+            ..GlobalConfig::default()
+        })
+        .unwrap();
+        let daemon = daemon::start(options(&tmp)).unwrap();
+        (tmp, daemon)
+    }
+
+    fn stop(daemon: DaemonHandle) {
+        daemon.shutdown();
+        daemon.join().unwrap();
+    }
+
+    fn names(body: &serde_json::Value) -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn workspace_list_matches_the_json_view_and_defaults_to_active() {
+        let (_tmp, daemon) = seeded();
+
+        let response = get(&daemon, "/workspaces");
+        assert_eq!(response.status, 200);
+        let body = response.json().unwrap();
+        // Same default filter as `zootree list`: pending + in_progress.
+        assert_eq!(names(&body), ["beta", "alpha"]);
+        let alpha = &body[1];
+        assert_eq!(alpha["status"], "in_progress");
+        assert_eq!(alpha["title"], "feat: alpha");
+        assert_eq!(alpha["workspace_dir"], "/tmp/alpha");
+        assert_eq!(alpha["branch"], "zootree/alpha");
+        assert_eq!(alpha["repos"][0]["target_branch"], "main");
+        assert!(alpha["created_at"].is_string());
+        assert!(alpha.get("events").is_none());
+
+        let all = get(&daemon, "/workspaces?status=done&status=canceled,pending")
+            .json()
+            .unwrap();
+        assert_eq!(names(&all), ["gamma", "beta"]);
+
+        stop(daemon);
+    }
+
+    #[test]
+    fn workspace_detail_matches_the_json_view() {
+        let (_tmp, daemon) = seeded();
+
+        let response = get(&daemon, "/workspaces/alpha");
+        assert_eq!(response.status, 200);
+        let body = response.json().unwrap();
+        assert_eq!(body["name"], "alpha");
+        assert_eq!(body["status"], "in_progress");
+        assert_eq!(body["description"], "d");
+        assert_eq!(body["events"][0]["action"], "created");
+        assert_eq!(body["agent_command"][0], "claude");
+        assert!(body["agent_command_error"].is_null());
+
+        // Completed Workspaces are reachable by name too.
+        assert_eq!(
+            get(&daemon, "/workspaces/gamma").json().unwrap()["status"],
+            "done"
+        );
+
+        stop(daemon);
+    }
+
+    #[test]
+    fn workspace_detail_errors_use_stable_codes() {
+        let (_tmp, daemon) = seeded();
+
+        let missing = get(&daemon, "/workspaces/nope");
+        assert_eq!(missing.status, 404);
+        assert_eq!(missing.json().unwrap()["error"]["code"], "not_found");
+
+        let invalid = get(&daemon, "/workspaces/bad%20name");
+        assert_eq!(invalid.status, 400);
+        assert_eq!(invalid.json().unwrap()["error"]["code"], "bad_request");
+
+        let bad_status = get(&daemon, "/workspaces?status=bogus");
+        assert_eq!(bad_status.status, 400);
+        assert_eq!(bad_status.json().unwrap()["error"]["code"], "bad_request");
+
+        stop(daemon);
+    }
+
+    #[test]
+    fn corrupt_workspace_is_an_internal_error_not_a_crash() {
+        let (tmp, daemon) = seeded();
+        let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+        let (_, path) = mgr.locate_workspace_config("alpha").unwrap();
+        std::fs::write(path, "not = [valid").unwrap();
+
+        let response = get(&daemon, "/workspaces/alpha");
+        assert_eq!(response.status, 500);
+        assert_eq!(response.json().unwrap()["error"]["code"], "internal_error");
+        assert_eq!(get(&daemon, "/status").status, 200);
+
+        stop(daemon);
+    }
+
+    #[test]
+    fn repo_list_and_agent_catalog_match_the_json_views() {
+        let (_tmp, daemon) = seeded();
+
+        let repos = get(&daemon, "/repos").json().unwrap();
+        assert_eq!(repos[0]["name"], "api");
+        assert_eq!(repos[0]["path"], "/src/api");
+        assert_eq!(repos[0]["default_target_branch"], "main");
+
+        let agents = get(&daemon, "/agents").json().unwrap();
+        assert_eq!(agents["default"]["value"], "claude");
+        assert_eq!(agents["default"]["kind"], "alias");
+        assert_eq!(agents["aliases"][0]["name"], "claude");
+        assert_eq!(agents["aliases"][0]["is_default"], true);
+
+        stop(daemon);
+    }
+
+    #[test]
+    fn empty_config_dir_yields_empty_lists() {
+        let tmp = TempDir::new().unwrap();
+        let daemon = daemon::start(options(&tmp)).unwrap();
+        assert_eq!(
+            get(&daemon, "/workspaces").json().unwrap(),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            get(&daemon, "/repos").json().unwrap(),
+            serde_json::json!([])
+        );
+        stop(daemon);
+    }
+
+    #[test]
+    fn read_endpoints_require_the_token() {
+        let (_tmp, daemon) = seeded();
+        for path in ["/workspaces", "/workspaces/alpha", "/repos", "/agents"] {
+            for token in [None, Some("wrong")] {
+                let response = request(&daemon.socket, "GET", path, token, T).unwrap();
+                assert_eq!(response.status, 401, "{path}");
+                assert_eq!(response.json().unwrap()["error"]["code"], "unauthorized");
+            }
+        }
+        stop(daemon);
+    }
+
+    #[test]
+    fn unknown_query_parameters_are_ignored() {
+        let (_tmp, daemon) = seeded();
+        let response = get(&daemon, "/workspaces?future_filter=x&status=done");
+        assert_eq!(response.status, 200);
+        assert_eq!(names(&response.json().unwrap()), ["gamma"]);
+        stop(daemon);
+    }
+
+    fn get_declaring(daemon: &DaemonHandle, path: &str, version: &str) -> HttpResponse {
+        request_with_headers(
+            &daemon.socket,
+            "GET",
+            path,
+            Some(&daemon.token),
+            &[("X-Zootree-Protocol-Version", version)],
+            T,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn current_protocol_version_is_served() {
+        let (_tmp, daemon) = seeded();
+        assert_eq!(get_declaring(&daemon, "/repos", "1").status, 200);
+        stop(daemon);
+    }
+
+    #[test]
+    fn too_new_client_is_told_to_upgrade() {
+        let (_tmp, daemon) = seeded();
+        let response = get_declaring(&daemon, "/repos", "999");
+        assert_eq!(response.status, 426);
+        let error = &response.json().unwrap()["error"];
+        assert_eq!(error["code"], "client_too_new");
+        assert!(error["message"].as_str().unwrap().contains("upgrade"));
+        stop(daemon);
+    }
+
+    #[test]
+    fn too_old_client_is_told_to_upgrade() {
+        let (_tmp, daemon) = seeded();
+        let response = get_declaring(&daemon, "/repos", "0");
+        assert_eq!(response.status, 426);
+        let error = &response.json().unwrap()["error"];
+        assert_eq!(error["code"], "client_too_old");
+        assert!(error["message"].as_str().unwrap().contains("upgrade"));
+        stop(daemon);
+    }
+
+    #[test]
+    fn unparsable_version_header_is_a_bad_request() {
+        let (_tmp, daemon) = seeded();
+        let response = get_declaring(&daemon, "/repos", "abc");
+        assert_eq!(response.status, 400);
+        assert_eq!(response.json().unwrap()["error"]["code"], "bad_request");
+        stop(daemon);
+    }
+
+    #[test]
+    fn status_stays_reachable_for_mismatched_clients() {
+        let (_tmp, daemon) = seeded();
+        assert_eq!(get_declaring(&daemon, "/status", "999").status, 200);
+        // Authentication is checked before the version.
+        let response = request_with_headers(
+            &daemon.socket,
+            "GET",
+            "/repos",
+            None,
+            &[("X-Zootree-Protocol-Version", "999")],
+            T,
+        )
+        .unwrap();
+        assert_eq!(response.status, 401);
+        stop(daemon);
+    }
+
+    #[test]
+    fn error_code_registry_is_stable() {
+        assert_eq!(
+            zootree::daemon::error::ERROR_CODES,
+            [
+                "bad_request",
+                "unauthorized",
+                "not_found",
+                "busy",
+                "internal_error",
+                "client_too_old",
+                "client_too_new"
+            ]
+        );
+    }
 }
