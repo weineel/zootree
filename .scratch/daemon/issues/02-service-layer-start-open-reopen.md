@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — [zootree] 为 done 和 cancel 抽出服务层,并引入请求上下文
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] start、open、reopen 的服务函数不依赖命令行参数类型,不直接打印或进入交互
 - [ ] 终端环境的调用者上下文可以由请求注入;命令行路径传入自己进程的上下文,行为不变
