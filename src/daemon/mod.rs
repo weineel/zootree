@@ -15,7 +15,9 @@ mod mutations;
 pub mod operations;
 mod server;
 mod transport;
+pub mod watcher;
 
+use crate::config::ConfigManager;
 use anyhow::{Context, Result};
 use endpoint::{Discovery, EndpointPaths, Liveness};
 use operations::{OperationRegistry, Retention, RunnerFactory};
@@ -51,6 +53,10 @@ pub struct DaemonOptions {
     pub operation_retention: Retention,
     /// How much event history to keep for resuming subscribers.
     pub event_retention: events::EventRetention,
+    /// Time between external-change scans while an event stream is open.
+    pub scan_interval: Duration,
+    /// Builds the external change detector; tests substitute a double.
+    pub detector: watcher::DetectorFactory,
 }
 
 impl DaemonOptions {
@@ -62,6 +68,8 @@ impl DaemonOptions {
             runner: RunnerFactory::real(),
             operation_retention: Retention::default(),
             event_retention: events::EventRetention::default(),
+            scan_interval: watcher::DEFAULT_SCAN_INTERVAL,
+            detector: watcher::DetectorFactory::filesystem(),
         }
     }
 
@@ -252,6 +260,18 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
     let activity = Arc::new(Activity::new());
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let events = events::EventHub::new(options.event_retention);
+    let operations = OperationRegistry::new(options.operation_retention, events.clone());
+    let watcher = {
+        let registry = operations.clone();
+        watcher::Watcher::spawn(
+            options
+                .detector
+                .make(ConfigManager::with_base_dir(options.base_dir.clone())),
+            events.clone(),
+            Arc::new(move |key| registry.is_running(key)),
+            options.scan_interval,
+        )
+    };
     let state = server::AppState {
         auth: Arc::new(auth::BearerToken::new(token.clone())),
         base_dir: options.base_dir.clone(),
@@ -259,7 +279,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
         started_at: discovery.started_at.clone(),
         activity: activity.clone(),
         shutdown: shutdown.clone(),
-        operations: OperationRegistry::new(options.operation_retention, events.clone()),
+        operations,
         events,
         runner: options.runner.clone(),
     };
@@ -275,6 +295,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
                     idle_timeout,
                     shutdown,
                 );
+                watcher.stop();
                 claim.release();
                 result
             })?

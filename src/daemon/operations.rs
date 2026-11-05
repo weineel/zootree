@@ -241,6 +241,15 @@ impl OperationRegistry {
         Some((running, record.view()))
     }
 
+    /// Whether an Operation is running on `key` (a Workspace name or
+    /// `repo:<name>`).
+    pub fn is_running(&self, key: &str) -> bool {
+        let records = self.records.lock().unwrap();
+        records
+            .iter()
+            .any(|r| r.workspace == key && matches!(r.state, State::Running))
+    }
+
     /// Views of the Operations still running (for the event stream snapshot).
     pub fn running_views(&self) -> Vec<Value> {
         let records = self.records.lock().unwrap();
