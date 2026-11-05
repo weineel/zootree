@@ -65,16 +65,18 @@ src/
 │   ├── workspace_repository.rs # in-progress workspace 增加 repo 的跨 Git/hook/terminal/config 事务
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template/agent alias)
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
-│   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
+│   ├── mod.rs       # start()/DaemonHandle、DaemonOptions、协议版本/能力串常量、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}、POST /operations/{id}/cancel、GET /events；鉴权层 → 版本协商层；读取经 spawn_blocking
-│   ├── events.rs    # 全局事件流 GET /events（SSE）：EventHub 环形缓冲、序号、续传、resync、DaemonEvent、EventProducer 接口、subscribe
-│   ├── auth.rs      # 可替换的鉴权层：Authenticator trait + BearerToken（令牌校验）+ require_auth 中间件
+│   ├── server.rs    # axum 路由与中间件（活动计数 → 鉴权 → 版本协商）、/status、/shutdown、只读端点、done/cancel（submit）、GET /events、空闲/信号退出
+│   ├── mutations.rs # start/reopen/add-repo/create/prune/repo 登记与移除等其余修改端点
+│   ├── operations.rs # Operation 注册表（忙碌判定、保留策略）、OperationHandle/OperationSink、RunnerFactory/DynRunner、done/cancel 请求体与 Job
+│   ├── cancel.rs    # POST /operations/{id}/cancel 与取消结果说明（canceled_info）
+│   ├── events.rs    # 全局事件流 GET /events（SSE）：EventHub 环形缓冲、序号、续传、resync、DaemonEvent、EventProducer、subscribe
+│   ├── watcher.rs   # 外部变化检测：ChangeDetector trait、FsDetector、Watcher 线程
+│   ├── auth.rs      # 可替换的鉴权层：Authenticator trait + BearerToken + require_auth 中间件
 │   ├── transport.rs # 监听器传输枚举 Listener（目前仅 Unix；回环 TCP 仅预留）
 │   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
-│   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy/confirmation_required/operation_failed/internal_error/client_too_old/client_too_new）
-│   ├── cancel.rs    # POST /operations/{id}/cancel 处理器与取消结果说明（canceled_info）
-│   ├── operations.rs # Operation 注册表（状态 running|succeeded|failed|canceled/累计输出/结果/起止时间、按 Workspace 的忙碌判定、保留最近 100 条或 24 小时）、OperationHandle/OperationSink、RunnerFactory、done/cancel 请求体与 Job
+│   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES
 │   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
@@ -117,7 +119,7 @@ pub struct MockRunner {     // 测试用
 
 ### Hook invocation 门面
 
-`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
+`src/service/` 是 CLI 与 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
 
 `src/core/hook.rs` 以类型化 `HookInvocation` 作为 Hook module 的唯一执行 interface。Workspace 与 repo invocation 分别通过 `for_workspace` / `for_repository` 构造；`HookStage`、`HookOperation` 和 `WorkspaceStatus` 明确执行阶段与持久化状态。repo 构造器接收 repo/global 两个候选 Hook，在 module 内统一执行 repo-first/global-fallback 并生成配置来源，调用者不能单独伪造 provenance。
 
@@ -177,62 +179,48 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 `list --json`、`info <name> --json`、`repo list --json` 的结构由 `src/cli/json_view.rs` 的纯函数构建，属于对外稳定契约（Orca 等调用方依赖）。`info --json` 带有已解析的 `agent_command`（argv）。交互式提示在 stdin 不是终端时（`run_inline`）直接报错，保证被程序调用时不会挂起。
 
-### Daemon 只读 API 与信封
+### Daemon（`src/daemon/`，ADR-0006）
 
-只读接口返回的 body 与 `--json` 完全相同（`/workspaces` 默认 pending+in_progress，可用 `?status=a&status=b,c` 过滤，未知查询参数忽略；`/agents` 返回 `AgentCatalog`）。错误统一为 `{"error":{"code","message"}}`，客户端只按 `code` 分支；新增码可以，改名/复用不可。客户端可用请求头 `X-Zootree-Protocol-Version` 声明协议版本：低于 `MIN_COMPATIBLE_PROTOCOL_VERSION` 返回 426 `client_too_old`，高于 `PROTOCOL_VERSION` 返回 426 `client_too_new`，不带头则放行；`/status` 豁免以便客户端查看版本。鉴权先于版本检查。能力串 `read_api` 标记这组接口。`busy`（409）已启用，见下节。
+可选的本机进程，核心保持同步，tokio/axum 只承载传输。线上协议（端点、请求体、Operation 视图、错误码、事件、版本与能力规则、环境快照、令牌与文件权限）的唯一参考是 `docs/daemon-protocol.md`；用户用法在 README “Daemon” 一节。改协议行为时必须同步这两处与本节。
 
-### Daemon Operation（修改请求）
+**模块职责**
 
-所有修改请求立即返回 202 与 Operation 视图（`id/kind/workspace/status(running|succeeded|failed|canceled)/output[]/result/error/cancel_requested/canceled/started_at/finished_at`），经 `GET /operations/{id}` 查询。`done`/`cancel` 请求体为可选 JSON（空体=默认值，未知字段 400）：字段对应服务层 `DoneRequest`/`CancelRequest`，另有 `env`（白名单环境快照；省略时用 Daemon 自身环境，不会得到空 PATH）。cancel 遇未提交改动时 Operation 以 `confirmation_required`（带 `repos`）失败，调用方带 `confirmed_uncommitted` 或 `force` 重试，Daemon 绝不提示。同一 Workspace 已有运行中的 Operation 时第二个请求 409 `busy` 且错误对象带 `operation_id`，不排队；不同 Workspace 并行。命令行（不经 Daemon）持有文件锁时，服务层返回类型化的 `config::WorkspaceBusy`，Operation 以 `busy` 失败（不是 `internal_error`）；其余服务错误为 `operation_failed`，`message` 是完整错误链。
+- `mod.rs`：`start()` 返回 `DaemonHandle`；单实例 flock、陈旧端点接管（只删确认已死的 socket）、`Claim::release` 只清理自己发布的文件；常量 `PROTOCOL_VERSION`、`MIN_COMPATIBLE_PROTOCOL_VERSION`、`CAPABILITIES`、`DEFAULT_IDLE_TIMEOUT`；`DaemonOptions`（端点名、空闲超时、`runner`、`operation_retention`、`event_retention`、`scan_interval`、`detector` 均可由测试替换）；`Activity`（打开的请求/事件流与运行中的 Operation 阻止空闲退出）；`inspect()`。
+- `endpoint.rs`：按大版本的端点名、0600 发现文件（原子写）、三态存活探测 `Liveness`（只有 refused/不存在算已死，超时与权限错误是 Unknown，绝不据此删除）。
+- `server.rs`：路由与中间件顺序（`track_activity` → `require_auth` → `negotiate_version`）、`/status`、`/shutdown`、只读处理器、`done`/`cancel` 与 `submit`、`GET /events`、空闲与信号退出。
+- `api.rs`：只读 body 构造，复用 `cli::json_view` 与 `AgentCatalog`，不改字段。
+- `mutations.rs`：其余修改端点（start/reopen/add-repo/create/prune/repo 登记与移除），统一走其中的 `spawn`。
+- `operations.rs`：Operation 注册表（状态、累计输出、结果/错误、原子忙碌判定、保留最近 100 条或 24 小时、仅存内存）、`OperationHandle`（句柄未显式结束就被丢弃，即 worker panic，记为失败，Workspace 不会卡在忙碌）、`OperationSink`、`DynRunner`/`RunnerFactory`、`done`/`cancel` 请求体与 `Job`。服务错误映射：`WorkspaceBusy` → `busy`，`UncommittedConfirmationRequired` → `confirmation_required`（带 `repos`），其余 `operation_failed`（`message` 为完整错误链）。
+- `cancel.rs`：`POST /operations/{id}/cancel` 与取消结果说明 `canceled_info`。
+- `events.rs`：`EventHub`（环形缓冲 1000 条/10 分钟、序号、续传、resync）、`DaemonEvent`、`EventProducer` 接口、`subscribe`、`announce_workspace`/`announce_outcome`。
+- `watcher.rs`：外部变化检测，`ChangeDetector` trait（默认 `FsDetector`）、`Watcher` 线程。
+- `auth.rs` / `transport.rs`：可替换的鉴权层（`Authenticator` + `BearerToken`）与监听器枚举 `Listener`（目前仅 Unix）；Web 扩展点仅预留，见 `docs/daemon-extension-points.md`，改这些位置不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
+- `error.rs`：`ApiError` 与稳定错误码常量 `ERROR_CODES`。码只增不改名、不复用。
+- `client.rs`：阻塞式 unix socket HTTP 客户端与 SSE `EventStream`（命令行与测试共用）。
 
-新增修改端点的方式：构造 `operations::Job`（环境快照 + 同步服务调用），交给 `server::submit`（其余端点见 `mutations.rs`，同样流程）；它做校验、`OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）、`spawn_blocking`，服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入 Operation 输出（事件流在此处扇出）。Operation 句柄未显式结束就被丢弃（worker panic）会记为失败，Workspace 不会卡在忙碌。记录只存内存；`DaemonOptions::operation_retention` 可调保留策略，`DaemonOptions::runner` 可替换子进程运行器（测试用）。能力串 `operations`。
+**开发约定**
 
-### Daemon 其余修改端点（`src/daemon/mutations.rs`）
+- 只读接口的 body 必须与对应 `--json` 完全相同；能力串 `read_api`。新增行为用新的能力串门控，新增字段/错误码/能力不升协议版本，删除方法、改字段语义或改鉴权才升。
+- 新增修改端点：构造 `operations::Job`（环境快照 + 同步服务调用）。`done`/`cancel` 经 `server::submit`，其余放进 `mutations.rs` 并在 `routes()` 注册、经 `spawn`。两者都做：校验 → `OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）→ `spawn_blocking`；服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入输出并扇出到事件流；调用 `events::announce_outcome` 先发 `workspace.changed`/`workspace.removed`/`repo.changed` 再发 `operation.finished`，所以新端点自动获得事件，不依赖扫描。请求体未知字段 400，缺必填字段在登记 Operation 前 400，绝不进入向导或提示。忙碌键：Workspace 名，或 `repo:<名>`。
+- 服务层不得提示、不得打印；缺少决定时返回类型化错误，由调用方带确认字段重试。Daemon 绝不执行前台 attach，`AttachRequest` 放进结果的 `attach`。
+- 环境快照：请求体 `env` 经 `EnvSnapshot::from_pairs` 过滤到 `SNAPSHOT_ENV_VARS` 白名单（7 个变量）；省略时用 `EnvSnapshot::capture()`（Daemon 自身环境），不能得到空 PATH。
+- 取消：`runner::CancelToken` 经 `DynRunner::with_cancel` 作用于 Operation 的每条子进程命令（`RealRunner` 子进程独立进程组、整组 SIGKILL）；令牌只消费一次，之后的回滚命令不会再被打断。**当前只有 `server::submit`（done、cancel）接入了令牌，`mutations::spawn` 创建的 Operation 没有**，所以它们的取消请求只置 `cancel_requested`。给 `spawn` 接入令牌时同步更新协议文档第 7 节与 README。
+- 事件订阅顺序是先监听、再快照、最后 `ready`；`resync` 的原因是 `unknown_position`/`gap_too_large`/`lagged`；`ChangeDetector` 在 `reset` 或新建后的第一次 `scan` 只记基线。`Watcher` 丢弃有运行中 Operation 的目标和与 Daemon 自己刚发布内容相同的发现（`own_workspace_since`/`own_repo_since`），扫描器自己发布走 `publish_external`。
+- 新增 `DaemonEvent` 时同步 `name()`、`data()`、协议文档第 8 节与 `tests/daemon_events_test.rs`。
 
-全部返回 202 与 Operation，请求体为可选 JSON（未知字段 400），都带可选 `env` 快照并传给服务层（`create` 也经 `EnvRunner`）。`run_agent` 取值：缺省/`false` 不跑 agent，`true` 用默认 agent，字符串为命令或别名。
+### 命令行客户端模式（`src/cli/remote.rs`、`cli/daemon.rs`、`cli/operations.rs`）
 
-| 端点 | 请求体字段 | Operation 结果 |
-|---|---|---|
-| `POST /workspaces/{name}/start` | `multiplexer`、`no_multiplexer`、`run_agent` | `{workspace, dry_run, attach:{program,args}\|null, agent_cli}` |
-| `POST /workspaces/{name}/reopen` | `multiplexer`、`from[]`（`current` 或 `REPO:BRANCH`）、`overwrite[]`、`run_agent`、`skip_hooks`、`no_multiplexer`、`dry_run` | 同 start |
-| `POST /workspaces/{name}/add-repo` | `repo`（必填）、`target_branch` | `{repo, workspace, target_branch, workspace_branch, worktree_path, terminal}` |
-| `POST /workspaces` | `title`（必填）、`repos[]`（名字或 `{name,target_branch}`）或 `template`（二选一必填）、`name`、`description`、`branch`、`multiplexer`、`start`、`run_agent` | `{workspace, status, title, branch, repos, started, attach, agent_cli}` |
-| `DELETE /workspaces/{name}` | 仅 `env` | `{pruned:[name]}`；仅 done/canceled 可删，其余 400 |
-| `POST /repos` | `path`（必填）、`name`、`default_target_branch` | `{name, path}` |
-| `DELETE /repos/{name}` | 仅 `env` | `{name}` |
+`daemon start`（拉起隐藏的前台入口 `daemon run` 为独立进程组，日志写 `<端点名>.log`，等就绪最多 10 秒）、`daemon stop`（`POST /shutdown`，等最多 10 秒）、`daemon status`、`operations cancel <id>`。
 
-Daemon 绝不执行前台 attach：start/reopen（以及 `create` 带 `start`）把服务层的 `AttachRequest` 放进结果的 `attach`，agent 命令在 `agent_cli`，由 Consumer 在自己的终端执行。start 回滚、reopen 非交互提示（缺 `from` 等返回 `operation_failed`）沿用服务层。`create` 缺 title 或 repos/template 在登记 Operation 前 400 `bad_request`，不会进入向导；未给 `name` 时由处理函数先生成，使忙碌键确定。忙碌键：Workspace 操作用 Workspace 名，repo 注册/移除用 `repo:<名>`（Operation 的 `workspace` 字段即该键）。新增此类端点时把处理函数放进 `mutations.rs`，在 `routes()` 注册。
+`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune`、`repo add|list|remove` 在 Daemon 运行时经由它执行，输出与本地一致；`edit`、`config *`、`repo edit`、`info`（文本与 `--watch`）、`open`、`logs`、`template *`、向导和选择器始终本地（ADR-0002/0006）。规则：
 
-显式取消：`POST /operations/{id}/cancel`（无请求体）。运行中返回 202 `{id, outcome:"cancel_requested", status:"running", operation}`；已结束（含已取消）返回 200 `{id, outcome:"already_finished", status, operation}`，幂等不报错；未知 id 404。客户端断开从不影响 Operation，只有此请求会停止它。取消是尽力而为且一次性：`runner::CancelToken` 经 `DynRunner::with_cancel` 作用于该 Operation 的每条子进程命令，`CommandRunner::run_cancellable`（`RealRunner` 为子进程独立进程组并整组 SIGKILL，默认实现只检查开始前的请求）中断当前命令并返回 `runner::Canceled`；令牌被消费一次，之后服务层的回滚命令（如 start 的 `StartRollback`）不会再被打断。命令被打断且工作返回错误时状态为 `canceled`，`canceled` 字段为 `{stopped_at(最后一步名或 null), interrupted_command, cleanup(rolled_back|rollback_failed|none), notes[], detail}`；不可安全中断的步骤（如 merge）会在 `notes` 如实说明可能留下部分结果。取消到达时没有命令可打断、或工作已先完成，则 Operation 保持真实结果（succeeded/failed），`cancel_requested` 为 true。有运行中的 Operation 时 `Activity::begin_operation` 阻止空闲退出，取消结束后计数归零。测试见 `tests/daemon_cancel_test.rs`。
-
-### Daemon 事件流（`GET /events`，能力串 `events`）
-
-`events::EventHub` 保存最近 1000 条或 10 分钟（`DaemonOptions::event_retention`）的事件，序号从 1 单调递增，既是 SSE `id` 也在 data 的 `seq` 里。事件名与字段（data 另带 `seq`、`at`）：`workspace.changed{workspace: 完整 json_view 摘要}`、`workspace.removed{name}`、`operation.started{operation_id,kind,workspace,started_at}`、`operation.progress{operation_id,workspace,phase(step|step_started|step_finished|warning),message,ok?}`、`operation.log{operation_id,workspace,message}`、`operation.finished{operation_id,kind,workspace,status,result,error,finished_at}`、`repo.changed{name,action}`（尚无生产者，供 repo 端点使用）。控制帧（无 id，不占序号）：`snapshot{seq,workspaces[全部状态],operations[运行中]}`、`resync{reason(gap_too_large|unknown_position|lagged),seq}`、`replay{from,to,count}`、`ready{seq,replay}`（id=当前序号）。订阅顺序：`begin()` 在锁内固定位置（先监听）→ 读快照 → `ready` → 推送位置之后的事件，所以快照与订阅之间的变化会作为事件再出现一次而不会丢（workspace 事件带完整摘要，重复应用无害）。带 `Last-Event-ID` 重连：位置仍在缓冲内则先发 `replay` 标记、回放之后的事件、`ready{replay:true}`；已被淘汰或大于当前序号（Daemon 重启）则发 `resync` 后接新快照与 `ready`；慢订阅者落后到被淘汰时发 `resync(lagged)` 并断开。`Last-Event-ID` 非数字返回 400。打开的事件流算一个连接，阻止空闲退出；关闭 Daemon 时 `hub.close()` 结束所有流，否则优雅停机会被挂住。
-
-生产者只依赖小接口 `EventProducer::publish(DaemonEvent)`（`AppState::events`）。Operation 的 started/progress/log/finished 由 `OperationRegistry` 在 `start`/`record_event`/`finish` 处发出；`server::submit` 在服务调用结束后（无论成败）用 `events::announce_workspace` 读出该 Workspace 当前状态发 `workspace.changed`（或不存在时 `workspace.removed`），先于 `operation.finished`，所以新增修改端点经 `submit` 自动获得 Workspace 事件，不依赖扫描。测试用 `client::EventStream` 读 SSE，见 `tests/daemon_events_test.rs`。
-
-### 外部变化检测（`daemon/watcher.rs`）
-
-有订阅者（`EventHub::subscriber_count() > 0`）期间，`Watcher` 线程每 `DaemonOptions::scan_interval`（默认 2 秒）调一次 `ChangeDetector::scan()`，把结果发成 `workspace.changed`（完整摘要）、`workspace.removed`、`repo.changed`（added/removed/updated）；无订阅者时不扫描并 `reset()`。接口是 trait `ChangeDetector { scan() -> Vec<DetectedChange>; reset() }`，`DaemonOptions::detector: DetectorFactory` 可替换（默认 `FsDetector`，将来换文件监听不改事件 API，测试用假检测器，见 `tests/daemon_watcher_test.rs`）。约定：`reset` 或新建后的第一次 `scan` 只记基线、返回空（订阅者的快照已覆盖此前状态；新订阅到记基线之间最多约 50ms 的窗口）。
-
-`FsDetector` 对四个状态目录和 `repos/` 里的 `*.toml` 比较（路径、修改时间纳秒、大小、inode），所以同一秒内的连续修改和原子写（rename 换 inode）都不会漏；以 `.` 开头或 `.tmp` 结尾的原子写临时文件、非法配置名一律忽略；解析失败（改到一半）的配置不报告，保留旧记录下次再看；目录移动即状态变化；消失的文件先用 `locate_workspace_config` 复核，避免依次列四个目录时被并发移动误报删除。
-
-Daemon 自己的操作不靠扫描也不被重复报：`Watcher` 丢弃（1）有运行中 Operation 的 Workspace（键 `repo:<name>` 同理，用 `OperationRegistry::is_running`），Operation 结束时的 `announce_outcome` 会读最终状态；（2）与上次扫描以来 Daemon 自己发布的内容相同的发现（`EventHub` 在 `publish` 时记下每个 Workspace 的摘要/删除和每个 repo 的 action，`own_workspace_since`/`own_repo_since`）。扫描器自己发布走 `EventHub::publish_external`，不计入“自己发布”。限制：事件摘要不含 description/events，若 Daemon 刚发过事件、同一窗口内外部又只改了这些字段，该次外部改动不会再报。
-
-### 命令行客户端模式（`src/cli/remote.rs`，ticket 12）
-
-`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune`、`repo add|list|remove` 在 Daemon 运行时经由它执行，输出与本地一致；`edit`、`config *`、`repo edit`、`info`（文本与 `--watch`）、`open`、向导和选择器始终本地（ADR-0002/0006）。规则：
-
-- 发现：`daemon::inspect`（发现文件 + 三态探测，只有 accepting 才用）→ `GET /status` 检查协议区间（`min_compatible ≤ 本客户端 PROTOCOL_VERSION ≤ daemon.protocol_version`）与能力（`read_api`/`operations`/`events`）。无 Daemon、not-listening、unproven、缺能力一律静默本地；协议不兼容在 stderr 给一行提示后本地。普通命令绝不启动 Daemon。所有请求带 `X-Zootree-Protocol-Version`。
-- 提交前先订阅 `/events` 并等到 `ready`，再 POST；按 `operation_id` 过滤 `operation.progress|log|finished` 并按 `CliEventSink` 同样的规则输出（step 到 stdout，warning 走日志，log/step_started/step_finished 仅 `-v`）。流中断或 `resync` 时改为轮询 `GET /operations/{id}`。`done`/`cancel` 的收尾行取 Operation 输出的最后一行（事件流没有对应帧）。
-- 回退只发生在请求被接受之前（连不上、426）。已接受（202）后绝不再本地重跑；忙碌（409）直接报错。
-- 环境快照：`EnvSnapshot::capture()` 作为请求体 `env` 发送（白名单与服务层一致）。
-- Ctrl-C：等待期间 SIGINT 只置标志，命令以 `Interrupted` 错误结束（stderr 提示 Operation id 与 `zootree operations cancel <id>`，退出码 130），Operation 不受影响。`operations cancel <id>` 调 `POST /operations/{id}/cancel` 并等它结束。
+- 发现：`remote::discover` 先 stat 发现文件与 socket（都不存在即本地），再 `daemon::inspect`（发现文件 + 三态探测，只有 accepting 才用），再 `GET /status` 检查协议区间（`min_compatible ≤ 本客户端 PROTOCOL_VERSION ≤ daemon.protocol_version`）与能力（`read_api`/`operations`/`events`）。无 Daemon、not-listening、unproven、缺能力一律静默本地；协议不兼容在 stderr 给一行提示后本地。普通命令绝不启动 Daemon。所有请求带 `X-Zootree-Protocol-Version`。
+- 提交前先订阅 `/events` 并等到 `ready`，再提交；按 `operation_id` 过滤 `operation.progress|log|finished` 并按 `CliEventSink` 同样的规则输出（step 到 stdout，warning 走日志，log/step_started/step_finished 仅 `-v`）。流中断或 `resync` 时改为轮询 `GET /operations/{id}`。`done`/`cancel` 的收尾行取 Operation 输出的最后一行（事件流没有对应帧）。
+- 回退只发生在请求被接受之前（连不上、426）。已接受（202）后绝不再本地重跑；忙碌（409）直接报错。只读请求出任何错误都回退本地，由本地产生权威结果或错误。
+- 环境快照：`EnvSnapshot::capture()` 作为请求体 `env` 发送。
+- Ctrl-C：等待期间 SIGINT 只置标志，命令以 `Interrupted` 错误结束（stderr 提示 Operation id 与 `zootree operations cancel <id>`，退出码 130），Operation 不受影响。`operations cancel <id>` 调 `POST /operations/{id}/cancel` 并等它结束（最多 15 秒）。
 - 需要交互的命令先在本地完成选择/向导再发完整请求：`cancel` 遇 `confirmation_required` 在本地逐个 repo 确认后带 `confirmed_uncommitted` 重发；`reopen` 经 Daemon 时若返回需要 `--from`/`--overwrite` 的错误且 stdin 是终端，则本地重跑以便交互（规划阶段先于任何修改）；`create` 的草稿若 workspace_dir 或 multiplexer 设置无法用请求体表达则本地创建；带 start/run-agent 时用一个 `create`+`start` Operation。start/reopen/create 的前台 attach 用 Operation 结果里的 `attach` 在本地执行。`prune` 逐个 Workspace 发 `DELETE`，丢弃每个 Operation 的合计行，自己打印总数。`repo add` 先把路径转成绝对路径（Daemon 的 cwd 不同）。
 - `serde_json` 启用 `preserve_order`，使经 Daemon 的 `--json` 输出与本地的键顺序一致。
-- 测试：`tests/cli_client_test.rs`（真实二进制 + 进程内 Daemon/假 Daemon，临时 HOME）。
-
-Web 扩展点仅预留（见 `docs/daemon-extension-points.md`）：传输走 `transport::Listener`、鉴权走 `auth::Authenticator`、能力串预留 `web`（默认不声明）、静态资源挂载点在 `server::router`。改这些位置时不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
 
 ### 命令路由
 
@@ -309,7 +297,7 @@ fn test_something() {
 }
 ```
 
-Daemon Operation 测试放在 `tests/daemon_operations_test.rs`、取消与空闲保护在 `tests/daemon_cancel_test.rs`（`RunnerFactory` 注入可阻塞的运行器替身，用闸门制造"忙碌"）。Daemon 骨架与只读测试放在 `tests/daemon_test.rs`：进程内在临时目录的 unix socket 上启动 Daemon，只通过 HTTP、发现文件与文件系统断言，绝不触碰真实 `~/.config/zootree`。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Daemon 测试都在进程内把 Daemon 启动在临时目录的 unix socket 上（临时配置目录，绝不触碰真实 `~/.config/zootree`），只通过 HTTP、事件流、发现文件与文件系统断言，外部命令用 `RunnerFactory` 注入的替身（可用闸门制造"忙碌"）：`tests/daemon_test.rs`（骨架、发现文件与权限、鉴权、版本协商、只读接口、存活判断与陈旧端点、空闲退出）、`tests/daemon_operations_test.rs`（done/cancel Operation、忙碌、环境快照）、`tests/daemon_mutations_test.rs`（其余修改端点）、`tests/daemon_cancel_test.rs`（显式取消与空闲保护）、`tests/daemon_events_test.rs`（事件序号、续传、resync）、`tests/daemon_watcher_test.rs`（外部变化检测，假检测器）。命令行客户端模式在 `tests/cli_client_test.rs`（真实二进制 + 进程内 Daemon/假 Daemon，临时 HOME）。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 
