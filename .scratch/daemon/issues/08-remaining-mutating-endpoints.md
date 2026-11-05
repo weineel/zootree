@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — [zootree] 为 start、open、reopen 抽出服务层,并让终端环境上下文可注入; 03 — [zootree] 为 create、add-repo、prune 以及 repo 注册和移除抽出服务层; 07 — [zootree] Operation 核心,以及 done 和 cancel 端点
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] start、reopen、add-repo、create、归档删除、repo 注册和移除都有端点并返回 Operation 标识
 - [ ] 请求中的环境快照(PATH、SSH 认证、复用器上下文)被应用;Daemon 自己的环境不会泄漏进子进程
