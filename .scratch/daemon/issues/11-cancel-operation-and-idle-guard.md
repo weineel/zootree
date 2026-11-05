@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 — [zootree] 外部命令逐行转发输出,服务层发出进度和日志事件; 07 — [zootree] Operation 核心,以及 done 和 cancel 端点
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 客户端断开不影响正在执行的 Operation
 - [ ] 显式取消能中断当前子进程,Operation 最终状态为已取消,并说明停在哪一步
