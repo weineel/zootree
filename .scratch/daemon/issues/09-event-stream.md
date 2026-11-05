@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 — [zootree] 外部命令逐行转发输出,服务层发出进度和日志事件; 07 — [zootree] Operation 核心,以及 done 和 cancel 端点
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 订阅后先收到快照,再收到就绪标记;快照与订阅之间的变化不丢失
 - [ ] 序号单调递增;带上次序号重连时只收到之后的事件
