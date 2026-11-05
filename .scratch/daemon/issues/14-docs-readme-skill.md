@@ -4,7 +4,7 @@
 
 **Blocked by:** 12 — [zootree] 命令行客户端模式:Daemon 运行时命令经由它执行; 13 — [zootree] Web 扩展点(仅预留)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] README 与中文 README 说明 Daemon 的用法与命令行共存的规则
 - [ ] 开发 skill 更新模块与测试说明
