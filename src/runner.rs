@@ -233,6 +233,25 @@ impl CommandRunner for RealRunner {
     }
 }
 
+/// Kills `pid` and everything it spawned.
+#[cfg(unix)]
+fn kill_process_tree(pid: u32) {
+    // SAFETY: plain signal to the child's own process group (the child was
+    // spawned as its group leader, so its pgid is its pid).
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Runs `spec`, streaming lines. With a cancel token the child gets its own
 /// process group and a watcher kills the whole group on a cancel request.
 fn stream_command(
@@ -257,12 +276,15 @@ fn stream_command(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group (unix) so a cancel can kill the whole tree; Windows
+    // kills the tree by pid with `taskkill /T` instead.
+    #[cfg(unix)]
     if cancel.is_some() {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
     let mut child = cmd.spawn()?;
-    let pid = child.id() as libc::pid_t;
+    let pid = child.id();
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let (tx, rx) = mpsc::channel();
@@ -275,10 +297,7 @@ fn stream_command(
                     if cancel.take_pending() {
                         cancel.record_interrupt(spec);
                         killed.store(true, Ordering::SeqCst);
-                        // SAFETY: plain signal to the child's own process group.
-                        unsafe {
-                            libc::kill(-pid, libc::SIGKILL);
-                        }
+                        kill_process_tree(pid);
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(20));

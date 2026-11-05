@@ -22,7 +22,6 @@ use anyhow::{Context, Result};
 use endpoint::{Discovery, EndpointPaths, Liveness};
 use operations::{OperationRegistry, Retention, RunnerFactory};
 use rand::RngCore;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -211,11 +210,11 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
 
     // The lock is the single-instance authority; the kernel releases it when
     // the holder dies, however it dies.
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
+    let mut lock_options = std::fs::OpenOptions::new();
+    lock_options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut lock_options, 0o600);
+    let lock = lock_options
         .open(&paths.lock)
         .with_context(|| format!("failed to open {}", paths.lock.display()))?;
     match lock.try_lock() {
@@ -233,11 +232,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
 
     take_over_stale_endpoint(&paths.socket)?;
 
-    let listener = std::os::unix::net::UnixListener::bind(&paths.socket)
-        .with_context(|| format!("failed to bind {}", paths.socket.display()))?;
-    // The directory is 0700 already; tighten the socket itself as well.
-    std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
+    let listener = bind_listener(&paths.socket)?;
 
     let token = generate_token();
     let claim = Claim {
@@ -290,12 +285,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
         std::thread::Builder::new()
             .name("zootree-daemon".to_string())
             .spawn(move || {
-                let result = server::run(
-                    transport::Listener::Unix(listener),
-                    state,
-                    idle_timeout,
-                    shutdown,
-                );
+                let result = server::run(listener, state, idle_timeout, shutdown);
                 watcher.stop();
                 claim.release();
                 result
@@ -311,6 +301,42 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
     })
 }
 
+#[cfg(unix)]
+fn bind_listener(socket: &Path) -> Result<transport::Listener> {
+    use std::os::unix::fs::PermissionsExt;
+    let listener = std::os::unix::net::UnixListener::bind(socket)
+        .with_context(|| format!("failed to bind {}", socket.display()))?;
+    // The directory is 0700 already; tighten the socket itself as well.
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    Ok(transport::Listener::Unix(listener))
+}
+
+/// Windows has no unix sockets in std: listen on an ephemeral loopback port
+/// and publish `ip:port` in the endpoint file. Reaching the port is not
+/// enough; every request still needs the token from the discovery file.
+#[cfg(windows)]
+fn bind_listener(socket: &Path) -> Result<transport::Listener> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .context("failed to bind a loopback port")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    std::fs::write(socket, addr.to_string())
+        .with_context(|| format!("failed to write {}", socket.display()))?;
+    Ok(transport::Listener::Tcp(listener))
+}
+
+#[cfg(unix)]
+fn is_endpoint_file(file_type: std::fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    file_type.is_socket()
+}
+
+#[cfg(windows)]
+fn is_endpoint_file(file_type: std::fs::FileType) -> bool {
+    file_type.is_file()
+}
+
 /// With the lock held no live Daemon of ours exists, but the endpoint may be a
 /// leftover or something that is not ours. Remove only a confirmed-dead socket.
 fn take_over_stale_endpoint(socket: &Path) -> Result<()> {
@@ -319,7 +345,7 @@ fn take_over_stale_endpoint(socket: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("failed to stat {}", socket.display())),
     };
-    if !metadata.file_type().is_socket() {
+    if !is_endpoint_file(metadata.file_type()) {
         anyhow::bail!(
             "{} exists but is not a socket; refusing to remove it",
             socket.display()

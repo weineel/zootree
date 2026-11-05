@@ -278,19 +278,43 @@ struct Fingerprint {
 
 impl Fingerprint {
     fn of(path: &Path) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(path).ok()?;
         if !metadata.is_file() {
             return None;
         }
         Some(Self {
             path: path.to_path_buf(),
-            modified_ns: i128::from(metadata.mtime()) * 1_000_000_000
-                + i128::from(metadata.mtime_nsec()),
+            modified_ns: modified_ns(&metadata),
             size: metadata.len(),
-            inode: metadata.ino(),
+            inode: inode(&metadata),
         })
     }
+}
+
+#[cfg(unix)]
+fn modified_ns(metadata: &std::fs::Metadata) -> i128 {
+    use std::os::unix::fs::MetadataExt;
+    i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec())
+}
+
+#[cfg(unix)]
+fn inode(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.ino()
+}
+
+#[cfg(windows)]
+fn modified_ns(metadata: &std::fs::Metadata) -> i128 {
+    use std::os::windows::fs::MetadataExt;
+    // 100ns intervals since 1601; only compared for equality.
+    i128::from(metadata.last_write_time()) * 100
+}
+
+/// Windows exposes no stable file id on stable Rust; modification time and
+/// size carry the change detection there.
+#[cfg(windows)]
+fn inode(_metadata: &std::fs::Metadata) -> u64 {
+    0
 }
 
 /// Polling [`ChangeDetector`] over the Workspace state directories and

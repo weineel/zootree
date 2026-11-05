@@ -343,8 +343,16 @@ pub(super) fn run(
             hub.close();
         };
         match listener {
+            #[cfg(unix)]
             Listener::Unix(listener) => {
                 let listener = tokio::net::UnixListener::from_std(listener)?;
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(done)
+                    .await?;
+            }
+            #[cfg(windows)]
+            Listener::Tcp(listener) => {
+                let listener = tokio::net::TcpListener::from_std(listener)?;
                 axum::serve(listener, app)
                     .with_graceful_shutdown(done)
                     .await?;
@@ -354,6 +362,14 @@ pub(super) fn run(
     })
 }
 
+#[cfg(windows)]
+async fn wait_for_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(unix)]
 async fn wait_for_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let (Ok(mut term), Ok(mut int)) = (

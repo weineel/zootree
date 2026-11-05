@@ -24,7 +24,10 @@ use crate::service::{EnvRunner, RequestContext, ServiceEvent};
 use anyhow::Result;
 use chrono::Local;
 use std::cell::RefCell;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 use std::time::Duration;

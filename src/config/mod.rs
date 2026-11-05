@@ -6,7 +6,6 @@ pub mod workspace;
 
 use anyhow::{Context, Result};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Held while a lifecycle mutation of one Workspace runs; dropping it releases the lock.
@@ -213,11 +212,11 @@ impl ConfigManager {
         let dir = self.base_dir.join("workspaces").join(".locks");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{name}.lock"));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
             .open(&path)
             .with_context(|| format!("failed to open workspace lock {}", path.display()))?;
         match file.try_lock() {

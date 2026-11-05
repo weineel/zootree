@@ -8,12 +8,41 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Longest socket path accepted. `sockaddr_un.sun_path` is 104 bytes on macOS.
+#[cfg(unix)]
 const MAX_SOCKET_PATH_LEN: usize = 100;
+
+/// Blocking connection to a Daemon: a unix socket on unix, loopback TCP on
+/// Windows.
+#[cfg(unix)]
+pub type Stream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub type Stream = std::net::TcpStream;
+
+/// Connects to the endpoint `socket`. On Windows the endpoint file holds the
+/// loopback `ip:port` the Daemon bound; a missing file is `NotFound` and a
+/// stale port is `ConnectionRefused`, so [`classify_connect_error`] holds on
+/// both platforms.
+pub fn connect(socket: &Path) -> std::io::Result<Stream> {
+    #[cfg(unix)]
+    {
+        Stream::connect(socket)
+    }
+    #[cfg(windows)]
+    {
+        let addr = std::fs::read_to_string(socket)?;
+        let addr: std::net::SocketAddr = addr.trim().parse().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                format!("endpoint file {} is malformed: {e}", socket.display()),
+            )
+        })?;
+        Stream::connect(addr)
+    }
+}
 
 /// Where one Daemon (identified by its endpoint name) keeps its files.
 #[derive(Debug, Clone)]
@@ -40,6 +69,7 @@ impl EndpointPaths {
     pub fn new(base_dir: &Path, name: &str) -> Result<Self> {
         let dir = base_dir.join("daemon");
         let socket = dir.join(format!("{name}.sock"));
+        #[cfg(unix)]
         if socket.as_os_str().len() > MAX_SOCKET_PATH_LEN {
             anyhow::bail!(
                 "daemon socket path is too long for a unix socket ({} bytes): {}",
@@ -57,16 +87,23 @@ impl EndpointPaths {
 
     /// Creates the endpoint directory readable only by the current user.
     pub fn ensure_dir(&self) -> Result<()> {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
             .create(&self.dir)
             .with_context(|| format!("failed to create {}", self.dir.display()))?;
         // The directory may pre-exist with looser permissions (created by an
-        // older run or another tool); the sockets inside rely on it.
-        let mode = std::fs::metadata(&self.dir)?.permissions().mode() & 0o777;
-        if mode != 0o700 {
-            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+        // older run or another tool); the sockets inside rely on it. Windows
+        // has no mode bits; the user profile ACL keeps the directory private.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&self.dir)?.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
         Ok(())
     }
@@ -83,14 +120,15 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    /// Atomically writes the file with mode 0600.
+    /// Atomically writes the file (mode 0600 on unix).
     pub fn write(&self, path: &Path) -> Result<()> {
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         let result = (|| -> Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut file = options
                 .open(&tmp)
                 .with_context(|| format!("failed to create {}", tmp.display()))?;
             file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
@@ -141,7 +179,7 @@ pub fn probe(socket: &Path, timeout: Duration) -> Liveness {
     let socket = socket.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = match std::os::unix::net::UnixStream::connect(&socket) {
+        let result = match connect(&socket) {
             Ok(_) => Liveness::Listening,
             Err(e) => classify_connect_error(&e),
         };

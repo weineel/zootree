@@ -1,10 +1,10 @@
-//! Minimal blocking HTTP/1.1 client over a unix socket, used by the CLI
+//! Minimal blocking HTTP/1.1 client over the daemon endpoint (unix socket, or loopback TCP on Windows), used by the CLI
 //! (`daemon status|stop`) and by tests. Deliberately tiny: one request per
 //! connection, `Connection: close`.
 
+use super::endpoint::{self, Stream};
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
@@ -85,7 +85,7 @@ pub fn request_raw(
     timeout: Duration,
 ) -> Result<HttpResponse> {
     let body = body.unwrap_or("");
-    let mut stream = UnixStream::connect(socket)
+    let mut stream = endpoint::connect(socket)
         .with_context(|| format!("failed to connect to {}", socket.display()))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -224,7 +224,7 @@ pub struct SseFrame {
 /// again.
 #[derive(Debug)]
 pub struct EventStream {
-    reader: std::io::BufReader<UnixStream>,
+    reader: std::io::BufReader<Stream>,
     pending: String,
     /// Partially read chunk-size line.
     line: String,
@@ -260,7 +260,7 @@ impl EventStream {
         last_event_id: Option<u64>,
     ) -> Result<Self> {
         use std::io::BufRead;
-        let mut stream = UnixStream::connect(socket)
+        let mut stream = endpoint::connect(socket)
             .with_context(|| format!("failed to connect to {}", socket.display()))?;
         let mut head =
             String::from("GET /events HTTP/1.1\r\nHost: zootree\r\nConnection: close\r\nAccept: text/event-stream\r\n");

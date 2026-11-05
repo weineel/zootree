@@ -86,13 +86,18 @@ fn handle_start(options: &DaemonOptions) -> Result<()> {
         .with_context(|| format!("failed to open {}", log_path.display()))?;
     // A detached long-lived process, not a captured command, so this is the one
     // place that does not go through CommandRunner.
-    use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(std::env::current_exe()?)
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
         .args(["daemon", "run"])
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
+        .stderr(log);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS: outlive this console.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0000_0200 | 0x0000_0008);
+    let mut child = command
         .spawn()
         .context("failed to spawn the daemon process")?;
 
