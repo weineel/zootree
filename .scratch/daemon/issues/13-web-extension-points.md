@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 — [zootree] 只读 API:Workspace、repo、agent,以及信封、错误码、版本协商
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 监听器抽象允许在不改 API 的前提下增加传输;现有 unix socket 行为不变
 - [ ] 鉴权作为可替换的独立一层,现有令牌校验行为不变

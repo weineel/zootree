@@ -66,6 +66,8 @@ src/
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
 │   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── auth.rs      # 可替换的鉴权层：Authenticator trait + BearerToken（令牌校验）+ require_auth 中间件
+│   ├── transport.rs # 监听器传输枚举 Listener（目前仅 Unix；回环 TCP 仅预留）
 │   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
 │   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy/confirmation_required/operation_failed/internal_error/client_too_old/client_too_new）
 │   ├── operations.rs # Operation 注册表（状态/累计输出/结果/起止时间、按 Workspace 的忙碌判定、保留最近 100 条或 24 小时）、OperationHandle/OperationSink、RunnerFactory、done/cancel 请求体与 Job
@@ -82,7 +84,7 @@ src/
 │   ├── info.rs      # InfoApp + 格式化辅助函数
 │   └── prompt.rs    # TUI 通用确认 prompt
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
-├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/cancel，create.rs，add_repo.rs，prune.rs，repos.rs 仓库注册/移除）
+├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/cancel，start.rs start/open/AttachRequest，reopen.rs，create.rs，add_repo.rs，prune.rs，repos.rs 仓库注册/移除）
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
 
@@ -111,7 +113,7 @@ pub struct MockRunner {     // 测试用
 
 ### Hook invocation 门面
 
-`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`（临时配置目录 + `MockRunner`）。
+`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
 
 `src/core/hook.rs` 以类型化 `HookInvocation` 作为 Hook module 的唯一执行 interface。Workspace 与 repo invocation 分别通过 `for_workspace` / `for_repository` 构造；`HookStage`、`HookOperation` 和 `WorkspaceStatus` 明确执行阶段与持久化状态。repo 构造器接收 repo/global 两个候选 Hook，在 module 内统一执行 repo-first/global-fallback 并生成配置来源，调用者不能单独伪造 provenance。
 
@@ -180,6 +182,8 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 所有修改请求立即返回 202 与 Operation 视图（`id/kind/workspace/status(running|succeeded|failed)/output[]/result/error/started_at/finished_at`），经 `GET /operations/{id}` 查询。`done`/`cancel` 请求体为可选 JSON（空体=默认值，未知字段 400）：字段对应服务层 `DoneRequest`/`CancelRequest`，另有 `env`（白名单环境快照；省略时用 Daemon 自身环境，不会得到空 PATH）。cancel 遇未提交改动时 Operation 以 `confirmation_required`（带 `repos`）失败，调用方带 `confirmed_uncommitted` 或 `force` 重试，Daemon 绝不提示。同一 Workspace 已有运行中的 Operation 时第二个请求 409 `busy` 且错误对象带 `operation_id`，不排队；不同 Workspace 并行。命令行（不经 Daemon）持有文件锁时，服务层返回类型化的 `config::WorkspaceBusy`，Operation 以 `busy` 失败（不是 `internal_error`）；其余服务错误为 `operation_failed`，`message` 是完整错误链。
 
 新增修改端点的方式：构造 `operations::Job`（环境快照 + 同步服务调用），交给 `server::submit`；它做校验、`OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）、`spawn_blocking`，服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入 Operation 输出（事件流在此处扇出）。Operation 句柄未显式结束就被丢弃（worker panic）会记为失败，Workspace 不会卡在忙碌。记录只存内存；`DaemonOptions::operation_retention` 可调保留策略，`DaemonOptions::runner` 可替换子进程运行器（测试用）。能力串 `operations`。
+
+Web 扩展点仅预留（见 `docs/daemon-extension-points.md`）：传输走 `transport::Listener`、鉴权走 `auth::Authenticator`、能力串预留 `web`（默认不声明）、静态资源挂载点在 `server::router`。改这些位置时不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
 
 ### 命令路由
 

@@ -5,11 +5,13 @@
 //! the transport.
 
 mod api;
+mod auth;
 pub mod client;
 pub mod endpoint;
 pub mod error;
 pub mod operations;
 mod server;
+mod transport;
 
 use anyhow::{Context, Result};
 use endpoint::{Discovery, EndpointPaths, Liveness};
@@ -27,6 +29,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Oldest client protocol version this Daemon still serves.
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
 /// Capability strings; new behavior is gated by adding one here.
+/// `web` is reserved for a future Web UI transport and must not be declared
+/// until that exists (docs/daemon-extension-points.md).
 pub const CAPABILITIES: &[&str] = &["status", "read_api", "operations"];
 /// Idle time without connections or Operations before the Daemon exits.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -242,7 +246,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
     let activity = Arc::new(Activity::new());
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let state = server::AppState {
-        token: token.clone(),
+        auth: Arc::new(auth::BearerToken::new(token.clone())),
         base_dir: options.base_dir.clone(),
         pid: discovery.pid,
         started_at: discovery.started_at.clone(),
@@ -257,7 +261,12 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
         std::thread::Builder::new()
             .name("zootree-daemon".to_string())
             .spawn(move || {
-                let result = server::run(listener, state, idle_timeout, shutdown);
+                let result = server::run(
+                    transport::Listener::Unix(listener),
+                    state,
+                    idle_timeout,
+                    shutdown,
+                );
                 claim.release();
                 result
             })?

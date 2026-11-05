@@ -117,14 +117,22 @@ pub(super) enum HerdrCallerContext {
 }
 
 impl HerdrCallerContext {
-    pub(super) fn from_env() -> Self {
-        if std::env::var_os("HERDR_ENV").as_deref() != Some(std::ffi::OsStr::new("1")) {
+    pub(super) fn from_vars(get: impl Fn(&str) -> Option<String>) -> Self {
+        if get("HERDR_ENV").as_deref() != Some("1") {
             return Self::Outside;
         }
         Self::Inside {
-            socket_path: std::env::var("HERDR_SOCKET_PATH").ok(),
+            socket_path: get("HERDR_SOCKET_PATH"),
         }
     }
+
+    pub(super) fn from_env() -> Self {
+        Self::from_vars(process_env_var)
+    }
+}
+
+pub(super) fn process_env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
 pub(super) fn activate<R: CommandRunner>(
@@ -669,5 +677,6 @@ fn activation(
             },
         )?,
         warnings,
+        notices: Vec::new(),
     })
 }
