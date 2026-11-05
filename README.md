@@ -272,18 +272,68 @@ zootree template save <name> --from <workspace>
 ```bash
 zootree prune                        # Clean up orphaned worktrees
 zootree logs                         # View logs
-zootree operations cancel <id>       # Ask a running daemon to stop an operation
+zootree operations cancel <id>       # Ask a running daemon to stop an operation (see Daemon)
 ```
 
-If a compatible `zootree daemon` is already running, `list`, `info --json`,
-`start`, `done`, `cancel`, `reopen`, `add-repo`, `create`, `prune` and
-`repo add|list|remove` run through it and print the same output as without it.
-The daemon is never started by these commands; without one (or with an
-incompatible protocol version, which prints a warning on stderr) they run
-locally exactly as before. `edit`, `config *`, interactive pickers and the
-terminal attach always run in your terminal. Ctrl-C only stops waiting
-(exit code 130); the operation keeps running until you run
-`zootree operations cancel <id>`.
+## Daemon (optional)
+
+`zootree daemon` is an optional local background process that gives several
+consumers (the command line, Orca, later a web page) one shared view of
+workspaces, tracked operations and change events. zootree behaves the same
+without it: it is never required, and the command line stays first-class.
+
+```bash
+zootree daemon start                 # Start the daemon in the background
+zootree daemon status                # Show whether it is running (pid, version, protocol, endpoint)
+zootree daemon stop                  # Stop it
+zootree operations cancel <id>       # Ask the daemon to stop a running operation (best effort)
+```
+
+- **Who starts it**: you, with `zootree daemon start`, or a long-lived consumer such as Orca.
+  Ordinary commands (`list`, `start`, `done`, ...) never start it. `daemon start` refuses to
+  start a second instance, or when it cannot tell whether one is already running.
+- **Idle exit**: the daemon exits after 10 minutes with no open request, no open event
+  stream and no running operation. A running operation always keeps it alive.
+- **Coexistence with the command line**: every state-changing path takes a per-workspace
+  file lock and writes atomically, so running commands in-process and through the daemon
+  against the same workspace is safe, and hand-editing workspace files keeps working.
+  A command-line process holding a workspace lock makes a daemon operation on it fail with
+  `busy`; a second request for a workspace that already has a running operation is rejected
+  with `busy` too (no queueing).
+- **Where it lives**: `~/.config/zootree/daemon/` (mode 0700) holds the unix socket
+  `<endpoint>.sock`, the discovery file `<endpoint>.json` (pid, socket path, token, start
+  time, protocol version; mode 0600), a lock file and `<endpoint>.log`. The endpoint name
+  follows the version line: `v0.1` for 0.1.x, `v<major>` from 1.0, so daemons of different
+  major versions can coexist.
+
+### Commands that go through the daemon
+
+If a compatible daemon is running, `list`, `info --json`, `start`, `done`, `cancel`,
+`reopen`, `add-repo`, `create`, `prune` and `repo add|list|remove` run through it: the
+command submits the request with a whitelisted snapshot of your environment, prints the
+operation's progress live and prints the same output as without the daemon.
+`edit`, `config *`, `repo edit`, `info` without `--json` (and `--watch`), `open`, `logs`,
+`template *`, `completions`, interactive pickers and wizards, and the terminal attach always
+run locally in your terminal. Where a command needs an answer from you (for example `cancel`
+with uncommitted changes), it asks locally and then sends the confirmed request.
+
+**Fallback rules**: the daemon is used only when its discovery file exists, the endpoint
+accepts connections, and its protocol range and capabilities fit this `zootree`. Otherwise
+(no daemon, not listening, unprovable state, missing capability) the command silently runs
+locally exactly as before; an incompatible protocol version prints a warning on stderr
+first. Falling back happens only before the daemon accepts the request. After that the
+command never re-runs locally (the work may already be running): it waits for the result
+or fails.
+
+**Ctrl-C and cancel**: Ctrl-C only stops waiting (exit code 130, the operation id is
+printed); the operation keeps running in the daemon. Stop it with
+`zootree operations cancel <id>`: the command currently running is killed and the
+operation unwinds through its own rollback, but cancellation is best effort. Today it
+interrupts commands of `done` and `cancel` operations; other operations record the request
+but run to their real outcome. `operations cancel` needs a running compatible daemon.
+
+For integrators, the HTTP API, error codes, event stream and compatibility rules are in
+[docs/daemon-protocol.md](docs/daemon-protocol.md).
 
 ## Configuration
 

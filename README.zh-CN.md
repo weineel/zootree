@@ -270,7 +270,31 @@ zootree logs                         # 查看日志
 zootree operations cancel <id>       # 让运行中的 daemon 停止某个 Operation
 ```
 
-如果已有兼容的 `zootree daemon` 在运行，`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune` 与 `repo add|list|remove` 会经由它执行，输出与不经过 daemon 时一致。这些命令绝不会自动启动 daemon；没有 daemon（或协议版本不兼容，此时会在 stderr 给出提示）时，它们照旧在本地执行。`edit`、`config *`、交互选择器和终端 attach 始终在你的终端里本地执行。Ctrl-C 只会停止等待（退出码 130），Operation 继续运行，直到你执行 `zootree operations cancel <id>`。
+## Daemon（可选）
+
+`zootree daemon` 是可选的本机后台进程，让多个使用方（命令行、Orca、将来的 Web 页）共享同一份 Workspace、Operation 与变化事件视图。没有它 zootree 的行为完全一样：它永远不是必需的，命令行始终是一等入口。
+
+```bash
+zootree daemon start                 # 在后台启动 daemon
+zootree daemon status                # 查看是否运行（pid、版本、协议、端点）
+zootree daemon stop                  # 停止 daemon
+zootree operations cancel <id>       # 让 daemon 停止某个运行中的 Operation（尽力而为）
+```
+
+- **谁来启动**：你自己用 `zootree daemon start`，或 Orca 这类长期运行的使用方。普通命令（`list`、`start`、`done` 等）绝不会启动它。已有实例在运行、或无法判断是否在运行时，`daemon start` 会拒绝再启动一个。
+- **空闲退出**：没有打开的请求、没有打开的事件流、也没有运行中的 Operation 达 10 分钟，daemon 自动退出；有 Operation 运行时不会退出。
+- **与命令行共存**：所有修改状态的路径都会取 Workspace 级文件锁并原子写入，所以对同一个 Workspace 既用本进程命令又经 daemon 操作是安全的，手工编辑 Workspace 文件依然受支持。命令行进程持有某个 Workspace 的锁时，daemon 对它的 Operation 会以 `busy` 失败；该 Workspace 已有运行中的 Operation 时，再来的请求同样被 `busy` 拒绝（不排队）。
+- **文件位置**：`~/.config/zootree/daemon/`（权限 0700）下有 unix socket `<端点名>.sock`、发现文件 `<端点名>.json`（pid、socket 路径、令牌、启动时间、协议版本；权限 0600）、锁文件和 `<端点名>.log`。端点名跟随版本线：0.1.x 为 `v0.1`，1.0 起为 `v<大版本>`，不同大版本的 daemon 可以共存。
+
+### 经由 daemon 执行的命令
+
+如果已有兼容的 daemon 在运行，`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune` 与 `repo add|list|remove` 会经由它执行：命令带上经白名单过滤的环境快照提交请求，实时打印 Operation 的进度，输出与不经过 daemon 时一致。`edit`、`config *`、`repo edit`、不带 `--json` 的 `info`（及 `--watch`）、`open`、`logs`、`template *`、`completions`、交互选择器与向导、终端 attach 始终在你的终端里本地执行。需要你回答的场景（例如 `cancel` 遇到未提交改动）会先在本地询问，再发送确认后的请求。
+
+**回退规则**：只有发现文件存在、端点在接受连接、且它的协议区间与能力和当前 `zootree` 相符时才使用 daemon。否则（没有 daemon、没在监听、状态无法证明、缺少能力）命令静默地照旧在本地执行；协议版本不兼容时会先在 stderr 给出一行提示。回退只发生在 daemon 接受请求之前；接受之后命令绝不会再在本地重跑（工作可能已经在进行），只会等待结果或报错。
+
+**Ctrl-C 与取消**：Ctrl-C 只会停止等待（退出码 130，并打印 Operation id），Operation 继续在 daemon 里运行；用 `zootree operations cancel <id>` 停止它：正在运行的命令会被杀掉，Operation 经自身回滚展开，但取消是尽力而为的。目前能打断子进程命令的是 `done` 与 `cancel` 两类 Operation，其他类型只记录取消请求并按真实结果结束。`operations cancel` 需要有运行中的兼容 daemon。
+
+HTTP 接口、错误码、事件流与兼容规则见面向集成方的 [docs/daemon-protocol.md](docs/daemon-protocol.md)。
 
 ## 配置文件
 
