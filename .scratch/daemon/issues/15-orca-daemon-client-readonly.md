@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 — [zootree] 只读 API:Workspace、repo、agent,以及信封、错误码、版本协商; 09 — [zootree] 事件流:SSE、序号、断线续传、重新同步
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 看板数据来自 Daemon 的快照与事件流,状态变化无需轮询即可刷新
 - [ ] Daemon 不在运行时,Orca 能按需启动它;启动失败时看板显示原因和路径输入框
