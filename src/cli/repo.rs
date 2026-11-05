@@ -1,9 +1,9 @@
-use crate::config::global::HooksConfig;
-use crate::config::repo::RepoConfig;
+use crate::cli::workspace::CliEventSink;
 use crate::config::ConfigManager;
 use crate::core::completers::complete_repo;
 use crate::core::editor;
-use crate::core::repo_names::unique_repo_name;
+use crate::service::repos::{register_repo, remove_repo, RegisterRepoRequest, RemoveRepoRequest};
+use crate::service::{EnvSnapshot, RequestContext};
 use crate::tui;
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -50,25 +50,6 @@ pub enum RepoCommands {
     },
 }
 
-fn repo_add_base_name(name: &Option<String>, path: &str) -> String {
-    name.clone().unwrap_or_else(|| {
-        std::path::Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| path.to_string())
-    })
-}
-
-fn resolve_repo_add_name(
-    config_mgr: &ConfigManager,
-    name: &Option<String>,
-    path: &str,
-) -> Result<String> {
-    let base = repo_add_base_name(name, path);
-    unique_repo_name(config_mgr, &base)
-}
-
 fn format_repo_list_entry(name: &str, path: &str) -> String {
     let expanded = shellexpand::tilde(path).into_owned();
     let missing = if Path::new(&expanded).exists() {
@@ -82,6 +63,8 @@ fn format_repo_list_entry(name: &str, path: &str) -> String {
 pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.ensure_dirs()?;
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
 
     match cmd {
         RepoCommands::Add {
@@ -89,21 +72,15 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
             path,
             default_target_branch,
         } => {
-            let expanded = shellexpand::tilde(path).into_owned();
-            let abs_path = std::fs::canonicalize(&expanded)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
-
-            let repo_name = resolve_repo_add_name(&config_mgr, name, path)?;
-
-            let repo_config = RepoConfig {
-                path: abs_path.to_string_lossy().into_owned(),
-                default_target_branch: default_target_branch.clone(),
-                copy_files: Vec::new(),
-                hooks: HooksConfig::default(),
-                lazygit: None,
-            };
-            config_mgr.save_repo_config(&repo_name, &repo_config)?;
-            println!("repo '{}' registered at {}", repo_name, abs_path.display());
+            register_repo(
+                &config_mgr,
+                &ctx,
+                &RegisterRepoRequest {
+                    name: name.clone(),
+                    path: path.clone(),
+                    default_target_branch: default_target_branch.clone(),
+                },
+            )?;
             Ok(())
         }
         RepoCommands::List { json: true } => {
@@ -155,8 +132,7 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
                     repos[idx].clone()
                 }
             };
-            config_mgr.remove_repo_config(&name)?;
-            println!("repo '{}' removed", name);
+            remove_repo(&config_mgr, &ctx, &RemoveRepoRequest { name })?;
             Ok(())
         }
     }
@@ -166,6 +142,8 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::global::HooksConfig;
+    use crate::config::repo::RepoConfig;
+    use crate::service::repos::{repo_add_base_name, resolve_repo_add_name};
 
     fn repo_config(path: &str) -> RepoConfig {
         RepoConfig {
