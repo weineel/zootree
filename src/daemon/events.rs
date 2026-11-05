@@ -25,9 +25,9 @@
 //!   history; everything after it is live.
 //! - the events themselves (id = seq), see [`DaemonEvent`].
 //!
-//! Attachment point for external change detection: anything that finds a
-//! change calls [`EventProducer::publish`] on `AppState::events`; use
-//! [`EventHub::subscriber_count`] to scan only while someone listens.
+//! External change detection (`super::watcher`) publishes through
+//! [`EventHub::publish_external`] and scans only while
+//! [`EventHub::subscriber_count`] is above zero.
 
 use super::error::ApiError;
 use super::operations::OperationRegistry;
@@ -38,7 +38,7 @@ use crate::config::ConfigManager;
 use axum::response::sse::Event;
 use futures_util::Stream;
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -201,6 +201,11 @@ struct Inner {
     /// still be served everything after its position.
     dropped_through: u64,
     buffer: VecDeque<Stored>,
+    /// What the Daemon's own producers last said about each Workspace and
+    /// repository (sequence number and content), so the external change
+    /// detector can tell its findings apart from the Daemon's own work.
+    own_workspaces: HashMap<String, (u64, Option<Value>)>,
+    own_repos: HashMap<String, (u64, &'static str)>,
 }
 
 #[derive(Clone, Copy)]
@@ -306,11 +311,62 @@ impl EventHub {
     }
 }
 
-impl EventProducer for EventHub {
-    fn publish(&self, event: DaemonEvent) {
+impl EventHub {
+    /// Sequence number of the newest event (0 before the first).
+    pub fn current_seq(&self) -> u64 {
+        self.inner.lock().unwrap().last_seq
+    }
+
+    /// Publishes an event found by the external change detector. Unlike
+    /// [`EventProducer::publish`] it is not remembered as the Daemon's own
+    /// statement about the target.
+    pub fn publish_external(&self, event: DaemonEvent) {
+        self.push(event, false);
+    }
+
+    /// The Daemon's own newest statement about a Workspace made after
+    /// sequence number `since`: `Some(Some(summary))` for `workspace.changed`,
+    /// `Some(None)` for `workspace.removed`.
+    pub fn own_workspace_since(&self, name: &str, since: u64) -> Option<Option<Value>> {
+        let inner = self.inner.lock().unwrap();
+        match inner.own_workspaces.get(name) {
+            Some((seq, state)) if *seq > since => Some(state.clone()),
+            _ => None,
+        }
+    }
+
+    /// The Daemon's own newest `repo.changed` action for a repository made
+    /// after sequence number `since`.
+    pub fn own_repo_since(&self, name: &str, since: u64) -> Option<&'static str> {
+        let inner = self.inner.lock().unwrap();
+        match inner.own_repos.get(name) {
+            Some((seq, action)) if *seq > since => Some(action),
+            _ => None,
+        }
+    }
+
+    fn push(&self, event: DaemonEvent, own: bool) {
         let mut inner = self.inner.lock().unwrap();
         inner.last_seq += 1;
         let seq = inner.last_seq;
+        if own {
+            match &event {
+                DaemonEvent::WorkspaceChanged { summary } => {
+                    if let Some(name) = summary.get("name").and_then(Value::as_str) {
+                        inner
+                            .own_workspaces
+                            .insert(name.to_string(), (seq, Some(summary.clone())));
+                    }
+                }
+                DaemonEvent::WorkspaceRemoved { name } => {
+                    inner.own_workspaces.insert(name.clone(), (seq, None));
+                }
+                DaemonEvent::RepoChanged { name, action } => {
+                    inner.own_repos.insert(name.clone(), (seq, action));
+                }
+                _ => {}
+            }
+        }
         let mut data = event.data();
         data["seq"] = json!(seq);
         data["at"] = json!(chrono::Utc::now().to_rfc3339());
@@ -322,6 +378,12 @@ impl EventProducer for EventHub {
         });
         self.prune(&mut inner);
         self.signal.send_modify(|s| s.seq = seq);
+    }
+}
+
+impl EventProducer for EventHub {
+    fn publish(&self, event: DaemonEvent) {
+        self.push(event, true);
     }
 }
 
