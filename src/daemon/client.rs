@@ -197,9 +197,9 @@ impl EventStream {
         }
         if status != 200 {
             let mut body = Vec::new();
-            reader
+            let _ = reader
                 .get_mut()
-                .set_read_timeout(Some(Duration::from_secs(2)))?;
+                .set_read_timeout(Some(Duration::from_secs(2)));
             let _ = reader.read_to_end(&mut body);
             let body = if chunked {
                 decode_chunked(&body).unwrap_or(body)
