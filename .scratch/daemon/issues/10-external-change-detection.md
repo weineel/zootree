@@ -4,7 +4,7 @@
 
 **Blocked by:** 09 — [zootree] 事件流:SSE、序号、断线续传、重新同步
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 外部新增、修改、状态变化(目录移动)、删除 Workspace 都产生对应事件
 - [ ] Repo 的变化也产生事件

@@ -24,3 +24,7 @@
 
 挂载点是 `router` 函数：将来在这里为 Web 传输挂载静态资源服务（作为 fallback，自行决定鉴权豁免范围）。
 边界：不托管任何文件，不新增依赖；API 路径空间（`/status`、`/workspaces` 等）保持不变，静态资源不得遮蔽它们。
+
+## 外部变化检测
+
+`daemon::watcher::ChangeDetector` 是唯一接缝：默认的 `FsDetector` 轮询（有订阅者时每 2 秒，比较修改时间、大小、inode），以后可换成文件系统监听而不改事件 API。通过 `DaemonOptions::detector` 替换。
