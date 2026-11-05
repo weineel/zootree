@@ -66,6 +66,8 @@ src/
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
 │   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── auth.rs      # 可替换的鉴权层：Authenticator trait + BearerToken（令牌校验）+ require_auth 中间件
+│   ├── transport.rs # 监听器传输枚举 Listener（目前仅 Unix；回环 TCP 仅预留）
 │   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
 │   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy[预留]/internal_error/client_too_old/client_too_new）
 │   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
@@ -173,6 +175,8 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 ### Daemon 只读 API 与信封
 
 只读接口返回的 body 与 `--json` 完全相同（`/workspaces` 默认 pending+in_progress，可用 `?status=a&status=b,c` 过滤，未知查询参数忽略；`/agents` 返回 `AgentCatalog`）。错误统一为 `{"error":{"code","message"}}`，客户端只按 `code` 分支；新增码可以，改名/复用不可。客户端可用请求头 `X-Zootree-Protocol-Version` 声明协议版本：低于 `MIN_COMPATIBLE_PROTOCOL_VERSION` 返回 426 `client_too_old`，高于 `PROTOCOL_VERSION` 返回 426 `client_too_new`，不带头则放行；`/status` 豁免以便客户端查看版本。鉴权先于版本检查。能力串 `read_api` 标记这组接口。`busy`（409）仅预留，尚无调用方。
+
+Web 扩展点仅预留（见 `docs/daemon-extension-points.md`）：传输走 `transport::Listener`、鉴权走 `auth::Authenticator`、能力串预留 `web`（默认不声明）、静态资源挂载点在 `server::router`。改这些位置时不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
 
 ### 命令路由
 

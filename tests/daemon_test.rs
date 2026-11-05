@@ -57,6 +57,54 @@ fn status_reports_versions_and_capabilities() {
 }
 
 #[test]
+fn capabilities_are_exactly_the_implemented_set_and_do_not_declare_web() {
+    let tmp = TempDir::new().unwrap();
+    let daemon = daemon::start(options(&tmp)).unwrap();
+
+    let body = get(&daemon, "/status").json().unwrap();
+    assert_eq!(
+        body["capabilities"],
+        serde_json::json!(["status", "read_api"])
+    );
+
+    daemon.shutdown();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn authentication_accepts_only_the_exact_bearer_token() {
+    let tmp = TempDir::new().unwrap();
+    let daemon = daemon::start(options(&tmp)).unwrap();
+
+    let bad = [
+        String::new(),
+        daemon.token.clone(),
+        format!("bearer {}", daemon.token),
+        format!("Basic {}", daemon.token),
+        format!("Bearer {}x", daemon.token),
+    ];
+    for value in &bad {
+        let response = request_with_headers(
+            &daemon.socket,
+            "GET",
+            "/status",
+            None,
+            &[("Authorization", value.as_str())],
+            T,
+        )
+        .unwrap();
+        assert_eq!(response.status, 401, "{value:?}");
+    }
+    // Authentication runs before routing: unknown paths do not leak as 404.
+    let response = request(&daemon.socket, "GET", "/nope", None, T).unwrap();
+    assert_eq!(response.status, 401);
+    assert_eq!(get(&daemon, "/status").status, 200);
+
+    daemon.shutdown();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn requests_without_a_valid_token_are_rejected_with_a_stable_code() {
     let tmp = TempDir::new().unwrap();
     let daemon = daemon::start(options(&tmp)).unwrap();
