@@ -670,3 +670,145 @@ fn reopen_activates_the_terminal_and_returns_the_attach() {
         "the foreground session must not start inside the service"
     );
 }
+
+/// Runs `race` once, just before the first command, as if another zootree
+/// process changed the Workspace while this one activated its terminal.
+struct RacingRunner {
+    inner: MockRunner,
+    race: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+}
+
+impl RacingRunner {
+    fn new(inner: MockRunner, race: impl FnOnce() + 'static) -> Self {
+        Self {
+            inner,
+            race: std::cell::RefCell::new(Some(Box::new(race))),
+        }
+    }
+
+    fn fire(&self) {
+        if let Some(race) = self.race.borrow_mut().take() {
+            race();
+        }
+    }
+}
+
+impl zootree::runner::CommandRunner for RacingRunner {
+    fn run(&self, spec: &zootree::runner::CommandSpec) -> anyhow::Result<Output> {
+        self.fire();
+        self.inner.run(spec)
+    }
+
+    fn run_interactive(&self, spec: &zootree::runner::CommandSpec) -> anyhow::Result<ExitStatus> {
+        self.fire();
+        self.inner.run_interactive(spec)
+    }
+}
+
+#[test]
+fn open_does_not_resurrect_a_workspace_finished_during_activation() {
+    let (tmp, mgr) = setup();
+    zellij_workspace(&mgr, tmp.path());
+    let base = tmp.path().join("config");
+    let inner = MockRunner::new();
+    inner.push_response(success_stdout("zootree-zellij-open\n"));
+    let runner = RacingRunner::new(inner, move || {
+        let other = ConfigManager::with_base_dir(base);
+        other
+            .move_workspace(
+                "zellij-open",
+                &WorkspaceStatus::InProgress,
+                &WorkspaceStatus::Done,
+            )
+            .unwrap();
+    });
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot(&[]));
+
+    let error = open_workspace(
+        &mgr,
+        &runner,
+        &ctx,
+        &OpenRequest {
+            name: "zellij-open".into(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("is done now"), "{error:#}");
+    let (status, _) = mgr.load_workspace("zellij-open").unwrap();
+    assert_eq!(status, WorkspaceStatus::Done);
+    assert!(
+        !tmp.path()
+            .join("config/workspaces/in_progress/zellij-open.toml")
+            .exists(),
+        "a stale copy must not reappear in in_progress"
+    );
+}
+
+#[test]
+fn open_saves_only_terminal_state_over_the_latest_configuration() {
+    let (tmp, mgr) = setup();
+    zellij_workspace(&mgr, tmp.path());
+    let base = tmp.path().join("config");
+    let inner = MockRunner::new();
+    inner.push_response(success_stdout("zootree-zellij-open\n"));
+    let runner = RacingRunner::new(inner, move || {
+        let other = ConfigManager::with_base_dir(base);
+        let (_, mut latest) = other.load_workspace("zellij-open").unwrap();
+        latest.title = "edited meanwhile".into();
+        other
+            .save_workspace(&WorkspaceStatus::InProgress, &latest)
+            .unwrap();
+    });
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot(&[]));
+
+    open_workspace(
+        &mgr,
+        &runner,
+        &ctx,
+        &OpenRequest {
+            name: "zellij-open".into(),
+        },
+    )
+    .unwrap();
+
+    let (_, saved) = mgr.load_workspace("zellij-open").unwrap();
+    assert_eq!(saved.title, "edited meanwhile");
+    assert_eq!(
+        state_table(&saved.multiplexer_state)
+            .get("adapter")
+            .and_then(toml::Value::as_str),
+        Some("zellij")
+    );
+}
+
+#[test]
+fn open_waits_briefly_for_a_concurrent_lifecycle_lock() {
+    let (tmp, mgr) = setup();
+    zellij_workspace(&mgr, tmp.path());
+    let base = tmp.path().join("config");
+    let held = ConfigManager::with_base_dir(base)
+        .lock_workspace("zellij-open")
+        .unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(held);
+    });
+    let runner = MockRunner::new();
+    runner.push_response(success_stdout("zootree-zellij-open\n"));
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot(&[]));
+
+    open_workspace(
+        &mgr,
+        &runner,
+        &ctx,
+        &OpenRequest {
+            name: "zellij-open".into(),
+        },
+    )
+    .unwrap();
+    releaser.join().unwrap();
+}

@@ -6,6 +6,7 @@ pub mod workspace;
 
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Held while a lifecycle mutation of one Workspace runs; dropping it releases the lock.
@@ -216,6 +217,7 @@ impl ConfigManager {
             .create(true)
             .truncate(false)
             .write(true)
+            .mode(0o600)
             .open(&path)
             .with_context(|| format!("failed to open workspace lock {}", path.display()))?;
         match file.try_lock() {
@@ -226,6 +228,28 @@ impl ConfigManager {
             .into()),
             Err(std::fs::TryLockError::Error(error)) => {
                 Err(error).with_context(|| format!("failed to lock workspace {}", path.display()))
+            }
+        }
+    }
+
+    /// Like [`Self::lock_workspace`], but keeps retrying for up to `wait`
+    /// while another process holds the lock. For short critical sections that
+    /// must not be skipped (persisting terminal state after an activation).
+    pub fn lock_workspace_for(
+        &self,
+        name: &str,
+        wait: std::time::Duration,
+    ) -> Result<WorkspaceLock> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match self.lock_workspace(name) {
+                Err(error)
+                    if error.downcast_ref::<WorkspaceBusy>().is_some()
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                other => return other,
             }
         }
     }

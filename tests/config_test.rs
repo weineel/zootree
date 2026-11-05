@@ -1357,3 +1357,15 @@ fn saving_a_workspace_never_exposes_a_partial_file_to_readers() {
     }
     reader.join().unwrap();
 }
+
+#[test]
+fn workspace_lock_file_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let _lock = mgr.lock_workspace("private").unwrap();
+    let path = tmp.path().join("workspaces/.locks/private.lock");
+    let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}

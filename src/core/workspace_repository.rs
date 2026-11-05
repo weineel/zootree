@@ -11,7 +11,7 @@ use crate::core::git::GitOps;
 use crate::core::hook::{
     HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
 };
-use crate::core::terminal_environment::TerminalEnvironment;
+use crate::core::terminal_environment::{CallerContext, TerminalEnvironment};
 use crate::core::workspace_instruction_index;
 use crate::runner::CommandRunner;
 
@@ -38,11 +38,30 @@ pub struct AddRepositoryResult {
     pub terminal: TerminalUpdate,
 }
 
+/// Adds a repository acting on behalf of the current process's terminal.
 pub fn add<R: CommandRunner>(
     config_manager: &ConfigManager,
     global_config: &GlobalConfig,
     runner: &R,
     request: &AddRepositoryRequest,
+) -> Result<AddRepositoryResult> {
+    add_with_caller(
+        config_manager,
+        global_config,
+        runner,
+        request,
+        &CallerContext::from_process_env(),
+    )
+}
+
+/// Adds a repository acting on behalf of an explicit caller context (a
+/// Daemon request's environment snapshot).
+pub fn add_with_caller<R: CommandRunner>(
+    config_manager: &ConfigManager,
+    global_config: &GlobalConfig,
+    runner: &R,
+    request: &AddRepositoryRequest,
+    caller: &CallerContext,
 ) -> Result<AddRepositoryResult> {
     let (status, mut workspace) = config_manager.load_workspace(&request.workspace)?;
     if status != WorkspaceStatus::InProgress {
@@ -130,7 +149,8 @@ pub fn add<R: CommandRunner>(
         }
     }
     let worktree_path = worktree_path.to_string_lossy().into_owned();
-    let terminal_environment = TerminalEnvironment::new(config_manager, global_config, runner);
+    let terminal_environment =
+        TerminalEnvironment::with_caller(config_manager, global_config, runner, caller);
     let prepared_terminal = terminal_environment.prepare_repository_addition(
         &workspace,
         &request.repo,

@@ -32,17 +32,16 @@ use crate::service::repos::{
     register_repo, remove_repo, repo_add_base_name, RegisterRepoRequest, RemoveRepoRequest,
 };
 use crate::service::start::{start_workspace, SessionOutcome, StartRequest};
-use crate::service::{EnvRunner, EnvSnapshot, RequestContext};
+use crate::service::EnvRunner;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::routing::{delete, post};
-use axum::{Json, Router};
+use axum::Router;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-type Accepted = Result<(StatusCode, Json<Value>), ApiError>;
+use super::server::Accepted;
 
 /// Routes added to the main router.
 pub(super) fn routes() -> Router<AppState> {
@@ -75,14 +74,7 @@ fn run_agent(value: Option<RunAgent>) -> Option<Option<String>> {
     }
 }
 
-/// The environment snapshot sent by the client. Absent: the Daemon's own
-/// whitelisted environment (never an empty one, which would strip PATH).
-fn snapshot(env: Option<BTreeMap<String, String>>) -> EnvSnapshot {
-    match env {
-        Some(vars) => EnvSnapshot::from_pairs(vars),
-        None => EnvSnapshot::capture(),
-    }
-}
+use operations::snapshot;
 
 fn parse<T: for<'de> Deserialize<'de> + Default>(raw: &Bytes) -> Result<T, ApiError> {
     operations::parse_body(raw)
@@ -181,37 +173,8 @@ where
         .map_err(|e| ApiError::internal(format!("check task failed: {e}")))?
 }
 
-/// Claims `key` (409 `busy` when an Operation already runs on it), starts the
-/// job on a blocking thread and answers 202 with the new Operation.
 fn spawn(state: &AppState, kind: &'static str, key: &str, job: Job) -> Accepted {
-    let handle = state
-        .operations
-        .start(kind, key, &state.activity)
-        .map_err(|busy| {
-            ApiError::busy(
-                format!("{key} already has operation {} running", busy.operation_id),
-                busy.operation_id,
-            )
-        })?;
-    let view = state.operations.view(handle.id());
-    let mgr = ConfigManager::with_base_dir(state.base_dir.clone());
-    let runner = state.runner.clone();
-    let events = state.events.clone();
-    let key = key.to_string();
-    // Detached on purpose: closing the client connection never stops the work.
-    // A panic drops the handle, which records the failure.
-    tokio::task::spawn_blocking(move || {
-        let runner = runner.make();
-        let sink = handle.sink();
-        let ctx = RequestContext::new(&sink, job.env);
-        let outcome = (job.work)(&mgr, &runner, &ctx);
-        super::events::announce_outcome(&*events, &mgr, kind, &key, outcome.is_ok());
-        match outcome {
-            Ok(result) => handle.succeed(result),
-            Err(e) => handle.fail(operations::OperationError::from_service_error(&e)),
-        }
-    });
-    Ok((StatusCode::ACCEPTED, Json(view.unwrap_or(Value::Null))))
+    super::server::spawn(state, kind, key, job)
 }
 
 fn session_json(outcome: &SessionOutcome, agent_cli: Option<String>) -> Value {

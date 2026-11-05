@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use endpoint::{Discovery, EndpointPaths, Liveness};
 use operations::{OperationRegistry, Retention, RunnerFactory};
 use rand::RngCore;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -215,6 +215,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
         .create(true)
         .truncate(false)
         .write(true)
+        .mode(0o600)
         .open(&paths.lock)
         .with_context(|| format!("failed to open {}", paths.lock.display()))?;
     match lock.try_lock() {

@@ -44,8 +44,38 @@ pub fn request_with_headers(
     request_with_body(socket, method, path, token, headers, None, timeout)
 }
 
-/// Like [`request_with_headers`] with an optional JSON request body.
+/// Header in which a client declares its protocol version. Every endpoint
+/// except `/status` refuses requests without it.
+pub const PROTOCOL_HEADER: &str = "X-Zootree-Protocol-Version";
+
+fn declares_protocol(headers: &[(&str, &str)]) -> bool {
+    headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(PROTOCOL_HEADER))
+}
+
+/// Like [`request_with_headers`] with an optional JSON request body. Sends
+/// the protocol version header of this build unless `headers` has one.
 pub fn request_with_body(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+    timeout: Duration,
+) -> Result<HttpResponse> {
+    let version = super::PROTOCOL_VERSION.to_string();
+    let mut all = headers.to_vec();
+    if !declares_protocol(headers) {
+        all.push((PROTOCOL_HEADER, version.as_str()));
+    }
+    request_raw(socket, method, path, token, &all, body, timeout)
+}
+
+/// Sends exactly the headers given, without the protocol version header.
+/// For probing how the Daemon treats a client that omits it.
+pub fn request_raw(
     socket: &Path,
     method: &str,
     path: &str,
@@ -75,9 +105,28 @@ pub fn request_with_body(
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    parse_response(&raw)
+    // From here on the Daemon may already have accepted the request. Any
+    // failure is tagged so a caller knows it must not simply send it again.
+    let answer = (|| {
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw)?;
+        parse_response(&raw)
+    })();
+    answer.map_err(|e| e.context(RequestSent))
+}
+
+/// Marks a failure that happened after the whole request had been written:
+/// the Daemon may have accepted it. Find it with
+/// `error.downcast_ref::<RequestSent>()`. Failures before that point (no
+/// connection, a failed write) do not carry it, and sending the request again
+/// is then safe.
+#[derive(Debug)]
+pub struct RequestSent;
+
+impl std::fmt::Display for RequestSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the request was sent but no complete answer arrived")
+    }
 }
 
 fn parse_response(raw: &[u8]) -> Result<HttpResponse> {
@@ -134,6 +183,33 @@ fn decode_chunked(mut data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+/// A non-200 answer to opening the event stream.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub status: u16,
+    pub body: String,
+}
+
+impl HttpStatusError {
+    /// The stable `error.code` of the Daemon's error envelope, if the body is one.
+    pub fn error_code(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&self.body)
+            .ok()?
+            .get("error")?
+            .get("code")?
+            .as_str()
+            .map(str::to_string)
+    }
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "status {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
 /// One Server-Sent Events frame.
 #[derive(Debug, Clone)]
 pub struct SseFrame {
@@ -159,9 +235,25 @@ pub struct EventStream {
 }
 
 impl EventStream {
-    /// Opens the stream. `last_event_id` resumes after that sequence number.
-    /// A non-200 answer is an error carrying the status and body.
+    /// Opens the stream, declaring this build's protocol version unless
+    /// `headers` has one. `last_event_id` resumes after that sequence number.
+    /// A non-200 answer is an [`HttpStatusError`] carrying the status and body.
     pub fn connect(
+        socket: &Path,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+        last_event_id: Option<u64>,
+    ) -> Result<Self> {
+        let version = super::PROTOCOL_VERSION.to_string();
+        let mut all = headers.to_vec();
+        if !declares_protocol(headers) {
+            all.push((PROTOCOL_HEADER, version.as_str()));
+        }
+        Self::connect_raw(socket, token, &all, last_event_id)
+    }
+
+    /// Like [`Self::connect`], but sends exactly the headers given.
+    pub fn connect_raw(
         socket: &Path,
         token: Option<&str>,
         headers: &[(&str, &str)],
@@ -214,7 +306,11 @@ impl EventStream {
             } else {
                 body
             };
-            anyhow::bail!("status {status}: {}", String::from_utf8_lossy(&body));
+            return Err(HttpStatusError {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            }
+            .into());
         }
         Ok(Self {
             reader,

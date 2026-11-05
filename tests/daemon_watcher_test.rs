@@ -377,3 +377,74 @@ fn nothing_is_scanned_without_subscribers_and_a_double_can_stand_in() {
     );
     stop(daemon);
 }
+
+// ---- no blind window between snapshot and baseline ---------------------------
+
+/// A detector whose baseline scan is slow and says when it is done.
+struct SlowBaseline {
+    baseline_done: Arc<std::sync::atomic::AtomicBool>,
+    scanned: bool,
+}
+
+impl ChangeDetector for SlowBaseline {
+    fn scan(&mut self) -> Vec<DetectedChange> {
+        if !self.scanned {
+            self.scanned = true;
+            std::thread::sleep(Duration::from_millis(250));
+            self.baseline_done.store(true, Ordering::SeqCst);
+        }
+        Vec::new()
+    }
+
+    fn reset(&mut self) {
+        self.scanned = false;
+        self.baseline_done.store(false, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn the_baseline_is_recorded_before_the_snapshot_is_read() {
+    let env = env();
+    let baseline_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let daemon = start(&env, {
+        let baseline_done = baseline_done.clone();
+        move |o| {
+            o.detector = DetectorFactory::new(move |_| {
+                Box::new(SlowBaseline {
+                    baseline_done: baseline_done.clone(),
+                    scanned: false,
+                })
+            })
+        }
+    });
+
+    let mut stream = EventStream::connect(&daemon.socket, Some(&daemon.token), &[], None).unwrap();
+    let snapshot = next(&mut stream);
+    assert_eq!(snapshot.event, "snapshot");
+    assert!(
+        baseline_done.load(Ordering::SeqCst),
+        "the snapshot was read before the change detector had its baseline"
+    );
+    stop(daemon);
+}
+
+#[test]
+fn a_change_right_after_the_snapshot_is_never_lost() {
+    let env = env();
+    save(&env, WorkspaceStatus::Pending, "early", "Before");
+    let daemon = start(&env, |_| {});
+
+    let mut stream = EventStream::connect(&daemon.socket, Some(&daemon.token), &[], None).unwrap();
+    loop {
+        if next(&mut stream).event == "ready" {
+            break;
+        }
+    }
+    // No settling time: the edit lands as soon as the client has its snapshot.
+    save(&env, WorkspaceStatus::Pending, "early", "After");
+
+    let event = next_change(&mut stream);
+    assert_eq!(event.event, "workspace.changed");
+    assert_eq!(event.data["workspace"]["title"], "After");
+    stop(daemon);
+}

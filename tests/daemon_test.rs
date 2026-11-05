@@ -135,6 +135,7 @@ fn socket_discovery_file_and_directory_are_private_to_the_user() {
 
     assert_eq!(mode(&daemon.paths.socket), 0o600);
     assert_eq!(mode(&daemon.paths.discovery), 0o600);
+    assert_eq!(mode(&daemon.paths.lock), 0o600);
     assert_eq!(mode(&daemon.paths.dir), 0o700);
 
     daemon.shutdown();
@@ -624,6 +625,65 @@ mod read_api {
     }
 
     #[test]
+    fn a_request_without_the_version_header_is_told_to_upgrade_everywhere_but_status() {
+        use zootree::daemon::client::request_raw;
+        let (_tmp, daemon) = seeded();
+        let endpoints = [
+            ("GET", "/workspaces"),
+            ("GET", "/workspaces/alpha"),
+            ("GET", "/repos"),
+            ("GET", "/agents"),
+            ("GET", "/operations/op-0000"),
+            ("GET", "/events"),
+            ("POST", "/workspaces/alpha/done"),
+            ("POST", "/workspaces/alpha/start"),
+            ("POST", "/operations/op-0000/cancel"),
+            ("POST", "/repos"),
+            ("POST", "/shutdown"),
+            ("DELETE", "/repos/nothing"),
+            ("GET", "/no/such/endpoint"),
+        ];
+        for (method, path) in endpoints {
+            let response = request_raw(
+                &daemon.socket,
+                method,
+                path,
+                Some(&daemon.token),
+                &[],
+                None,
+                T,
+            )
+            .unwrap();
+            assert_eq!(response.status, 426, "{method} {path}: {}", response.body);
+            let error = &response.json().unwrap()["error"];
+            assert_eq!(error["code"], "protocol_version_required", "{path}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("x-zootree-protocol-version"),
+                "{path}"
+            );
+        }
+        // /status stays reachable so a client can explain the mismatch.
+        let status = request_raw(
+            &daemon.socket,
+            "GET",
+            "/status",
+            Some(&daemon.token),
+            &[],
+            None,
+            T,
+        )
+        .unwrap();
+        assert_eq!(status.status, 200);
+        // The daemon is still up: /shutdown was refused.
+        assert_eq!(get(&daemon, "/repos").status, 200);
+        stop(daemon);
+    }
+
+    #[test]
     fn current_protocol_version_is_served() {
         let (_tmp, daemon) = seeded();
         assert_eq!(get_declaring(&daemon, "/repos", "1").status, 200);
@@ -692,7 +752,8 @@ mod read_api {
                 "operation_failed",
                 "internal_error",
                 "client_too_old",
-                "client_too_new"
+                "client_too_new",
+                "protocol_version_required"
             ]
         );
     }

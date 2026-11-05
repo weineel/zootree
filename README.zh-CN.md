@@ -290,9 +290,11 @@ zootree operations cancel <id>       # 让 daemon 停止某个运行中的 Opera
 
 如果已有兼容的 daemon 在运行，`list`、`info --json`、`start`、`done`、`cancel`、`reopen`、`add-repo`、`create`、`prune` 与 `repo add|list|remove` 会经由它执行：命令带上经白名单过滤的环境快照提交请求，实时打印 Operation 的进度，输出与不经过 daemon 时一致。`edit`、`config *`、`repo edit`、不带 `--json` 的 `info`（及 `--watch`）、`open`、`logs`、`template *`、`completions`、交互选择器与向导、终端 attach 始终在你的终端里本地执行。需要你回答的场景（例如 `cancel` 遇到未提交改动）会先在本地询问，再发送确认后的请求。
 
-**回退规则**：只有发现文件存在、端点在接受连接、且它的协议区间与能力和当前 `zootree` 相符时才使用 daemon。否则（没有 daemon、没在监听、状态无法证明、缺少能力）命令静默地照旧在本地执行；协议版本不兼容时会先在 stderr 给出一行提示。回退只发生在 daemon 接受请求之前；接受之后命令绝不会再在本地重跑（工作可能已经在进行），只会等待结果或报错。
+**回退规则**：只有发现文件存在、端点在接受连接、且它的协议区间与能力和当前 `zootree` 相符时才使用 daemon。否则（没有 daemon、没在监听、状态无法证明、缺少能力）命令静默地照旧在本地执行；协议版本不兼容时会先在 stderr 给出一行提示。回退只发生在请求完整发出之前（连不上、写失败）。请求一旦完整发出，任何失败（没有应答、连接被切断、应答无法解析）都会报错并提示用 `zootree operations` 查看，命令绝不会再在本地重跑，因为 daemon 可能已经接受了它；接受之后只会等待结果或报错。
 
-**Ctrl-C 与取消**：Ctrl-C 只会停止等待（退出码 130，并打印 Operation id），Operation 继续在 daemon 里运行；用 `zootree operations cancel <id>` 停止它：正在运行的命令会被杀掉，Operation 经自身回滚展开，但取消是尽力而为的。目前能打断子进程命令的是 `done` 与 `cancel` 两类 Operation，其他类型只记录取消请求并按真实结果结束。`operations cancel` 需要有运行中的兼容 daemon。
+环境快照按请求覆盖白名单变量（`PATH`、`SSH_AUTH_SOCK`、`SSH_AGENT_PID`、`ZELLIJ`、`ZELLIJ_SESSION_NAME`、`HERDR_ENV`、`HERDR_SOCKET_PATH`），其余（`HOME` 等）沿用 daemon 自己的环境。快照里缺失的白名单变量会在子进程里被移除，`PATH` 例外，保持继承。
+
+**Ctrl-C 与取消**：Ctrl-C 只会停止等待（退出码 130，并打印 Operation id），Operation 继续在 daemon 里运行；用 `zootree operations cancel <id>` 停止它：正在运行的命令会被杀掉，Operation 经自身回滚展开，但取消是尽力而为的。所有类型的 Operation（`start`、`reopen`、`add-repo`、`create`、`prune`、`repo add|remove`、`done`、`cancel`）都能被打断；只有 `start` 有回滚，其余类型保留已完成的步骤。`operations cancel` 需要有运行中的兼容 daemon。
 
 HTTP 接口、错误码、事件流与兼容规则见面向集成方的 [docs/daemon-protocol.md](docs/daemon-protocol.md)。
 

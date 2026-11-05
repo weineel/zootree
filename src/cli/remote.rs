@@ -12,14 +12,17 @@
 //!   not listening, unproven, incompatible) means local execution, with a
 //!   notice only for an incompatible protocol.
 //! - Nothing here starts a Daemon.
-//! - A failure to reach the Daemon before the request is accepted falls back
-//!   to local execution. After acceptance the command never falls back (the
-//!   work may already be running); it waits, or fails.
+//! - A failure to reach the Daemon before the request has been written out
+//!   falls back to local execution. Once the whole request is written, any
+//!   failure (no answer, a cut connection, an unreadable answer) is an error
+//!   that points at `zootree operations`: the Daemon may have accepted it, and
+//!   running it locally too could do the work twice. After acceptance the
+//!   command never falls back either; it waits, or fails.
 //! - Ctrl-C only stops waiting. `zootree operations cancel <id>` stops the
 //!   Operation.
 
 use crate::config::ConfigManager;
-use crate::daemon::client::{self, EventStream};
+use crate::daemon::client::{self, EventStream, HttpStatusError, RequestSent};
 use crate::daemon::PROTOCOL_VERSION;
 use crate::daemon::{self, DaemonOptions, DaemonState};
 use crate::service::start::AttachRequest;
@@ -31,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Request header in which this client declares its protocol version.
-pub const PROTOCOL_HEADER: &str = "X-Zootree-Protocol-Version";
+pub use crate::daemon::client::PROTOCOL_HEADER;
 /// What the Daemon must offer for the client mode to be used.
 const REQUIRED_CAPABILITIES: [&str; 3] = ["read_api", "operations", "events"];
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -181,7 +184,12 @@ impl std::error::Error for ApiFailure {}
 
 impl ApiFailure {
     fn is_incompatible(&self) -> bool {
-        self.code == "client_too_old" || self.code == "client_too_new"
+        matches!(
+            self.code.as_str(),
+            crate::daemon::error::CLIENT_TOO_OLD
+                | crate::daemon::error::CLIENT_TOO_NEW
+                | crate::daemon::error::PROTOCOL_VERSION_REQUIRED
+        )
     }
 }
 
@@ -247,7 +255,9 @@ impl DaemonClient {
             if response.body.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            return response.json().map_err(CallError::Transport);
+            return response
+                .json()
+                .map_err(|e| CallError::Transport(e.context(RequestSent)));
         }
         let parsed = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
         let error = &parsed["error"];
@@ -321,15 +331,25 @@ impl DaemonClient {
         )
         .map_err(|e| {
             let text = format!("{e:#}");
-            if text.contains("client_too_old") || text.contains("client_too_new") {
-                Unavailable::Incompatible(ApiFailure {
-                    http_status: 426,
-                    code: "client_too_new".into(),
+            let rejected = e
+                .downcast_ref::<HttpStatusError>()
+                .and_then(|status| Some((status.status, status.error_code()?)))
+                .filter(|(_, code)| {
+                    matches!(
+                        code.as_str(),
+                        crate::daemon::error::CLIENT_TOO_OLD
+                            | crate::daemon::error::CLIENT_TOO_NEW
+                            | crate::daemon::error::PROTOCOL_VERSION_REQUIRED
+                    )
+                });
+            match rejected {
+                Some((http_status, code)) => Unavailable::Incompatible(ApiFailure {
+                    http_status,
+                    code,
                     message: text,
                     operation_id: None,
-                })
-            } else {
-                Unavailable::Down(text)
+                }),
+                None => Unavailable::Down(text),
             }
         })?;
         // Subscribing before submitting means no event of ours can be missed.
@@ -595,6 +615,15 @@ impl DaemonClient {
         }
         let view = match self.call(method, path, Some(&body)) {
             Ok(view) => view,
+            // The whole request went out, so the Daemon may have accepted it.
+            // Running it locally now could do the work twice.
+            Err(CallError::Transport(e)) if e.downcast_ref::<RequestSent>().is_some() => {
+                return Err(e.context(format!(
+                    "the request to {path} was sent to the zootree daemon but its answer did not arrive; \
+                     it may have been accepted, so it was not run locally. \
+                     Check `zootree operations` before trying again"
+                )));
+            }
             Err(CallError::Transport(e)) => {
                 Unavailable::Down(format!("{e:#}")).fall_back();
                 return Ok(None);

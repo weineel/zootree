@@ -321,16 +321,25 @@ with uncommitted changes), it asks locally and then sends the confirmed request.
 accepts connections, and its protocol range and capabilities fit this `zootree`. Otherwise
 (no daemon, not listening, unprovable state, missing capability) the command silently runs
 locally exactly as before; an incompatible protocol version prints a warning on stderr
-first. Falling back happens only before the daemon accepts the request. After that the
-command never re-runs locally (the work may already be running): it waits for the result
-or fails.
+first. Falling back happens only before the request has been fully sent (no connection, a failed
+write). Once the whole request is out, any failure (no answer, a cut connection, an
+unreadable answer) is reported as an error that points at `zootree operations`; the command
+never re-runs locally, because the daemon may already have accepted it. After acceptance it
+waits for the result or fails.
+
+The environment snapshot overrides the whitelisted variables (`PATH`, `SSH_AUTH_SOCK`,
+`SSH_AGENT_PID`, `ZELLIJ`, `ZELLIJ_SESSION_NAME`, `HERDR_ENV`, `HERDR_SOCKET_PATH`) per
+request; everything else (`HOME`, ...) comes from the daemon's own environment. A whitelisted
+variable missing from the snapshot is removed for the child process, except `PATH`, which
+stays inherited.
 
 **Ctrl-C and cancel**: Ctrl-C only stops waiting (exit code 130, the operation id is
 printed); the operation keeps running in the daemon. Stop it with
 `zootree operations cancel <id>`: the command currently running is killed and the
-operation unwinds through its own rollback, but cancellation is best effort. Today it
-interrupts commands of `done` and `cancel` operations; other operations record the request
-but run to their real outcome. `operations cancel` needs a running compatible daemon.
+operation unwinds through its own rollback, but cancellation is best effort. Every
+operation kind (`start`, `reopen`, `add-repo`, `create`, `prune`, `repo add|remove`, `done`,
+`cancel`) honours it; only `start` has a rollback, the others keep the steps they already
+completed. `operations cancel` needs a running compatible daemon.
 
 For integrators, the HTTP API, error codes, event stream and compatibility rules are in
 [docs/daemon-protocol.md](docs/daemon-protocol.md).

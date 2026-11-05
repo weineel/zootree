@@ -15,7 +15,7 @@ use zootree::config::global::{GlobalConfig, HookValue, MultiplexerConfig};
 use zootree::config::repo::RepoConfig;
 use zootree::config::workspace::{RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use zootree::config::ConfigManager;
-use zootree::daemon::client::{request, request_with_body, HttpResponse};
+use zootree::daemon::client::{request, request_with_body, EventStream, HttpResponse};
 use zootree::daemon::operations::{DynRunner, RunnerFactory};
 use zootree::daemon::{self, DaemonHandle, DaemonOptions};
 use zootree::runner::{CancelToken, CommandRunner, CommandSpec, OutputLine};
@@ -478,4 +478,106 @@ fn canceled_start_removes_the_worktrees_it_created() {
         env.mgr.load_workspace("fair-fox").unwrap().0,
         WorkspaceStatus::Pending
     );
+}
+
+fn pending_start_fixture(env: &Env) -> WorkspaceConfig {
+    let repo_cfg = RepoConfig {
+        path: "/repo/api".into(),
+        default_target_branch: None,
+        copy_files: Vec::new(),
+        hooks: zootree::config::global::HooksConfig {
+            post_create: Some(HookValue::Simple("sleep 30".into())),
+            ..Default::default()
+        },
+        lazygit: None,
+    };
+    env.mgr.save_repo_config("api", &repo_cfg).unwrap();
+    let ws = workspace(env, "fair-fox", &["api"]);
+    env.mgr
+        .save_workspace(&WorkspaceStatus::Pending, &ws)
+        .unwrap();
+    ws
+}
+
+#[test]
+fn canceling_a_start_over_http_interrupts_it_and_rolls_back_its_worktrees() {
+    let env = env();
+    let ws = pending_start_fixture(&env);
+    let runner = HangingHooks::default();
+    let daemon = start(&env, Some(runner.clone()), |_| {});
+
+    let id = submit(
+        &daemon,
+        "/workspaces/fair-fox/start",
+        json!({"no_multiplexer": true}),
+    );
+    wait_until("post_create hook to start", || {
+        *runner.hook_running.lock().unwrap()
+    });
+    let response = cancel_op(&daemon, &id);
+    assert_eq!(response.status, 202, "{}", response.body);
+
+    let op = wait_finished(&daemon, &id);
+    assert_eq!(op["status"], "canceled", "{op}");
+    assert_eq!(op["kind"], "start");
+    assert_eq!(op["canceled"]["cleanup"], "rolled_back", "{op}");
+    assert!(op["canceled"]["interrupted_command"].is_string(), "{op}");
+
+    let calls = runner.calls.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.windows(3).any(|w| w == ["worktree", "remove", "--force"])),
+        "no rollback worktree remove in {calls:?}"
+    );
+    assert!(
+        !std::path::Path::new(&ws.workspace_dir).exists(),
+        "workspace dir created by start should be gone"
+    );
+    assert_eq!(
+        env.mgr.load_workspace("fair-fox").unwrap().0,
+        WorkspaceStatus::Pending
+    );
+    stop(daemon);
+}
+
+#[test]
+fn canceling_an_operation_publishes_operation_finished_with_the_cancel_details() {
+    let env = env();
+    set_pre_done_hook(&env);
+    add_workspace(&env, "alpha");
+    let runner = HangingHooks::default();
+    let daemon = start(&env, Some(runner.clone()), |_| {});
+
+    let mut stream = EventStream::connect(&daemon.socket, Some(&daemon.token), &[], None).unwrap();
+    loop {
+        if stream.next_frame(T).unwrap().expect("stream ended").event == "ready" {
+            break;
+        }
+    }
+    let id = submit(
+        &daemon,
+        "/workspaces/alpha/done",
+        json!({"no_merge": true, "no_clean": true}),
+    );
+    wait_until("hook to start", || *runner.hook_running.lock().unwrap());
+    cancel_op(&daemon, &id);
+
+    let finished = loop {
+        let frame = stream.next_frame(T).unwrap().expect("stream ended");
+        if frame.event == "operation.finished" {
+            break frame;
+        }
+    };
+    assert_eq!(finished.data["operation_id"], json!(id));
+    assert_eq!(finished.data["status"], "canceled", "{:?}", finished.data);
+    assert_eq!(finished.data["error"], Value::Null);
+    assert!(
+        finished.data["result"]["interrupted_command"].is_string(),
+        "{:?}",
+        finished.data
+    );
+    assert_eq!(finished.data["result"]["cleanup"], "none");
+    assert!(finished.data["result"]["stopped_at"].is_string());
+    stop(daemon);
 }

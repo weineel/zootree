@@ -22,8 +22,10 @@
 //! repository with a running Operation is skipped, and a finding that equals
 //! what the Daemon itself published since the previous scan is not repeated.
 //!
-//! The first scan after scanning (re)starts only records a baseline; the
-//! subscriber's snapshot already covers everything before it.
+//! The first scan after scanning (re)starts only records a baseline. A new
+//! subscriber triggers it itself, synchronously and before it reads its
+//! snapshot (`EventHub::ensure_baseline`), so every change is either in the
+//! snapshot or found by a later scan; there is no window in between.
 //!
 //! [`DaemonOptions::scan_interval`]: super::DaemonOptions::scan_interval
 
@@ -35,7 +37,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Default time between scans while someone is subscribed.
@@ -106,6 +108,31 @@ impl std::fmt::Debug for DetectorFactory {
 /// Whether an Operation is running on a key (Workspace name or `repo:<name>`).
 pub(crate) type BusyCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// What the watcher thread and subscribers share: the detector and where its
+/// current scanning window began.
+struct Core {
+    detector: Box<dyn ChangeDetector>,
+    active: bool,
+    /// Sequence number the previous scan started at; only the Daemon's own
+    /// events after it can explain a finding.
+    window_start: u64,
+    last_scan: Instant,
+}
+
+impl Core {
+    /// Starts scanning if it is not running: the scan only records the
+    /// baseline, whatever changed before it is the subscriber's snapshot to
+    /// cover.
+    fn ensure_baseline(&mut self, hub: &EventHub) {
+        if !self.active {
+            self.active = true;
+            self.window_start = hub.current_seq();
+            self.last_scan = Instant::now();
+            self.detector.scan();
+        }
+    }
+}
+
 /// Running watcher thread; stop it with [`Watcher::stop`].
 pub(crate) struct Watcher {
     stop: Arc<AtomicBool>,
@@ -120,11 +147,29 @@ impl Watcher {
         interval: Duration,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let core = Arc::new(Mutex::new(Core {
+            detector,
+            active: false,
+            window_start: 0,
+            last_scan: Instant::now(),
+        }));
+        // A new subscriber establishes the baseline itself, before it reads
+        // its snapshot (see `EventHub::ensure_baseline`), so a change landing
+        // between the snapshot and the thread's first scan cannot be lost.
+        {
+            let core = core.clone();
+            let weak_hub = Arc::downgrade(&hub);
+            hub.set_baseline(Arc::new(move || {
+                if let Some(hub) = weak_hub.upgrade() {
+                    core.lock().unwrap().ensure_baseline(&hub);
+                }
+            }));
+        }
         let thread = {
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name("zootree-watcher".to_string())
-                .spawn(move || run(detector, hub, busy, interval, stop))
+                .spawn(move || run(core, hub, busy, interval, stop))
                 .ok()
         };
         Self { stop, thread }
@@ -139,45 +184,42 @@ impl Watcher {
 }
 
 fn run(
-    mut detector: Box<dyn ChangeDetector>,
+    core: Arc<Mutex<Core>>,
     hub: Arc<EventHub>,
     busy: BusyCheck,
     interval: Duration,
     stop: Arc<AtomicBool>,
 ) {
     let step = interval.min(POLL_STEP);
-    let mut active = false;
-    // Sequence number the previous scan started at; only the Daemon's own
-    // events after it can explain a finding.
-    let mut window_start = 0;
-    let mut last_scan = Instant::now();
     while !stop.load(Ordering::SeqCst) {
         std::thread::sleep(step);
+        let mut core = core.lock().unwrap();
+        // Checked under the lock: a subscriber that joined meanwhile has
+        // already counted itself and may have just recorded a baseline.
         if hub.subscriber_count() == 0 {
-            if active {
-                detector.reset();
-                active = false;
+            if core.active {
+                core.detector.reset();
+                core.active = false;
             }
             continue;
         }
-        let first = !active;
-        if !first && last_scan.elapsed() < interval {
+        if !core.active {
+            core.ensure_baseline(&hub);
             continue;
         }
-        active = true;
-        last_scan = Instant::now();
+        if core.last_scan.elapsed() < interval {
+            continue;
+        }
+        core.last_scan = Instant::now();
         let started_at = hub.current_seq();
-        let changes = detector.scan();
-        if first {
-            window_start = started_at;
-            continue;
-        }
+        let changes = core.detector.scan();
+        let window_start = std::mem::replace(&mut core.window_start, started_at);
+        drop(core);
         for change in changes {
             if let Some(event) = admit(&hub, &busy, window_start, change) {
                 hub.publish_external(event);
             }
         }
-        window_start = started_at;
     }
 }
 

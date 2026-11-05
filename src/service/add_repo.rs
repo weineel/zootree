@@ -3,7 +3,7 @@
 use crate::config::global::GlobalConfig;
 use crate::config::ConfigManager;
 use crate::core::workspace_repository::{
-    add, AddRepositoryRequest, AddRepositoryResult, TerminalUpdate,
+    add_with_caller, AddRepositoryRequest, AddRepositoryResult, TerminalUpdate,
 };
 use crate::runner::CommandRunner;
 use crate::service::{EnvRunner, RequestContext, ServiceEvent};
@@ -30,7 +30,7 @@ pub fn add_repo_to_workspace<R: CommandRunner>(
         operation: "add-repo",
         workspace: req.workspace.clone(),
     });
-    let result = add(config_mgr, global, &runner, req)?;
+    let result = add_with_caller(config_mgr, global, &runner, req, &ctx.caller())?;
 
     ctx.step(format!(
         "repository '{}' added to workspace '{}'",

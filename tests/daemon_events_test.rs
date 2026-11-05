@@ -531,6 +531,17 @@ fn events_require_the_token_and_honour_version_rules() {
     .unwrap_err();
     assert!(err.to_string().contains("client_too_new"), "{err}");
 
+    // No declared version at all is an explicit upgrade error.
+    let err = EventStream::connect_raw(&daemon.socket, Some(&daemon.token), &[], None).unwrap_err();
+    let status = err
+        .downcast_ref::<zootree::daemon::client::HttpStatusError>()
+        .expect("typed status error");
+    assert_eq!(status.status, 426);
+    assert_eq!(
+        status.error_code().as_deref(),
+        Some("protocol_version_required")
+    );
+
     // A declared compatible version is served.
     let v = daemon::PROTOCOL_VERSION.to_string();
     let mut ok = EventStream::connect(

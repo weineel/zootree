@@ -1171,6 +1171,7 @@ mod tests {
     use super::*;
     use crate::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
     use crate::config::workspace::StoredTerminalEnvironmentState;
+    use crate::core::terminal_environment::CallerContext;
     use crate::core::worktree_status::ensure_required_worktrees_exist;
     use crate::runner::MockRunner;
     use crate::service::lifecycle::{
@@ -1618,6 +1619,7 @@ group = "workspace_group:12"
             &GlobalConfig::default(),
             &workspace,
             &runner,
+            &CallerContext::from_vars(|_| None),
         );
         assert!(early_warnings[0].contains("still in_progress"));
         assert!(runner.take_calls().is_empty());
@@ -1629,6 +1631,7 @@ group = "workspace_group:12"
             &GlobalConfig::default(),
             &mut workspace,
             &runner,
+            &CallerContext::from_vars(|_| None),
         )
         .unwrap();
 
@@ -1670,6 +1673,7 @@ session = "zootree-cancel-close"
             &WorkspaceStatus::InProgress,
             &mut workspace,
             &runner,
+            &CallerContext::from_vars(|_| None),
         )
         .unwrap();
 
