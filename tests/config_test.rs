@@ -1254,3 +1254,22 @@ fn workspace_status_value_enum_parses_kebab_case() {
         WorkspaceStatus::Canceled
     );
 }
+
+#[test]
+fn concurrent_log_appender_builds_never_fail_on_the_latest_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    zootree::core::logging::build_file_appender(&path, Some(7)).unwrap();
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}
