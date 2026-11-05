@@ -512,15 +512,14 @@ fn running_operation_holds_the_workspace_lock_against_the_command_line() {
         "/workspaces/alpha/done",
         json!({"no_merge": true, "no_clean": true}),
     );
+    // The Started event is emitted after the worker took the lock. Probing the
+    // lock any earlier could itself make the worker lose the race.
     let deadline = Instant::now() + T;
-    loop {
-        // The Operation takes the lock once its worker starts.
-        if env.mgr.lock_workspace("alpha").is_err() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "daemon never took the lock");
+    while lines(&get(&daemon, &format!("/operations/{id}")).json().unwrap()).is_empty() {
+        assert!(Instant::now() < deadline, "operation never started");
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(env.mgr.lock_workspace("alpha").is_err());
     gate.release();
     wait_finished(&daemon, &id);
     assert!(env.mgr.lock_workspace("alpha").is_ok());
