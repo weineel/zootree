@@ -65,7 +65,9 @@ src/
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由：/status、/shutdown，令牌鉴权层，空闲/信号退出
+│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
+│   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy[预留]/internal_error/client_too_old/client_too_new）
 │   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
@@ -165,6 +167,10 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 ### 机器可读输出
 
 `list --json`、`info <name> --json`、`repo list --json` 的结构由 `src/cli/json_view.rs` 的纯函数构建，属于对外稳定契约（Orca 等调用方依赖）。`info --json` 带有已解析的 `agent_command`（argv）。交互式提示在 stdin 不是终端时（`run_inline`）直接报错，保证被程序调用时不会挂起。
+
+### Daemon 只读 API 与信封
+
+只读接口返回的 body 与 `--json` 完全相同（`/workspaces` 默认 pending+in_progress，可用 `?status=a&status=b,c` 过滤，未知查询参数忽略；`/agents` 返回 `AgentCatalog`）。错误统一为 `{"error":{"code","message"}}`，客户端只按 `code` 分支；新增码可以，改名/复用不可。客户端可用请求头 `X-Zootree-Protocol-Version` 声明协议版本：低于 `MIN_COMPATIBLE_PROTOCOL_VERSION` 返回 426 `client_too_old`，高于 `PROTOCOL_VERSION` 返回 426 `client_too_new`，不带头则放行；`/status` 豁免以便客户端查看版本。鉴权先于版本检查。能力串 `read_api` 标记这组接口。`busy`（409）仅预留，尚无调用方。
 
 ### 命令路由
 
