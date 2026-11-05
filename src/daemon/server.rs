@@ -1,7 +1,10 @@
 use super::error::{self, ApiError, PROTOCOL_HEADER};
+use super::operations::{self, OperationRegistry, RunnerFactory};
 use super::{api, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::config::ConfigManager;
+use crate::service::RequestContext;
 use anyhow::Result;
+use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
@@ -21,6 +24,8 @@ pub(super) struct AppState {
     pub started_at: String,
     pub activity: Arc<Activity>,
     pub shutdown: Arc<Notify>,
+    pub operations: Arc<OperationRegistry>,
+    pub runner: RunnerFactory,
 }
 
 fn router(state: AppState) -> Router {
@@ -33,6 +38,9 @@ fn router(state: AppState) -> Router {
         .route("/workspaces/{name}", get(workspace))
         .route("/repos", get(repos))
         .route("/agents", get(agents))
+        .route("/workspaces/{name}/done", post(done))
+        .route("/workspaces/{name}/cancel", post(cancel))
+        .route("/operations/{id}", get(operation))
         .fallback(not_found)
         .layer(middleware::from_fn(negotiate_version))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
@@ -55,11 +63,11 @@ async fn authenticate(State(state): State<AppState>, request: Request, next: Nex
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     if presented != Some(state.token.as_str()) {
-        return ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: error::UNAUTHORIZED,
-            message: "missing or invalid token".to_string(),
-        }
+        return ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            error::UNAUTHORIZED,
+            "missing or invalid token",
+        )
         .into_response();
     }
     next.run(request).await
@@ -136,6 +144,95 @@ async fn repos(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
 
 async fn agents(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     blocking(&state, |mgr| api::agent_catalog(&mgr)).await
+}
+
+/// Accepts a state-changing request: validates it, claims the Workspace (409
+/// `busy` with the running Operation's id otherwise), starts the work on a
+/// blocking thread and answers 202 with the new Operation.
+async fn submit(
+    state: &AppState,
+    kind: &'static str,
+    name: String,
+    job: operations::Job,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let mgr = ConfigManager::with_base_dir(state.base_dir.clone());
+    let check_name = name.clone();
+    let mgr = tokio::task::spawn_blocking(move || {
+        api::require_workspace(&mgr, &check_name).map(|()| mgr)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("check task failed: {e}")))??;
+
+    let handle = state
+        .operations
+        .start(kind, &name, &state.activity)
+        .map_err(|busy| {
+            ApiError::busy(
+                format!(
+                    "workspace '{name}' already has operation {} running",
+                    busy.operation_id
+                ),
+                busy.operation_id,
+            )
+        })?;
+    let view = state.operations.view(handle.id());
+    let runner = state.runner.clone();
+    // Detached on purpose: closing the client connection never stops the work.
+    // A panic drops the handle, which records the failure.
+    tokio::task::spawn_blocking(move || {
+        let runner = runner.make();
+        let sink = handle.sink();
+        let ctx = RequestContext::new(&sink, job.env);
+        match (job.work)(&mgr, &runner, &ctx) {
+            Ok(result) => handle.succeed(result),
+            Err(e) => handle.fail(operations::OperationError::from_service_error(&e)),
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(view.unwrap_or(serde_json::Value::Null)),
+    ))
+}
+
+async fn done(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = operations::parse_body(&body)?;
+    submit(
+        &state,
+        "done",
+        name.clone(),
+        operations::done_job(&name, body),
+    )
+    .await
+}
+
+async fn cancel(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = operations::parse_body(&body)?;
+    submit(
+        &state,
+        "cancel",
+        name.clone(),
+        operations::cancel_job(&name, body),
+    )
+    .await
+}
+
+async fn operation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .operations
+        .view(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("operation '{id}' not found")))
 }
 
 async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {

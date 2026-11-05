@@ -640,6 +640,8 @@ mod read_api {
                 "unauthorized",
                 "not_found",
                 "busy",
+                "confirmation_required",
+                "operation_failed",
                 "internal_error",
                 "client_too_old",
                 "client_too_new"

@@ -65,9 +65,10 @@ src/
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}；鉴权层 → 版本协商层；读取经 spawn_blocking
 │   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
-│   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy[预留]/internal_error/client_too_old/client_too_new）
+│   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy/confirmation_required/operation_failed/internal_error/client_too_old/client_too_new）
+│   ├── operations.rs # Operation 注册表（状态/累计输出/结果/起止时间、按 Workspace 的忙碌判定、保留最近 100 条或 24 小时）、OperationHandle/OperationSink、RunnerFactory、done/cancel 请求体与 Job
 │   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
@@ -172,7 +173,13 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 ### Daemon 只读 API 与信封
 
-只读接口返回的 body 与 `--json` 完全相同（`/workspaces` 默认 pending+in_progress，可用 `?status=a&status=b,c` 过滤，未知查询参数忽略；`/agents` 返回 `AgentCatalog`）。错误统一为 `{"error":{"code","message"}}`，客户端只按 `code` 分支；新增码可以，改名/复用不可。客户端可用请求头 `X-Zootree-Protocol-Version` 声明协议版本：低于 `MIN_COMPATIBLE_PROTOCOL_VERSION` 返回 426 `client_too_old`，高于 `PROTOCOL_VERSION` 返回 426 `client_too_new`，不带头则放行；`/status` 豁免以便客户端查看版本。鉴权先于版本检查。能力串 `read_api` 标记这组接口。`busy`（409）仅预留，尚无调用方。
+只读接口返回的 body 与 `--json` 完全相同（`/workspaces` 默认 pending+in_progress，可用 `?status=a&status=b,c` 过滤，未知查询参数忽略；`/agents` 返回 `AgentCatalog`）。错误统一为 `{"error":{"code","message"}}`，客户端只按 `code` 分支；新增码可以，改名/复用不可。客户端可用请求头 `X-Zootree-Protocol-Version` 声明协议版本：低于 `MIN_COMPATIBLE_PROTOCOL_VERSION` 返回 426 `client_too_old`，高于 `PROTOCOL_VERSION` 返回 426 `client_too_new`，不带头则放行；`/status` 豁免以便客户端查看版本。鉴权先于版本检查。能力串 `read_api` 标记这组接口。`busy`（409）已启用，见下节。
+
+### Daemon Operation（修改请求）
+
+所有修改请求立即返回 202 与 Operation 视图（`id/kind/workspace/status(running|succeeded|failed)/output[]/result/error/started_at/finished_at`），经 `GET /operations/{id}` 查询。`done`/`cancel` 请求体为可选 JSON（空体=默认值，未知字段 400）：字段对应服务层 `DoneRequest`/`CancelRequest`，另有 `env`（白名单环境快照；省略时用 Daemon 自身环境，不会得到空 PATH）。cancel 遇未提交改动时 Operation 以 `confirmation_required`（带 `repos`）失败，调用方带 `confirmed_uncommitted` 或 `force` 重试，Daemon 绝不提示。同一 Workspace 已有运行中的 Operation 时第二个请求 409 `busy` 且错误对象带 `operation_id`，不排队；不同 Workspace 并行。命令行（不经 Daemon）持有文件锁时，服务层返回类型化的 `config::WorkspaceBusy`，Operation 以 `busy` 失败（不是 `internal_error`）；其余服务错误为 `operation_failed`，`message` 是完整错误链。
+
+新增修改端点的方式：构造 `operations::Job`（环境快照 + 同步服务调用），交给 `server::submit`；它做校验、`OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）、`spawn_blocking`，服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入 Operation 输出（事件流在此处扇出）。Operation 句柄未显式结束就被丢弃（worker panic）会记为失败，Workspace 不会卡在忙碌。记录只存内存；`DaemonOptions::operation_retention` 可调保留策略，`DaemonOptions::runner` 可替换子进程运行器（测试用）。能力串 `operations`。
 
 ### 命令路由
 
@@ -249,7 +256,7 @@ fn test_something() {
 }
 ```
 
-Daemon 测试放在 `tests/daemon_test.rs`：进程内在临时目录的 unix socket 上启动 Daemon，只通过 HTTP、发现文件与文件系统断言，绝不触碰真实 `~/.config/zootree`。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Daemon Operation 测试放在 `tests/daemon_operations_test.rs`（`RunnerFactory` 注入可阻塞的运行器替身，用闸门制造"忙碌"）。Daemon 骨架与只读测试放在 `tests/daemon_test.rs`：进程内在临时目录的 unix socket 上启动 Daemon，只通过 HTTP、发现文件与文件系统断言，绝不触碰真实 `~/.config/zootree`。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 

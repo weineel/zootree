@@ -59,7 +59,8 @@ pub fn list_workspaces(mgr: &ConfigManager, filter: &[WorkspaceStatus]) -> Resul
     to_value(&out)
 }
 
-pub fn workspace_detail(mgr: &ConfigManager, workspace: &str) -> Result<Value, ApiError> {
+/// 400 for a malformed name, 404 for an absent Workspace.
+pub fn require_workspace(mgr: &ConfigManager, workspace: &str) -> Result<(), ApiError> {
     if !name::is_config_name(workspace) {
         return Err(ApiError::bad_request(format!(
             "invalid workspace name {workspace:?}"
@@ -71,6 +72,11 @@ pub fn workspace_detail(mgr: &ConfigManager, workspace: &str) -> Result<Value, A
             "workspace '{workspace}' not found"
         )));
     }
+    Ok(())
+}
+
+pub fn workspace_detail(mgr: &ConfigManager, workspace: &str) -> Result<Value, ApiError> {
+    require_workspace(mgr, workspace)?;
     let (status, config) = mgr.load_workspace(workspace).map_err(internal)?;
     let global = mgr.load_global_config().unwrap_or_default();
     to_value(&json_view::workspace_detail(&status, &config, &global))

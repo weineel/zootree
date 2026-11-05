@@ -41,13 +41,31 @@ pub fn request_with_headers(
     headers: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<HttpResponse> {
+    request_with_body(socket, method, path, token, headers, None, timeout)
+}
+
+/// Like [`request_with_headers`] with an optional JSON request body.
+pub fn request_with_body(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+    timeout: Duration,
+) -> Result<HttpResponse> {
+    let body = body.unwrap_or("");
     let mut stream = UnixStream::connect(socket)
         .with_context(|| format!("failed to connect to {}", socket.display()))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: zootree\r\nConnection: close\r\nContent-Length: 0\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: zootree\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
     );
+    if !body.is_empty() {
+        head.push_str("Content-Type: application/json\r\n");
+    }
     if let Some(token) = token {
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
     }
@@ -56,6 +74,7 @@ pub fn request_with_headers(
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
     parse_response(&raw)

@@ -8,10 +8,12 @@ mod api;
 pub mod client;
 pub mod endpoint;
 pub mod error;
+pub mod operations;
 mod server;
 
 use anyhow::{Context, Result};
 use endpoint::{Discovery, EndpointPaths, Liveness};
+use operations::{OperationRegistry, Retention, RunnerFactory};
 use rand::RngCore;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Oldest client protocol version this Daemon still serves.
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
 /// Capability strings; new behavior is gated by adding one here.
-pub const CAPABILITIES: &[&str] = &["status", "read_api"];
+pub const CAPABILITIES: &[&str] = &["status", "read_api", "operations"];
 /// Idle time without connections or Operations before the Daemon exits.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -36,6 +38,10 @@ pub struct DaemonOptions {
     /// Endpoint name, e.g. `v0.1`; different names coexist.
     pub endpoint_name: String,
     pub idle_timeout: Duration,
+    /// Builds the command runner each Operation uses; tests substitute a double.
+    pub runner: RunnerFactory,
+    /// How many finished Operation records to keep, and for how long.
+    pub operation_retention: Retention,
 }
 
 impl DaemonOptions {
@@ -44,6 +50,8 @@ impl DaemonOptions {
             base_dir,
             endpoint_name: endpoint::endpoint_name_for_version(env!("CARGO_PKG_VERSION")),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            runner: RunnerFactory::real(),
+            operation_retention: Retention::default(),
         }
     }
 
@@ -240,6 +248,8 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
         started_at: discovery.started_at.clone(),
         activity: activity.clone(),
         shutdown: shutdown.clone(),
+        operations: OperationRegistry::new(options.operation_retention),
+        runner: options.runner.clone(),
     };
     let idle_timeout = options.idle_timeout;
     let thread = {
