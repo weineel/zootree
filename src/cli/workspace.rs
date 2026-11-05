@@ -24,9 +24,14 @@ use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::terminal_environment::{AgentIntent, CloseReport, TerminalEnvironment};
 use crate::core::workspace_instruction_index;
 use crate::core::worktree_status::{
-    format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
+    ensure_required_worktrees_exist, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
 };
 use crate::runner::{CommandRunner, RealRunner};
+use crate::service::lifecycle::{
+    cancel_candidate_statuses, cancel_workspace, done_workspace, CancelRequest, DoneRequest,
+    UncommittedConfirmationRequired,
+};
+use crate::service::{EnvSnapshot, EventSink, RequestContext, ServiceEvent};
 use crate::tui;
 use crate::tui_app::create_wizard::run_create_wizard;
 use anyhow::Result;
@@ -697,46 +702,6 @@ fn render_list_cards(items: &[ListWorkspaceItem]) -> String {
     out
 }
 
-const CANCELABLE_STATUSES: &[WorkspaceStatus] =
-    &[WorkspaceStatus::Pending, WorkspaceStatus::InProgress];
-
-fn cancel_candidate_statuses() -> &'static [WorkspaceStatus] {
-    CANCELABLE_STATUSES
-}
-
-fn is_cancelable_status(status: &WorkspaceStatus) -> bool {
-    CANCELABLE_STATUSES.contains(status)
-}
-
-fn archive_canceled_workspace(
-    config_mgr: &ConfigManager,
-    from_status: &WorkspaceStatus,
-    workspace: &mut WorkspaceConfig,
-) -> Result<()> {
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "canceled".into(),
-        timestamp: now,
-        detail: None,
-    });
-    config_mgr.save_workspace(from_status, workspace)?;
-    config_mgr.move_workspace(&workspace.name, from_status, &WorkspaceStatus::Canceled)?;
-    Ok(())
-}
-
-fn archive_canceled_workspace_and_close_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    from_status: &WorkspaceStatus,
-    workspace: &mut WorkspaceConfig,
-    runner: &R,
-) -> Result<Vec<String>> {
-    archive_canceled_workspace(config_mgr, from_status, workspace)?;
-    Ok(close_terminal_environment_with(
-        config_mgr, global, workspace, runner,
-    ))
-}
-
 pub fn handle_open(args: &OpenArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     let global = config_mgr.load_global_config()?;
@@ -803,33 +768,6 @@ fn activate_terminal_environment_with<R: CommandRunner>(
     Ok(activation.warnings)
 }
 
-fn close_terminal_environment_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &WorkspaceConfig,
-    runner: &R,
-) -> Vec<String> {
-    match config_mgr.load_workspace(&workspace.name) {
-        Ok((WorkspaceStatus::Done | WorkspaceStatus::Canceled, _)) => {}
-        Ok((status, _)) => {
-            return vec![format!(
-                "terminal environment close was skipped because workspace '{}' is still {}",
-                workspace.name,
-                status.as_str()
-            )];
-        }
-        Err(error) => {
-            return vec![format!(
-                "terminal environment close was skipped because final workspace state could not be verified for '{}': {error:#}",
-                workspace.name
-            )];
-        }
-    }
-
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    terminal_environment.close(workspace).warnings
-}
-
 fn require_terminal_environment_closed(report: CloseReport) -> Result<Vec<String>> {
     if report.closed {
         return Ok(report.warnings);
@@ -860,28 +798,6 @@ fn close_terminal_environment_for_reopen_with<R: CommandRunner>(
 
     let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
     require_terminal_environment_closed(terminal_environment.close(&workspace))
-}
-
-fn archive_done_workspace_and_close_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &mut WorkspaceConfig,
-    runner: &R,
-) -> Result<Vec<String>> {
-    workspace.events.push(Event {
-        action: "done".into(),
-        timestamp: Local::now().to_rfc3339(),
-        detail: None,
-    });
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, workspace)?;
-    config_mgr.move_workspace(
-        &workspace.name,
-        &WorkspaceStatus::InProgress,
-        &WorkspaceStatus::Done,
-    )?;
-    Ok(close_terminal_environment_with(
-        config_mgr, global, workspace, runner,
-    ))
 }
 
 fn report_terminal_environment_warnings(workspace_name: &str, warnings: Vec<String>) {
@@ -1228,66 +1144,24 @@ pub struct CancelArgs {
     pub skip_hooks: bool,
 }
 
-fn warn_or_bail(force: bool, err: anyhow::Error, context: &str) -> Result<()> {
-    if force {
-        tracing::warn!("{}: {:#}", context, err);
-        Ok(())
-    } else {
-        Err(err.context(format!("{} (use --force to proceed anyway)", context)))
-    }
-}
+/// CLI adapter for service events: steps go to stdout, warnings to the log.
+struct CliEventSink;
 
-fn expanded_workspace_dir(workspace: &WorkspaceConfig) -> String {
-    shellexpand::tilde(&workspace.workspace_dir).into_owned()
-}
-
-fn ensure_required_worktrees_exist(workspace: &WorkspaceConfig) -> Result<()> {
-    let ws_dir = expanded_workspace_dir(workspace);
-    let statuses = repo_worktree_statuses(workspace, &ws_dir);
-    if missing_worktrees(&statuses).is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "{}",
-            format_missing_worktrees_error(&workspace.name, &statuses)
-        )
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum CancelRepoWorktreeDecision {
-    Proceed,
-    SkipMissing {
-        repo_name: String,
-        worktree_path: String,
-    },
-}
-
-fn cancel_repo_worktree_decision(
-    repo_entry: &RepoEntry,
-    worktree_path: &str,
-    worktree_statuses: &[RepoWorktreeStatus],
-) -> CancelRepoWorktreeDecision {
-    let worktree = worktree_statuses
-        .iter()
-        .find(|status| status.repo_name == repo_entry.name);
-
-    if worktree.is_some_and(|status| !status.exists) {
-        CancelRepoWorktreeDecision::SkipMissing {
-            repo_name: repo_entry.name.clone(),
-            worktree_path: worktree_path.into(),
+impl EventSink for CliEventSink {
+    fn emit(&self, event: ServiceEvent) {
+        match event {
+            ServiceEvent::Started { .. } => {}
+            ServiceEvent::Step(message) | ServiceEvent::Log(message) => println!("{message}"),
+            ServiceEvent::Warning(message) => tracing::warn!("{}", message),
+            ServiceEvent::Finished { summary, .. } => println!("{summary}"),
         }
-    } else {
-        CancelRepoWorktreeDecision::Proceed
     }
 }
 
 pub fn handle_done(args: &DoneArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
-    let runner = RealRunner;
-    let git = GitOps::new(&runner);
-    let hook_engine = HookEngine::new(&runner);
+    // Load up front so a broken config fails before any selection prompt.
+    config_mgr.load_global_config()?;
 
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -1305,166 +1179,25 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
     };
 
-    // One lifecycle mutation per Workspace at a time, across processes (ADR-0006).
-    let _workspace_lock = config_mgr.lock_workspace(&name)?;
-    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !matches!(status, WorkspaceStatus::InProgress) {
-        anyhow::bail!("workspace '{}' is not in_progress", name);
-    }
-
-    let ws_dir = expanded_workspace_dir(&workspace);
-
-    if args.dry_run {
-        println!("dry run for workspace '{}':", name);
-        if !args.no_merge {
-            for repo_entry in &workspace.repos {
-                println!(
-                    "  merge {} -> {}",
-                    workspace.branch,
-                    repo_entry.target_branch.as_deref().unwrap_or("*")
-                );
-            }
-        }
-        if !args.no_clean {
-            println!("  clean worktrees and workspace directory");
-        }
-        return Ok(());
-    }
-
-    ensure_required_worktrees_exist(&workspace)?;
-
-    // pre_done hook
-    if !args.skip_hooks {
-        if let Some(invocation) = HookInvocation::for_workspace(
-            global.hooks.pre_done.as_ref(),
-            HookStage::PreDone,
-            HookOperation::Done,
-            WorkspaceStatus::InProgress,
-            &workspace,
-        ) {
-            if let Err(e) = hook_engine.execute(&invocation) {
-                warn_or_bail(args.force, e, "pre_done hook failed")?;
-            }
-        }
-    }
-
-    for repo_entry in &workspace.repos {
-        let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-        let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-
-        let target_branch = match &repo_entry.target_branch {
-            Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
-            Some(tb) => {
-                let current = git.current_branch(&repo_path)?;
-                tracing::warn!(
-                    "target branch '{}' not found in repo '{}', using current branch '{}'",
-                    tb,
-                    repo_entry.name,
-                    current
-                );
-                current
-            }
-            None => {
-                let current = git.current_branch(&repo_path)?;
-                tracing::warn!(
-                    "target branch not configured for repo '{}', using current branch '{}'",
-                    repo_entry.name,
-                    current
-                );
-                current
-            }
-        };
-
-        // Check uncommitted changes
-        if git.has_uncommitted_changes(&worktree_path)? && !args.force {
-            anyhow::bail!(
-                "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
-                repo_entry.name,
-                worktree_path
-            );
-        }
-
-        // Merge
-        if !args.no_merge {
-            let strategy = args.strategy.map(MergeStrategy::as_str);
-            let message = if workspace.description.is_empty() {
-                workspace.title.clone()
-            } else {
-                format!("{}\n\n{}", workspace.title, workspace.description)
-            };
-            git.merge_with_worktree(
-                &repo_path,
-                Some(&worktree_path),
-                &workspace.branch,
-                &target_branch,
-                strategy,
-                &message,
-            )?;
-            println!(
-                "  merged {} -> {} ({})",
-                workspace.branch, target_branch, repo_entry.name
-            );
-
-            if args.push {
-                git.push(&repo_path, &target_branch)?;
-                println!("  pushed {} ({})", target_branch, repo_entry.name);
-            }
-        }
-
-        // Clean
-        if !args.no_clean {
-            if !args.skip_hooks {
-                if let Some(invocation) = HookInvocation::for_repository(
-                    repo_config.hooks.pre_remove.as_ref(),
-                    global.hooks.pre_remove.as_ref(),
-                    HookStage::PreRemove,
-                    HookOperation::Done,
-                    WorkspaceStatus::InProgress,
-                    &workspace,
-                    RepositoryHookContext {
-                        name: &repo_entry.name,
-                        source_dir: &repo_path,
-                        worktree_path: &worktree_path,
-                        target_branch: Some(&target_branch),
-                    },
-                ) {
-                    if let Err(e) = hook_engine.execute(&invocation) {
-                        warn_or_bail(args.force, e, "pre_remove hook failed")?;
-                    }
-                }
-            }
-
-            if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, false) {
-                tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
-            }
-            // if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, true) {
-            //     tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
-            // }
-        }
-    }
-
-    // Remove workspace directory
-    if !args.no_clean && Path::new(&ws_dir).exists() {
-        if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
-            warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
-        }
-    }
-
-    let warnings =
-        archive_done_workspace_and_close_with(&config_mgr, &global, &mut workspace, &runner)?;
-    report_terminal_environment_warnings(&workspace.name, warnings);
-
-    println!("workspace '{}' completed", name);
+    let request = DoneRequest {
+        name,
+        no_merge: args.no_merge,
+        no_clean: args.no_clean,
+        push: args.push,
+        strategy: args.strategy.map(|s| s.as_str().to_string()),
+        force: args.force,
+        skip_hooks: args.skip_hooks,
+        dry_run: args.dry_run,
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    done_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
     Ok(())
 }
 
 pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
-    let runner = RealRunner;
-    let git = GitOps::new(&runner);
-    let hook_engine = HookEngine::new(&runner);
+    config_mgr.load_global_config()?;
 
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -1482,127 +1215,34 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         }
     };
 
-    // One lifecycle mutation per Workspace at a time, across processes (ADR-0006).
-    let _workspace_lock = config_mgr.lock_workspace(&name)?;
-    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !is_cancelable_status(&status) {
-        anyhow::bail!("workspace '{}' is not active", name);
-    }
-
-    if matches!(status, WorkspaceStatus::Pending) {
-        archive_canceled_workspace(&config_mgr, &status, &mut workspace)?;
-        println!("workspace '{}' canceled", name);
-        return Ok(());
-    }
-
-    let ws_dir = expanded_workspace_dir(&workspace);
-    let worktree_statuses = repo_worktree_statuses(&workspace, &ws_dir);
-
-    // Confirm if uncommitted changes exist
-    if !args.force {
-        for repo_entry in &workspace.repos {
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-            if matches!(
-                cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses),
-                CancelRepoWorktreeDecision::Proceed
-            ) && git.has_uncommitted_changes(&worktree_path)?
-                && !tui::confirm(
-                    &format!(
-                        "repo '{}' has uncommitted changes. Continue?",
-                        repo_entry.name
-                    ),
+    let mut request = CancelRequest {
+        name,
+        no_clean: args.no_clean,
+        force: args.force,
+        skip_hooks: args.skip_hooks,
+        confirmed_uncommitted: false,
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    match cancel_workspace(&config_mgr, &RealRunner, &ctx, &request) {
+        Err(error) => {
+            let Some(needed) = error.downcast_ref::<UncommittedConfirmationRequired>() else {
+                return Err(error);
+            };
+            for repo in &needed.repos {
+                if !tui::confirm(
+                    &format!("repo '{}' has uncommitted changes. Continue?", repo),
                     false,
-                )?
-            {
-                anyhow::bail!("canceled by user");
-            }
-        }
-    }
-
-    // pre_cancel hook
-    if !args.skip_hooks {
-        if let Some(invocation) = HookInvocation::for_workspace(
-            global.hooks.pre_cancel.as_ref(),
-            HookStage::PreCancel,
-            HookOperation::Cancel,
-            WorkspaceStatus::InProgress,
-            &workspace,
-        ) {
-            if let Err(e) = hook_engine.execute(&invocation) {
-                warn_or_bail(args.force, e, "pre_cancel hook failed")?;
-            }
-        }
-    }
-
-    if !args.no_clean {
-        for repo_entry in &workspace.repos {
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-            match cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses) {
-                CancelRepoWorktreeDecision::Proceed => {}
-                CancelRepoWorktreeDecision::SkipMissing {
-                    repo_name,
-                    worktree_path,
-                } => {
-                    println!(
-                        "  warning: missing worktree: {} ({})",
-                        repo_name, worktree_path
-                    );
-                    continue;
+                )? {
+                    anyhow::bail!("canceled by user");
                 }
             }
-            let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-
-            // pre_remove hook
-            if !args.skip_hooks {
-                if let Some(invocation) = HookInvocation::for_repository(
-                    repo_config.hooks.pre_remove.as_ref(),
-                    global.hooks.pre_remove.as_ref(),
-                    HookStage::PreRemove,
-                    HookOperation::Cancel,
-                    WorkspaceStatus::InProgress,
-                    &workspace,
-                    RepositoryHookContext {
-                        name: &repo_entry.name,
-                        source_dir: &repo_path,
-                        worktree_path: &worktree_path,
-                        target_branch: repo_entry.target_branch.as_deref(),
-                    },
-                ) {
-                    if let Err(e) = hook_engine.execute(&invocation) {
-                        warn_or_bail(args.force, e, "pre_remove hook failed")?;
-                    }
-                }
-            }
-
-            if Path::new(&worktree_path).exists() {
-                if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, args.force) {
-                    tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
-                }
-            }
-            // if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, true) {
-            //     tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
-            // }
+            request.confirmed_uncommitted = true;
+            cancel_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
+            Ok(())
         }
-
-        if Path::new(&ws_dir).exists() {
-            if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
-                warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
-            }
-        }
+        Ok(_) => Ok(()),
     }
-
-    let warnings = archive_canceled_workspace_and_close_with(
-        &config_mgr,
-        &global,
-        &status,
-        &mut workspace,
-        &runner,
-    )?;
-    report_terminal_environment_warnings(&workspace.name, warnings);
-
-    println!("workspace '{}' canceled", name);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1611,6 +1251,12 @@ mod tests {
     use crate::config::global::{MultiplexerConfig, MultiplexerKind};
     use crate::config::workspace::StoredTerminalEnvironmentState;
     use crate::runner::MockRunner;
+    use crate::service::lifecycle::{
+        archive_canceled_workspace, archive_canceled_workspace_and_close_with,
+        archive_done_workspace_and_close_with, cancel_repo_worktree_decision,
+        close_terminal_environment_with, is_cancelable_status, warn_or_bail,
+        CancelRepoWorktreeDecision,
+    };
     use clap::Parser;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
@@ -2646,15 +2292,19 @@ session = "zootree-cancel-close"
 
     #[test]
     fn warn_or_bail_with_force_returns_ok() {
+        let sink = crate::service::context::CollectingSink::new();
+        let ctx = RequestContext::new(&sink, EnvSnapshot::default());
         let err = anyhow::anyhow!("hook failed");
-        let result = warn_or_bail(true, err, "pre_done hook");
+        let result = warn_or_bail(&ctx, true, err, "pre_done hook");
         assert!(result.is_ok());
     }
 
     #[test]
     fn warn_or_bail_without_force_returns_err_with_hint() {
+        let sink = crate::service::context::CollectingSink::new();
+        let ctx = RequestContext::new(&sink, EnvSnapshot::default());
         let err = anyhow::anyhow!("hook failed");
-        let result = warn_or_bail(false, err, "pre_done hook");
+        let result = warn_or_bail(&ctx, false, err, "pre_done hook");
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         assert!(

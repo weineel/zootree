@@ -47,6 +47,19 @@ pub fn format_missing_worktrees_error(
     )
 }
 
+pub fn ensure_required_worktrees_exist(workspace: &WorkspaceConfig) -> anyhow::Result<()> {
+    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+    let statuses = repo_worktree_statuses(workspace, &ws_dir);
+    if missing_worktrees(&statuses).is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}",
+            format_missing_worktrees_error(&workspace.name, &statuses)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
