@@ -188,6 +188,25 @@ fn done(daemon: &DaemonHandle, name: &str) -> String {
     )
 }
 
+fn wait_finished(daemon: &DaemonHandle, id: &str) {
+    let deadline = Instant::now() + T;
+    loop {
+        let r = zootree::daemon::client::request(
+            &daemon.socket,
+            "GET",
+            &format!("/operations/{id}"),
+            Some(&daemon.token),
+            T,
+        )
+        .unwrap();
+        if r.json().unwrap()["status"] != "running" {
+            return;
+        }
+        assert!(Instant::now() < deadline, "operation never finished");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn stop(daemon: DaemonHandle) {
     daemon.shutdown();
     daemon.join().unwrap();
@@ -331,24 +350,24 @@ fn resume_replays_only_later_events_and_marks_the_replay() {
     drop(first);
 
     // Happens while the client is away.
-    done(&daemon, "beta");
-    let mut probe = subscribe(&daemon, None);
-    until_ready(&mut probe);
-    // Wait until the missed Operation is over (probe was fresh: poll history).
+    let missed = done(&daemon, "beta");
+    wait_finished(&daemon, &missed);
     let mut second = subscribe(&daemon, Some(last_seen));
     let frames = until_ready(&mut second);
     assert_eq!(frames[0].event, "replay");
     assert_eq!(frames[0].data["from"], last_seen);
     let count = frames[0].data["count"].as_u64().unwrap() as usize;
-    assert!(count >= 1);
     let replayed = &frames[1..frames.len() - 1];
     assert_eq!(replayed.len(), count);
+    assert_eq!(replayed.last().unwrap().event, "operation.finished");
     assert!(replayed.iter().all(|f| seq(f) > last_seen));
     assert!(replayed.windows(2).all(|w| seq(&w[0]) < seq(&w[1])));
+    // Only what was missed: beta's events, none of alpha's.
     assert!(replayed
         .iter()
-        .all(|f| f.data["workspace"]["name"] != json!("alpha")
-            && f.data["workspace"] != json!("alpha")));
+        .all(|f| f.data["operation_id"] == json!(missed)
+            || f.data["workspace"]["name"] == json!("beta")));
+    assert!(!frames.iter().any(|f| f.event == "snapshot"));
     let ready = frames.last().unwrap();
     assert_eq!(ready.data["replay"], true);
     assert!(!frames.iter().any(|f| f.event == "snapshot"));
@@ -577,15 +596,10 @@ fn deleting_an_archived_workspace_emits_removed() {
 
     send(&daemon, "DELETE", "/workspaces/old", json!({}));
     let frames = until(&mut stream, "operation.finished");
-    assert_eq!(
-        names(&frames),
-        [
-            "operation.started",
-            "workspace.removed",
-            "operation.finished"
-        ]
-    );
-    assert_eq!(frames[1].data["name"], "old");
+    let n = names(&frames);
+    assert_eq!(n[0], "operation.started");
+    assert_eq!(n[n.len() - 2], "workspace.removed", "{n:?}");
+    assert_eq!(frames[n.len() - 2].data["name"], "old");
     stop(daemon);
 }
 

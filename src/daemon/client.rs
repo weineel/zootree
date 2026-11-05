@@ -163,7 +163,7 @@ impl EventStream {
         let mut stream = UnixStream::connect(socket)
             .with_context(|| format!("failed to connect to {}", socket.display()))?;
         let mut head =
-            String::from("GET /events HTTP/1.1\r\nHost: zootree\r\nAccept: text/event-stream\r\n");
+            String::from("GET /events HTTP/1.1\r\nHost: zootree\r\nConnection: close\r\nAccept: text/event-stream\r\n");
         if let Some(token) = token {
             head.push_str(&format!("Authorization: Bearer {token}\r\n"));
         }
