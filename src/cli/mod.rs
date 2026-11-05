@@ -2,10 +2,13 @@ pub mod add_repo;
 pub mod completions;
 pub mod config;
 pub mod create_flow;
+pub mod daemon;
 pub mod edit;
 pub mod info;
 pub mod json_view;
+pub mod operations;
 pub mod prune;
+pub mod remote;
 pub mod repo;
 pub mod template;
 pub mod workspace;
@@ -22,7 +25,12 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    #[arg(long, global = true, help = "Enable verbose logging output")]
+    #[arg(
+        short = 'v',
+        long,
+        global = true,
+        help = "Enable verbose logging output (live hook/git output)"
+    )]
     pub verbose: bool,
 
     #[arg(long, global = true, help = "Suppress all output except errors")]
@@ -33,6 +41,10 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "Manage global configuration")]
     Config(config::ConfigArgs),
+    #[command(about = "Manage the optional background daemon")]
+    Daemon(daemon::DaemonArgs),
+    #[command(about = "Control operations running in the daemon")]
+    Operations(operations::OperationsArgs),
     #[command(about = "Manage registered repositories")]
     Repo(repo::RepoArgs),
     #[command(about = "Create a new workspace")]

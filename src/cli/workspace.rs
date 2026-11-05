@@ -1,41 +1,38 @@
 use crate::cli::create_flow::{
-    create_args_need_wizard, discover_current_repo_candidate, draft_from_args,
-    persist_selected_pending_repos, resolve_agent_cli_for_draft, workspace_from_draft,
-    AfterCreateMode, CreateDraftError, CreateWizardOutput,
+    create_args_need_wizard, discover_current_repo_candidate, draft_from_args, AfterCreateMode,
+    CreateWizardOutput,
 };
-use crate::config::global::{GlobalConfig, MultiplexerKind};
-use crate::config::template::TemplateConfig;
-use crate::config::workspace::{Event, RepoEntry, WorkspaceConfig, WorkspaceStatus};
+use crate::cli::remote::{self, DaemonClient, ExecOptions, OperationFailure};
+use crate::config::global::MultiplexerKind;
+use crate::config::workspace::{RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{
     complete_agent_cli_alias, complete_repos_list, complete_template, complete_workspace,
     WorkspaceFilter,
 };
-use crate::core::copy_files;
 use crate::core::git::GitOps;
-use crate::core::hook::{
-    HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
-};
-use crate::core::reopen::{
-    build_reopen_plan, execute_reopen_plan, format_reopen_plan, ReopenBase, ReopenLifecyclePlan,
-    ReopenOptions, ReopenPrompt, ReopenSources, WorktreeAction,
-};
+use crate::core::reopen::{ReopenBase, ReopenOptions, ReopenPrompt, ReopenSources};
 use crate::core::repo_status::missing_registered_repo_names;
-use crate::core::terminal_environment::{AgentIntent, CloseReport, TerminalEnvironment};
-use crate::core::workspace_instruction_index;
-use crate::core::worktree_status::{
-    format_missing_worktrees_error, missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus,
+use crate::core::worktree_status::{missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus};
+use crate::runner::RealRunner;
+use crate::service::create::create_workspace_from_draft;
+use crate::service::lifecycle::{
+    cancel_candidate_statuses, cancel_workspace, done_workspace, CancelRequest, DoneRequest,
+    UncommittedConfirmationRequired,
 };
-use crate::runner::{CommandRunner, RealRunner};
+use crate::service::reopen::{reopen_workspace, ReopenRequest};
+use crate::service::start::{
+    open_workspace, start_workspace, OpenRequest, SessionOutcome, StartRequest,
+};
+use crate::service::{EnvSnapshot, EventSink, RequestContext, ServiceEvent};
 use crate::tui;
 use crate::tui_app::create_wizard::run_create_wizard;
 use anyhow::Result;
-use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -114,21 +111,6 @@ struct ListWorkspaceItem {
     missing_repos: Vec<String>,
 }
 
-fn selected_agent_cli_value(
-    run_agent: &Option<Option<String>>,
-    global: &GlobalConfig,
-) -> Result<Option<String>> {
-    match run_agent {
-        None => Ok(None),
-        Some(Some(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        Some(_) => Ok(Some(global.agent_cli.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
-            )
-        })?)),
-    }
-}
-
 pub fn handle_create(args: &CreateArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.ensure_dirs()?;
@@ -147,95 +129,115 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
         None
     };
     let draft = draft_from_args(args, &config_mgr, &runner, &global, current_repo, &existing)?;
-    let mut output = if needs_wizard {
+    let output = if needs_wizard {
         run_create_wizard(draft, global.clone(), existing.clone())?
     } else {
-        let errors = draft.validate(&existing, &global);
-        if !errors.is_empty() {
-            anyhow::bail!("invalid create options: {}", format_draft_errors(&errors));
-        }
         CreateWizardOutput { draft }
     };
-    persist_selected_pending_repos(&config_mgr, &mut output.draft)?;
-    let agent_cli = resolve_agent_cli_for_draft(&output.draft.after_create, &global)?;
-    let multiplexer = output
-        .draft
-        .multiplexer
-        .clone()
-        .unwrap_or_else(|| global.multiplexer.clone());
-    let workspace = workspace_from_draft(
-        &output.draft,
-        Local::now().to_rfc3339(),
-        agent_cli,
-        multiplexer,
-    );
-    let name = workspace.name.clone();
+    let mut draft = output.draft;
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if draft_fits_daemon_create(&draft, &global) {
+            // Same validation and repo registration the local path performs
+            // first, so errors and side effects match.
+            let existing = existing_workspace_names(&config_mgr)?;
+            let errors = draft.validate(&existing, &global);
+            if !errors.is_empty() {
+                anyhow::bail!(
+                    "invalid create options: {}",
+                    crate::service::create::format_draft_errors(&errors)
+                );
+            }
+            crate::cli::create_flow::persist_selected_pending_repos(&config_mgr, &mut draft)?;
+            if create_through_daemon(&daemon, &draft)? {
+                return Ok(());
+            }
+        }
+    }
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = create_workspace_from_draft(&config_mgr, &ctx, draft)?;
+    let name = outcome.workspace.name.clone();
 
-    config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace)?;
-    save_recently_template(&config_mgr, &workspace)?;
-
-    println!("workspace '{}' created (pending)", name);
-    println!("  branch: {}", workspace.branch);
-    println!(
-        "  repos: {}",
-        workspace
-            .repos
-            .iter()
-            .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    start_after_create_if_needed(&name, &output.draft.after_create)?;
+    start_after_create_if_needed(&name, &outcome.after_create)?;
 
     Ok(())
 }
 
-fn format_draft_errors(errors: &[CreateDraftError]) -> String {
-    errors
+fn existing_workspace_names(config_mgr: &ConfigManager) -> Result<Vec<String>> {
+    Ok(config_mgr
+        .list_workspaces(None::<&[WorkspaceStatus]>)?
         .iter()
-        .map(|error| match error {
-            CreateDraftError::TitleRequired => "title is required".to_string(),
-            CreateDraftError::TitleSingleLineRequired => "title must be a single line".to_string(),
-            CreateDraftError::WorkspaceNameRequired => "workspace name is required".to_string(),
-            CreateDraftError::WorkspaceNameInvalid(name) => {
-                format!("workspace name '{name}' must use only ASCII letters, numbers, '-' and '_'")
-            }
-            CreateDraftError::WorkspaceNameSingleLineRequired => {
-                "workspace name must be a single line".to_string()
-            }
-            CreateDraftError::WorkspaceBranchRequired => "workspace branch is required".to_string(),
-            CreateDraftError::WorkspaceBranchSingleLineRequired => {
-                "workspace branch must be a single line".to_string()
-            }
-            CreateDraftError::WorkspaceNameExists(name) => {
-                format!("workspace name '{}' already exists", name)
-            }
-            CreateDraftError::RepoRequired => "at least one repo must be selected".to_string(),
-            CreateDraftError::TargetBranchRequired(repo) => {
-                format!("target branch for repo '{}' is required", repo)
-            }
-            CreateDraftError::TargetBranchSingleLineRequired(repo) => {
-                format!("target branch for repo '{}' must be a single line", repo)
-            }
-            CreateDraftError::DefaultAgentMissing => {
-                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
-                    .to_string()
-            }
-            CreateDraftError::RunAgentSingleLineRequired => {
-                "run-agent must be a single line".to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+        .map(|w| w.name.clone())
+        .collect())
 }
 
-fn save_recently_template(config_mgr: &ConfigManager, workspace: &WorkspaceConfig) -> Result<()> {
-    let recently = TemplateConfig {
-        repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-        multiplexer: workspace.multiplexer.clone(),
+/// The Daemon's create request carries the common fields only. A draft whose
+/// workspace directory or multiplexer settings differ from what those fields
+/// would produce is created locally so nothing is silently dropped.
+fn draft_fits_daemon_create(
+    draft: &crate::cli::create_flow::CreateDraft,
+    global: &crate::config::global::GlobalConfig,
+) -> bool {
+    let default_dir = crate::cli::create_flow::default_workspace_dir(global, &draft.name);
+    let multiplexer_ok = match &draft.multiplexer {
+        None => true,
+        Some(multiplexer) => {
+            let mut expected = global.multiplexer.clone();
+            expected.kind = multiplexer.kind.clone();
+            *multiplexer == expected
+        }
     };
-    config_mgr.save_template("recently", &recently)
+    draft.workspace_dir == default_dir && multiplexer_ok
+}
+
+/// Creates (and, when the draft asks for it, starts) the Workspace through
+/// the Daemon. `false` means the Daemon could not take it: create locally.
+fn create_through_daemon(
+    daemon: &DaemonClient,
+    draft: &crate::cli::create_flow::CreateDraft,
+) -> Result<bool> {
+    let repos: Vec<Value> = draft
+        .repos
+        .iter()
+        .filter(|repo| repo.selected)
+        .map(|repo| json!({"name": repo.name, "target_branch": repo.target_branch}))
+        .collect();
+    let mut body = json!({
+        "title": draft.title,
+        "name": draft.name,
+        "description": draft.description,
+        "branch": draft.branch,
+        "repos": repos,
+    });
+    if let Some(multiplexer) = &draft.multiplexer {
+        body["multiplexer"] = json!(multiplexer.kind);
+    }
+    match &draft.after_create {
+        AfterCreateMode::CreateOnly => {}
+        AfterCreateMode::Start => body["start"] = json!(true),
+        AfterCreateMode::StartAndRunAgent { run_agent } => {
+            if let Some(value) = remote::run_agent_json(&Some(run_agent.clone())) {
+                body["run_agent"] = value;
+            }
+        }
+    }
+    let Some(finished) = daemon.execute("POST", "/workspaces", body, &ExecOptions::default())?
+    else {
+        return Ok(false);
+    };
+    if finished.result["started"] == json!(true) {
+        let outcome = session_outcome(&finished.result);
+        complete_start(&outcome, &RealRunner)?;
+    }
+    Ok(true)
+}
+
+fn session_outcome(result: &Value) -> SessionOutcome {
+    SessionOutcome {
+        workspace: result["workspace"].as_str().unwrap_or_default().to_string(),
+        dry_run: result["dry_run"] == json!(true),
+        attach: remote::attach_from_result(result),
+    }
 }
 
 fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()> {
@@ -254,119 +256,10 @@ fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()
 
 pub fn handle_start(args: &StartArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
+    // Load up front so a broken config fails before any selection prompt.
+    config_mgr.load_global_config()?;
     let runner = RealRunner;
 
-    let (workspace, warnings) =
-        start_workspace_and_activate_with(&config_mgr, &global, &runner, args)?;
-    println!("workspace '{}' started", workspace.name);
-    report_terminal_environment_warnings(&workspace.name, warnings);
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct CreatedWorktree {
-    repo_path: String,
-    worktree_path: String,
-}
-
-#[derive(Debug)]
-struct StartRollback {
-    created_worktrees: Vec<CreatedWorktree>,
-    workspace_dir_to_remove: Option<PathBuf>,
-    active: bool,
-}
-
-impl StartRollback {
-    fn new(workspace_dir_to_remove: Option<PathBuf>) -> Self {
-        Self {
-            created_worktrees: Vec::new(),
-            workspace_dir_to_remove,
-            active: true,
-        }
-    }
-
-    fn record_worktree(&mut self, repo_path: String, worktree_path: String) {
-        self.created_worktrees.push(CreatedWorktree {
-            repo_path,
-            worktree_path,
-        });
-    }
-
-    fn disarm(&mut self) {
-        self.active = false;
-    }
-
-    fn rollback<R: CommandRunner>(&mut self, git: &GitOps<'_, R>) -> Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-
-        let mut failures = Vec::new();
-        for created in self.created_worktrees.iter().rev() {
-            if let Err(e) = git.worktree_remove(&created.repo_path, &created.worktree_path, true) {
-                tracing::warn!(
-                    "failed to rollback worktree '{}': {}",
-                    created.worktree_path,
-                    e
-                );
-                failures.push(format!("{}: {:#}", created.worktree_path, e));
-            }
-        }
-
-        if let Some(dir) = &self.workspace_dir_to_remove {
-            match std::fs::remove_dir(dir) {
-                Ok(()) => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to rollback workspace dir '{}': {}",
-                        dir.display(),
-                        e
-                    );
-                    failures.push(format!("{}: {}", dir.display(), e));
-                }
-            }
-        }
-
-        self.active = false;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            anyhow::bail!("rollback failed: {}", failures.join("; "))
-        }
-    }
-}
-
-fn finish_start_failure<T, R: CommandRunner>(
-    err: anyhow::Error,
-    rollback: &mut StartRollback,
-    git: &GitOps<'_, R>,
-) -> Result<T> {
-    if let Err(rollback_err) = rollback.rollback(git) {
-        Err(anyhow::anyhow!(
-            "start failed: {:#}; rollback failed: {:#}",
-            err,
-            rollback_err
-        ))
-    } else {
-        Err(err)
-    }
-}
-
-fn start_workspace_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    runner: &R,
-    args: &StartArgs,
-) -> Result<WorkspaceConfig> {
-    let git = GitOps::new(runner);
-    let hook_engine = HookEngine::new(runner);
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
@@ -383,163 +276,60 @@ fn start_workspace_with<R: CommandRunner>(
         }
     };
 
-    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !matches!(status, WorkspaceStatus::Pending) {
-        anyhow::bail!("workspace '{}' is not in pending state", name);
-    }
-
-    if let Some(kind) = &args.multiplexer {
-        workspace.multiplexer.kind = kind.clone();
-    }
-
-    let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
-    let ws_dir_path = PathBuf::from(&ws_dir);
-    let created_workspace_dir = !ws_dir_path.exists();
-    std::fs::create_dir_all(&ws_dir)?;
-    let mut rollback = StartRollback::new(created_workspace_dir.then_some(ws_dir_path));
-
-    let prepare_result = (|| -> Result<()> {
-        if args.run_agent.is_some() {
-            workspace.agent_cli = selected_agent_cli_value(&args.run_agent, global)?;
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        let mut body = json!({"no_multiplexer": args.no_multiplexer});
+        if let Some(multiplexer) = &args.multiplexer {
+            body["multiplexer"] = json!(multiplexer);
         }
-
-        for repo_entry in &workspace.repos {
-            let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-
-            let target_branch = match &repo_entry.target_branch {
-                Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
-                Some(tb) => {
-                    let current = git.current_branch(&repo_path)?;
-                    tracing::warn!(
-                        "target branch '{}' not found in repo '{}', using current branch '{}'",
-                        tb,
-                        repo_entry.name,
-                        current
-                    );
-                    current
-                }
-                None => {
-                    let current = git.current_branch(&repo_path)?;
-                    tracing::warn!(
-                        "target branch not configured for repo '{}', using current branch '{}'",
-                        repo_entry.name,
-                        current
-                    );
-                    current
-                }
-            };
-
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-
-            tracing::info!(
-                "creating worktree for {} at {}",
-                repo_entry.name,
-                worktree_path
-            );
-            git.worktree_add(
-                &repo_path,
-                &workspace.branch,
-                &worktree_path,
-                &target_branch,
-            )?;
-            rollback.record_worktree(repo_path.clone(), worktree_path.clone());
-
-            let patterns =
-                copy_files::merge_copy_files(&global.copy_files, &repo_config.copy_files);
-            if !patterns.is_empty() {
-                copy_files::copy_files_to_worktree(
-                    Path::new(&repo_path),
-                    Path::new(&worktree_path),
-                    &patterns,
-                )?;
-            }
-
-            if let Some(invocation) = HookInvocation::for_repository(
-                repo_config.hooks.post_create.as_ref(),
-                global.hooks.post_create.as_ref(),
-                HookStage::PostCreate,
-                HookOperation::Start,
-                WorkspaceStatus::Pending,
-                &workspace,
-                RepositoryHookContext {
-                    name: &repo_entry.name,
-                    source_dir: &repo_path,
-                    worktree_path: &worktree_path,
-                    target_branch: Some(&target_branch),
-                },
-            ) {
-                hook_engine.execute(&invocation)?;
-            }
+        if let Some(value) = remote::run_agent_json(&args.run_agent) {
+            body["run_agent"] = value;
         }
-
-        Ok(())
-    })();
-
-    if let Err(err) = prepare_result {
-        return finish_start_failure(err, &mut rollback, &git);
+        let path = format!("/workspaces/{name}/start");
+        if let Some(finished) = daemon.execute("POST", &path, body, &ExecOptions::default())? {
+            // The foreground attach always runs here, in this terminal.
+            return complete_start(&session_outcome(&finished.result), &runner);
+        }
     }
 
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "started".into(),
-        timestamp: now,
-        detail: None,
-    });
-    if let Err(err) = config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace) {
-        return finish_start_failure(err, &mut rollback, &git);
-    }
-    if let Err(err) = config_mgr.move_workspace(
-        &name,
-        &WorkspaceStatus::Pending,
-        &WorkspaceStatus::InProgress,
-    ) {
-        return finish_start_failure(err, &mut rollback, &git);
-    }
-    rollback.disarm();
-    workspace_instruction_index::sync(&workspace);
-
-    if let Some(invocation) = HookInvocation::for_workspace(
-        global.hooks.post_start.as_ref(),
-        HookStage::PostStart,
-        HookOperation::Start,
-        WorkspaceStatus::InProgress,
-        &workspace,
-    ) {
-        hook_engine.execute(&invocation)?;
-    }
-
-    Ok(workspace)
+    let request = StartRequest {
+        name,
+        multiplexer: args.multiplexer.clone(),
+        no_multiplexer: args.no_multiplexer,
+        run_agent: args.run_agent.clone(),
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = start_workspace(&config_mgr, &runner, &ctx, &request)?;
+    complete_start(&outcome, &runner)
 }
 
-fn start_workspace_and_activate_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    runner: &R,
-    args: &StartArgs,
-) -> Result<(WorkspaceConfig, Vec<String>)> {
-    let workspace = start_workspace_with(config_mgr, global, runner, args)?;
-    if args.no_multiplexer {
-        return Ok((workspace, Vec::new()));
-    }
-
-    let warnings = activate_terminal_environment_with(
-        config_mgr,
-        global,
-        &workspace,
-        runner,
-        agent_intent(args.run_agent.clone()),
-    )
-    .map_err(|error| {
+/// What follows a successful start: the foreground attach and the closing line.
+fn complete_start(outcome: &SessionOutcome, runner: &RealRunner) -> Result<()> {
+    let warning = run_attach(outcome, runner, |error| {
         anyhow::anyhow!(
             "workspace '{}' started and remains in_progress, but terminal environment activation failed: {:#}. Run `zootree open {}` to retry",
-            workspace.name,
+            outcome.workspace,
             error,
-            workspace.name
+            outcome.workspace
         )
     })?;
+    println!("workspace '{}' started", outcome.workspace);
+    report_terminal_environment_warnings(&outcome.workspace, warning.into_iter().collect());
 
-    Ok((workspace, warnings))
+    Ok(())
+}
+
+/// Performs the foreground attach a service function asked for. A failure the
+/// service layer would have wrapped is wrapped by `on_error`.
+fn run_attach(
+    outcome: &SessionOutcome,
+    runner: &RealRunner,
+    on_error: impl FnOnce(anyhow::Error) -> anyhow::Error,
+) -> Result<Option<String>> {
+    match &outcome.attach {
+        Some(attach) => attach.run(runner).map_err(on_error),
+        None => Ok(None),
+    }
 }
 
 pub fn handle_list(args: &ListArgs) -> Result<()> {
@@ -550,6 +340,12 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     } else {
         args.status.clone()
     };
+
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if list_through_daemon(&daemon, args)? {
+            return Ok(());
+        }
+    }
 
     let workspaces = config_mgr.list_workspaces_with_status(Some(status_filter.as_slice()))?;
 
@@ -594,6 +390,113 @@ pub fn handle_list(args: &ListArgs) -> Result<()> {
     print!("{}", output);
 
     Ok(())
+}
+
+/// Renders `list` from the Daemon's answer. `false`: ask locally instead.
+fn list_through_daemon(daemon: &DaemonClient, args: &ListArgs) -> Result<bool> {
+    let query = if args.status.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = args.status.iter().map(WorkspaceStatus::as_str).collect();
+        format!("?status={}", names.join(","))
+    };
+    let Some(summaries) = daemon.read(&format!("/workspaces{query}")) else {
+        return Ok(false);
+    };
+    if args.json {
+        println!("{}", crate::cli::json_view::to_pretty_json(&summaries)?);
+        return Ok(true);
+    }
+    let Some(entries) = summaries.as_array() else {
+        return Ok(false);
+    };
+    if entries.is_empty() {
+        println!("no workspaces found");
+        return Ok(true);
+    }
+    // Whether a repository's directory still exists is judged on this machine.
+    let Some(repos) = daemon.read("/repos") else {
+        return Ok(false);
+    };
+    let registered: std::collections::BTreeMap<String, String> = repos
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter_map(|r| {
+                    Some((
+                        r["name"].as_str()?.to_string(),
+                        r["path"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut items = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(item) = list_item_from_summary(entry, &registered) else {
+            return Ok(false);
+        };
+        items.push(item);
+    }
+    let output = if args.oneline {
+        render_list_oneline(&items)
+    } else {
+        render_list_cards(&items)
+    };
+    print!("{}", output);
+    Ok(true)
+}
+
+fn list_item_from_summary(
+    entry: &Value,
+    registered: &std::collections::BTreeMap<String, String>,
+) -> Option<ListWorkspaceItem> {
+    let status: WorkspaceStatus = serde_json::from_value(entry["status"].clone()).ok()?;
+    let repos: Vec<RepoEntry> = entry["repos"]
+        .as_array()?
+        .iter()
+        .map(|r| {
+            Some(RepoEntry {
+                name: r["name"].as_str()?.to_string(),
+                target_branch: r["target_branch"].as_str().map(str::to_string),
+            })
+        })
+        .collect::<Option<_>>()?;
+    let workspace = WorkspaceConfig {
+        title: entry["title"].as_str()?.to_string(),
+        name: entry["name"].as_str()?.to_string(),
+        description: String::new(),
+        branch: entry["branch"].as_str()?.to_string(),
+        workspace_dir: entry["workspace_dir"].as_str()?.to_string(),
+        created_at: entry["created_at"].as_str()?.to_string(),
+        agent_cli: None,
+        multiplexer: Default::default(),
+        multiplexer_state: Default::default(),
+        repos,
+        events: Vec::new(),
+    };
+    let worktrees = if matches!(status, WorkspaceStatus::InProgress) {
+        let ws_dir = shellexpand::tilde(&workspace.workspace_dir).into_owned();
+        repo_worktree_statuses(&workspace, &ws_dir)
+    } else {
+        Vec::new()
+    };
+    let missing_repos = workspace
+        .repos
+        .iter()
+        .filter(|repo| match registered.get(&repo.name) {
+            Some(path) => !std::path::Path::new(&shellexpand::tilde(path).into_owned()).exists(),
+            None => true,
+        })
+        .map(|repo| repo.name.clone())
+        .collect();
+    Some(ListWorkspaceItem {
+        status,
+        workspace,
+        worktrees,
+        missing_repos,
+    })
 }
 
 fn format_status(status: &WorkspaceStatus) -> &'static str {
@@ -695,49 +598,9 @@ fn render_list_cards(items: &[ListWorkspaceItem]) -> String {
     out
 }
 
-const CANCELABLE_STATUSES: &[WorkspaceStatus] =
-    &[WorkspaceStatus::Pending, WorkspaceStatus::InProgress];
-
-fn cancel_candidate_statuses() -> &'static [WorkspaceStatus] {
-    CANCELABLE_STATUSES
-}
-
-fn is_cancelable_status(status: &WorkspaceStatus) -> bool {
-    CANCELABLE_STATUSES.contains(status)
-}
-
-fn archive_canceled_workspace(
-    config_mgr: &ConfigManager,
-    from_status: &WorkspaceStatus,
-    workspace: &mut WorkspaceConfig,
-) -> Result<()> {
-    let now = Local::now().to_rfc3339();
-    workspace.events.push(Event {
-        action: "canceled".into(),
-        timestamp: now,
-        detail: None,
-    });
-    config_mgr.save_workspace(from_status, workspace)?;
-    config_mgr.move_workspace(&workspace.name, from_status, &WorkspaceStatus::Canceled)?;
-    Ok(())
-}
-
-fn archive_canceled_workspace_and_close_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    from_status: &WorkspaceStatus,
-    workspace: &mut WorkspaceConfig,
-    runner: &R,
-) -> Result<Vec<String>> {
-    archive_canceled_workspace(config_mgr, from_status, workspace)?;
-    Ok(close_terminal_environment_with(
-        config_mgr, global, workspace, runner,
-    ))
-}
-
 pub fn handle_open(args: &OpenArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
+    config_mgr.load_global_config()?;
     let runner = RealRunner;
 
     let name = match &args.name {
@@ -756,130 +619,12 @@ pub fn handle_open(args: &OpenArgs) -> Result<()> {
         }
     };
 
-    let warnings = open_workspace_with(&config_mgr, &global, &runner, &name)?;
-    report_terminal_environment_warnings(&name, warnings);
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = open_workspace(&config_mgr, &runner, &ctx, &OpenRequest { name })?;
+    let warning = run_attach(&outcome, &runner, |error| error)?;
+    report_terminal_environment_warnings(&outcome.workspace, warning.into_iter().collect());
     Ok(())
-}
-
-fn open_workspace_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    runner: &R,
-    name: &str,
-) -> Result<Vec<String>> {
-    let (status, workspace) = config_mgr.load_workspace(name)?;
-    if !matches!(status, WorkspaceStatus::InProgress) {
-        anyhow::bail!("workspace '{}' is not in_progress", name);
-    }
-
-    ensure_required_worktrees_exist(&workspace)?;
-
-    activate_terminal_environment_with(config_mgr, global, &workspace, runner, AgentIntent::None)
-}
-
-fn agent_intent(run_agent: Option<Option<String>>) -> AgentIntent {
-    match run_agent {
-        None => AgentIntent::None,
-        Some(None) => AgentIntent::Default,
-        Some(Some(command)) if command.is_empty() => AgentIntent::Default,
-        Some(Some(command)) => AgentIntent::Override(command),
-    }
-}
-
-fn activate_terminal_environment_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &WorkspaceConfig,
-    runner: &R,
-    agent_intent: AgentIntent,
-) -> Result<Vec<String>> {
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    let activation = terminal_environment.activate(workspace, agent_intent)?;
-    let mut updated = workspace.clone();
-    updated.multiplexer_state = activation.stored_state;
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
-    Ok(activation.warnings)
-}
-
-fn close_terminal_environment_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &WorkspaceConfig,
-    runner: &R,
-) -> Vec<String> {
-    match config_mgr.load_workspace(&workspace.name) {
-        Ok((WorkspaceStatus::Done | WorkspaceStatus::Canceled, _)) => {}
-        Ok((status, _)) => {
-            return vec![format!(
-                "terminal environment close was skipped because workspace '{}' is still {}",
-                workspace.name,
-                status.as_str()
-            )];
-        }
-        Err(error) => {
-            return vec![format!(
-                "terminal environment close was skipped because final workspace state could not be verified for '{}': {error:#}",
-                workspace.name
-            )];
-        }
-    }
-
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    terminal_environment.close(workspace).warnings
-}
-
-fn require_terminal_environment_closed(report: CloseReport) -> Result<Vec<String>> {
-    if report.closed {
-        return Ok(report.warnings);
-    }
-
-    let detail = if report.warnings.is_empty() {
-        "terminal environment could not be confirmed closed".to_string()
-    } else {
-        report.warnings.join("; ")
-    };
-    anyhow::bail!("terminal environment could not be closed: {detail}")
-}
-
-fn close_terminal_environment_for_reopen_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace_name: &str,
-    runner: &R,
-) -> Result<Vec<String>> {
-    let workspace = match config_mgr.load_workspace(workspace_name)? {
-        (WorkspaceStatus::Done | WorkspaceStatus::Canceled, workspace) => workspace,
-        (status, _) => anyhow::bail!(
-            "cannot close terminal environment before reopen because workspace '{}' is {}",
-            workspace_name,
-            status.as_str()
-        ),
-    };
-
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
-    require_terminal_environment_closed(terminal_environment.close(&workspace))
-}
-
-fn archive_done_workspace_and_close_with<R: CommandRunner>(
-    config_mgr: &ConfigManager,
-    global: &GlobalConfig,
-    workspace: &mut WorkspaceConfig,
-    runner: &R,
-) -> Result<Vec<String>> {
-    workspace.events.push(Event {
-        action: "done".into(),
-        timestamp: Local::now().to_rfc3339(),
-        detail: None,
-    });
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, workspace)?;
-    config_mgr.move_workspace(
-        &workspace.name,
-        &WorkspaceStatus::InProgress,
-        &WorkspaceStatus::Done,
-    )?;
-    Ok(close_terminal_environment_with(
-        config_mgr, global, workspace, runner,
-    ))
 }
 
 fn report_terminal_environment_warnings(workspace_name: &str, warnings: Vec<String>) {
@@ -1107,7 +852,7 @@ impl ReopenPrompt for CliReopenPrompt {
 
 pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
     let config_manager = ConfigManager::new()?;
-    let global = config_manager.load_global_config()?;
+    config_manager.load_global_config()?;
     let runner = RealRunner;
     let interactive = std::io::stdin().is_terminal();
     let name = match &args.name {
@@ -1127,63 +872,83 @@ pub fn handle_reopen(args: &ReopenArgs) -> Result<()> {
         }
         None => anyhow::bail!("workspace name is required when stdin is not interactive"),
     };
-    let options = ReopenOptions {
-        multiplexer: args.multiplexer.clone(),
-        sources: ReopenSources::parse(&args.from)?,
-        overwrite_repos: args.overwrite.iter().cloned().collect::<BTreeSet<_>>(),
-    };
-    let mut prompt = CliReopenPrompt { interactive };
-    let mut plan = build_reopen_plan(&config_manager, &runner, &name, &options, &mut prompt)?;
-    plan.apply_current_terminal_config(&global);
-    if args.run_agent.is_some() {
-        plan.workspace.agent_cli = selected_agent_cli_value(&args.run_agent, &global)?;
-    }
-    let lifecycle = ReopenLifecyclePlan {
+    let request = ReopenRequest {
+        name,
+        options: ReopenOptions {
+            multiplexer: args.multiplexer.clone(),
+            sources: ReopenSources::parse(&args.from)?,
+            overwrite_repos: args.overwrite.iter().cloned().collect::<BTreeSet<_>>(),
+        },
+        run_agent: args.run_agent.clone(),
         skip_hooks: args.skip_hooks,
-        activate_terminal_environment: !args.no_multiplexer,
-        run_agent: args.run_agent.is_some(),
+        no_multiplexer: args.no_multiplexer,
+        dry_run: args.dry_run,
     };
-    print!("{}", format_reopen_plan(&plan, &lifecycle));
-    if args.dry_run {
-        println!("dry run: no changes made");
+    if let Some(daemon) = remote::connect(&config_manager) {
+        let mut body = json!({
+            "from": args.from,
+            "overwrite": args.overwrite,
+            "skip_hooks": args.skip_hooks,
+            "dry_run": args.dry_run,
+            "no_multiplexer": args.no_multiplexer,
+        });
+        if let Some(multiplexer) = &args.multiplexer {
+            body["multiplexer"] = json!(multiplexer);
+        }
+        if let Some(value) = remote::run_agent_json(&args.run_agent) {
+            body["run_agent"] = value;
+        }
+        let path = format!("/workspaces/{}/reopen", request.name);
+        match daemon.execute("POST", &path, body, &ExecOptions::default()) {
+            Ok(Some(finished)) => {
+                if finished.result["dry_run"] == json!(true) {
+                    return Ok(());
+                }
+                return complete_reopen(&session_outcome(&finished.result), &runner);
+            }
+            Ok(None) => {}
+            // The Daemon has no one to ask. The questions come before any
+            // change, so on a terminal the command is simply asked again
+            // locally, where they can be answered.
+            Err(error) if interactive && reopen_needs_answers(&error) => {
+                tracing::debug!("reopen needs answers, running locally: {error:#}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut prompt = CliReopenPrompt { interactive };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = reopen_workspace(&config_manager, &runner, &ctx, &mut prompt, &request)?;
+    if outcome.dry_run {
         return Ok(());
     }
+    complete_reopen(&outcome, &runner)
+}
 
-    if plan
-        .repos
-        .iter()
-        .any(|repo| matches!(repo.worktree_action, WorktreeAction::Overwrite { .. }))
-    {
-        let warnings = close_terminal_environment_for_reopen_with(
-            &config_manager,
-            &global,
-            &plan.workspace.name,
-            &runner,
-        )?;
-        report_terminal_environment_warnings(&plan.workspace.name, warnings);
-    }
-
-    let workspace = execute_reopen_plan(&config_manager, &global, &runner, plan, args.skip_hooks)?;
-    let warnings = if args.no_multiplexer {
-        Vec::new()
-    } else {
-        activate_terminal_environment_with(
-            &config_manager,
-            &global,
-            &workspace,
-            &runner,
-            agent_intent(args.run_agent.clone()),
-        )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "workspace '{}' reopened and remains in_progress, but terminal environment activation failed: {error:#}. Run `zootree open {}` to retry",
-                workspace.name,
-                workspace.name
-            )
-        })?
+/// True when the Daemon refused because reopen needed an interactive answer
+/// (`--from` or `--overwrite` missing).
+fn reopen_needs_answers(error: &anyhow::Error) -> bool {
+    let Some(failure) = error.downcast_ref::<OperationFailure>() else {
+        return false;
     };
-    println!("workspace '{}' reopened", workspace.name);
-    report_terminal_environment_warnings(&workspace.name, warnings);
+    failure.code == "operation_failed"
+        && ["use --from", "requires --overwrite"]
+            .iter()
+            .any(|marker| failure.message.contains(marker))
+}
+
+fn complete_reopen(outcome: &SessionOutcome, runner: &RealRunner) -> Result<()> {
+    let warning = run_attach(outcome, runner, |error| {
+        anyhow::anyhow!(
+            "workspace '{}' reopened and remains in_progress, but terminal environment activation failed: {error:#}. Run `zootree open {}` to retry",
+            outcome.workspace,
+            outcome.workspace
+        )
+    })?;
+    println!("workspace '{}' reopened", outcome.workspace);
+    report_terminal_environment_warnings(&outcome.workspace, warning.into_iter().collect());
     Ok(())
 }
 
@@ -1225,66 +990,30 @@ pub struct CancelArgs {
     pub skip_hooks: bool,
 }
 
-fn warn_or_bail(force: bool, err: anyhow::Error, context: &str) -> Result<()> {
-    if force {
-        tracing::warn!("{}: {:#}", context, err);
-        Ok(())
-    } else {
-        Err(err.context(format!("{} (use --force to proceed anyway)", context)))
-    }
-}
+/// CLI adapter for service events: steps go to stdout, warnings to the log.
+pub(crate) struct CliEventSink;
 
-fn expanded_workspace_dir(workspace: &WorkspaceConfig) -> String {
-    shellexpand::tilde(&workspace.workspace_dir).into_owned()
-}
-
-fn ensure_required_worktrees_exist(workspace: &WorkspaceConfig) -> Result<()> {
-    let ws_dir = expanded_workspace_dir(workspace);
-    let statuses = repo_worktree_statuses(workspace, &ws_dir);
-    if missing_worktrees(&statuses).is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "{}",
-            format_missing_worktrees_error(&workspace.name, &statuses)
-        )
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum CancelRepoWorktreeDecision {
-    Proceed,
-    SkipMissing {
-        repo_name: String,
-        worktree_path: String,
-    },
-}
-
-fn cancel_repo_worktree_decision(
-    repo_entry: &RepoEntry,
-    worktree_path: &str,
-    worktree_statuses: &[RepoWorktreeStatus],
-) -> CancelRepoWorktreeDecision {
-    let worktree = worktree_statuses
-        .iter()
-        .find(|status| status.repo_name == repo_entry.name);
-
-    if worktree.is_some_and(|status| !status.exists) {
-        CancelRepoWorktreeDecision::SkipMissing {
-            repo_name: repo_entry.name.clone(),
-            worktree_path: worktree_path.into(),
+impl EventSink for CliEventSink {
+    fn emit(&self, event: ServiceEvent) {
+        match event {
+            ServiceEvent::Started { .. } => {}
+            ServiceEvent::Step(message) => println!("{message}"),
+            // Child output is shown live under --verbose (debug level) only.
+            ServiceEvent::Log(message) => tracing::debug!("{}", message),
+            ServiceEvent::StepStarted(name) => tracing::debug!("step '{}' started", name),
+            ServiceEvent::StepFinished { name, ok } => {
+                tracing::debug!("step '{}' finished (ok: {})", name, ok)
+            }
+            ServiceEvent::Warning(message) => tracing::warn!("{}", message),
+            ServiceEvent::Finished { summary, .. } => println!("{summary}"),
         }
-    } else {
-        CancelRepoWorktreeDecision::Proceed
     }
 }
 
 pub fn handle_done(args: &DoneArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
-    let runner = RealRunner;
-    let git = GitOps::new(&runner);
-    let hook_engine = HookEngine::new(&runner);
+    // Load up front so a broken config fails before any selection prompt.
+    config_mgr.load_global_config()?;
 
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -1302,164 +1031,47 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
     };
 
-    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !matches!(status, WorkspaceStatus::InProgress) {
-        anyhow::bail!("workspace '{}' is not in_progress", name);
-    }
-
-    let ws_dir = expanded_workspace_dir(&workspace);
-
-    if args.dry_run {
-        println!("dry run for workspace '{}':", name);
-        if !args.no_merge {
-            for repo_entry in &workspace.repos {
-                println!(
-                    "  merge {} -> {}",
-                    workspace.branch,
-                    repo_entry.target_branch.as_deref().unwrap_or("*")
-                );
-            }
-        }
-        if !args.no_clean {
-            println!("  clean worktrees and workspace directory");
-        }
-        return Ok(());
-    }
-
-    ensure_required_worktrees_exist(&workspace)?;
-
-    // pre_done hook
-    if !args.skip_hooks {
-        if let Some(invocation) = HookInvocation::for_workspace(
-            global.hooks.pre_done.as_ref(),
-            HookStage::PreDone,
-            HookOperation::Done,
-            WorkspaceStatus::InProgress,
-            &workspace,
-        ) {
-            if let Err(e) = hook_engine.execute(&invocation) {
-                warn_or_bail(args.force, e, "pre_done hook failed")?;
-            }
-        }
-    }
-
-    for repo_entry in &workspace.repos {
-        let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-        let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-
-        let target_branch = match &repo_entry.target_branch {
-            Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
-            Some(tb) => {
-                let current = git.current_branch(&repo_path)?;
-                tracing::warn!(
-                    "target branch '{}' not found in repo '{}', using current branch '{}'",
-                    tb,
-                    repo_entry.name,
-                    current
-                );
-                current
-            }
-            None => {
-                let current = git.current_branch(&repo_path)?;
-                tracing::warn!(
-                    "target branch not configured for repo '{}', using current branch '{}'",
-                    repo_entry.name,
-                    current
-                );
-                current
-            }
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        let body = json!({
+            "no_merge": args.no_merge,
+            "no_clean": args.no_clean,
+            "push": args.push,
+            "strategy": args.strategy.map(|s| s.as_str()),
+            "force": args.force,
+            "skip_hooks": args.skip_hooks,
+            "dry_run": args.dry_run,
+        });
+        let options = ExecOptions {
+            print_summary: true,
+            ..Default::default()
         };
-
-        // Check uncommitted changes
-        if git.has_uncommitted_changes(&worktree_path)? && !args.force {
-            anyhow::bail!(
-                "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
-                repo_entry.name,
-                worktree_path
-            );
-        }
-
-        // Merge
-        if !args.no_merge {
-            let strategy = args.strategy.map(MergeStrategy::as_str);
-            let message = if workspace.description.is_empty() {
-                workspace.title.clone()
-            } else {
-                format!("{}\n\n{}", workspace.title, workspace.description)
-            };
-            git.merge_with_worktree(
-                &repo_path,
-                Some(&worktree_path),
-                &workspace.branch,
-                &target_branch,
-                strategy,
-                &message,
-            )?;
-            println!(
-                "  merged {} -> {} ({})",
-                workspace.branch, target_branch, repo_entry.name
-            );
-
-            if args.push {
-                git.push(&repo_path, &target_branch)?;
-                println!("  pushed {} ({})", target_branch, repo_entry.name);
-            }
-        }
-
-        // Clean
-        if !args.no_clean {
-            if !args.skip_hooks {
-                if let Some(invocation) = HookInvocation::for_repository(
-                    repo_config.hooks.pre_remove.as_ref(),
-                    global.hooks.pre_remove.as_ref(),
-                    HookStage::PreRemove,
-                    HookOperation::Done,
-                    WorkspaceStatus::InProgress,
-                    &workspace,
-                    RepositoryHookContext {
-                        name: &repo_entry.name,
-                        source_dir: &repo_path,
-                        worktree_path: &worktree_path,
-                        target_branch: Some(&target_branch),
-                    },
-                ) {
-                    if let Err(e) = hook_engine.execute(&invocation) {
-                        warn_or_bail(args.force, e, "pre_remove hook failed")?;
-                    }
-                }
-            }
-
-            if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, false) {
-                tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
-            }
-            // if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, true) {
-            //     tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
-            // }
+        if daemon
+            .execute("POST", &format!("/workspaces/{name}/done"), body, &options)?
+            .is_some()
+        {
+            return Ok(());
         }
     }
 
-    // Remove workspace directory
-    if !args.no_clean && Path::new(&ws_dir).exists() {
-        if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
-            warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
-        }
-    }
-
-    let warnings =
-        archive_done_workspace_and_close_with(&config_mgr, &global, &mut workspace, &runner)?;
-    report_terminal_environment_warnings(&workspace.name, warnings);
-
-    println!("workspace '{}' completed", name);
+    let request = DoneRequest {
+        name,
+        no_merge: args.no_merge,
+        no_clean: args.no_clean,
+        push: args.push,
+        strategy: args.strategy.map(|s| s.as_str().to_string()),
+        force: args.force,
+        skip_hooks: args.skip_hooks,
+        dry_run: args.dry_run,
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    done_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
     Ok(())
 }
 
 pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
-    let global = config_mgr.load_global_config()?;
-    let runner = RealRunner;
-    let git = GitOps::new(&runner);
-    let hook_engine = HookEngine::new(&runner);
+    config_mgr.load_global_config()?;
 
     let name = match &args.name {
         Some(n) => n.clone(),
@@ -1477,190 +1089,100 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
         }
     };
 
-    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
-    if !is_cancelable_status(&status) {
-        anyhow::bail!("workspace '{}' is not active", name);
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if cancel_through_daemon(&daemon, &name, args)? {
+            return Ok(());
+        }
     }
 
-    if matches!(status, WorkspaceStatus::Pending) {
-        archive_canceled_workspace(&config_mgr, &status, &mut workspace)?;
-        println!("workspace '{}' canceled", name);
-        return Ok(());
-    }
-
-    let ws_dir = expanded_workspace_dir(&workspace);
-    let worktree_statuses = repo_worktree_statuses(&workspace, &ws_dir);
-
-    // Confirm if uncommitted changes exist
-    if !args.force {
-        for repo_entry in &workspace.repos {
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-            if matches!(
-                cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses),
-                CancelRepoWorktreeDecision::Proceed
-            ) && git.has_uncommitted_changes(&worktree_path)?
-                && !tui::confirm(
-                    &format!(
-                        "repo '{}' has uncommitted changes. Continue?",
-                        repo_entry.name
-                    ),
+    let mut request = CancelRequest {
+        name,
+        no_clean: args.no_clean,
+        force: args.force,
+        skip_hooks: args.skip_hooks,
+        confirmed_uncommitted: false,
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    match cancel_workspace(&config_mgr, &RealRunner, &ctx, &request) {
+        Err(error) => {
+            let Some(needed) = error.downcast_ref::<UncommittedConfirmationRequired>() else {
+                return Err(error);
+            };
+            for repo in &needed.repos {
+                if !tui::confirm(
+                    &format!("repo '{}' has uncommitted changes. Continue?", repo),
                     false,
-                )?
-            {
-                anyhow::bail!("canceled by user");
-            }
-        }
-    }
-
-    // pre_cancel hook
-    if !args.skip_hooks {
-        if let Some(invocation) = HookInvocation::for_workspace(
-            global.hooks.pre_cancel.as_ref(),
-            HookStage::PreCancel,
-            HookOperation::Cancel,
-            WorkspaceStatus::InProgress,
-            &workspace,
-        ) {
-            if let Err(e) = hook_engine.execute(&invocation) {
-                warn_or_bail(args.force, e, "pre_cancel hook failed")?;
-            }
-        }
-    }
-
-    if !args.no_clean {
-        for repo_entry in &workspace.repos {
-            let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
-            match cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses) {
-                CancelRepoWorktreeDecision::Proceed => {}
-                CancelRepoWorktreeDecision::SkipMissing {
-                    repo_name,
-                    worktree_path,
-                } => {
-                    println!(
-                        "  warning: missing worktree: {} ({})",
-                        repo_name, worktree_path
-                    );
-                    continue;
+                )? {
+                    anyhow::bail!("canceled by user");
                 }
             }
-            let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-            let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+            request.confirmed_uncommitted = true;
+            cancel_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+    }
+}
 
-            // pre_remove hook
-            if !args.skip_hooks {
-                if let Some(invocation) = HookInvocation::for_repository(
-                    repo_config.hooks.pre_remove.as_ref(),
-                    global.hooks.pre_remove.as_ref(),
-                    HookStage::PreRemove,
-                    HookOperation::Cancel,
-                    WorkspaceStatus::InProgress,
-                    &workspace,
-                    RepositoryHookContext {
-                        name: &repo_entry.name,
-                        source_dir: &repo_path,
-                        worktree_path: &worktree_path,
-                        target_branch: repo_entry.target_branch.as_deref(),
-                    },
-                ) {
-                    if let Err(e) = hook_engine.execute(&invocation) {
-                        warn_or_bail(args.force, e, "pre_remove hook failed")?;
+/// Cancels through the Daemon. The Daemon never asks questions: when it
+/// reports uncommitted changes the question is put here, then the request is
+/// sent again with the answer. `false`: the Daemon could not take it.
+fn cancel_through_daemon(daemon: &DaemonClient, name: &str, args: &CancelArgs) -> Result<bool> {
+    let path = format!("/workspaces/{name}/cancel");
+    let options = ExecOptions {
+        print_summary: true,
+        ..Default::default()
+    };
+    let mut confirmed = false;
+    loop {
+        let body = json!({
+            "no_clean": args.no_clean,
+            "force": args.force,
+            "skip_hooks": args.skip_hooks,
+            "confirmed_uncommitted": confirmed,
+        });
+        match daemon.execute("POST", &path, body, &options) {
+            Ok(finished) => return Ok(finished.is_some()),
+            Err(error) => {
+                let needed = error
+                    .downcast_ref::<OperationFailure>()
+                    .filter(|failure| failure.code == "confirmation_required" && !confirmed)
+                    .map(|failure| failure.repos.clone());
+                let Some(repos) = needed else {
+                    return Err(error);
+                };
+                for repo in &repos {
+                    if !tui::confirm(
+                        &format!("repo '{}' has uncommitted changes. Continue?", repo),
+                        false,
+                    )? {
+                        anyhow::bail!("canceled by user");
                     }
                 }
-            }
-
-            if Path::new(&worktree_path).exists() {
-                if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, args.force) {
-                    tracing::warn!("failed to remove worktree '{}': {}", worktree_path, e);
-                }
-            }
-            // if let Err(e) = git.delete_local_branch(&repo_path, &workspace.branch, true) {
-            //     tracing::warn!("failed to delete branch '{}': {}", workspace.branch, e);
-            // }
-        }
-
-        if Path::new(&ws_dir).exists() {
-            if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
-                warn_or_bail(args.force, e.into(), "failed to remove workspace directory")?;
+                confirmed = true;
             }
         }
     }
-
-    let warnings = archive_canceled_workspace_and_close_with(
-        &config_mgr,
-        &global,
-        &status,
-        &mut workspace,
-        &runner,
-    )?;
-    report_terminal_environment_warnings(&workspace.name, warnings);
-
-    println!("workspace '{}' canceled", name);
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::global::{MultiplexerConfig, MultiplexerKind};
+    use crate::config::global::{GlobalConfig, MultiplexerConfig, MultiplexerKind};
     use crate::config::workspace::StoredTerminalEnvironmentState;
+    use crate::core::terminal_environment::CallerContext;
+    use crate::core::worktree_status::ensure_required_worktrees_exist;
     use crate::runner::MockRunner;
+    use crate::service::lifecycle::{
+        archive_canceled_workspace, archive_canceled_workspace_and_close_with,
+        archive_done_workspace_and_close_with, cancel_repo_worktree_decision,
+        close_terminal_environment_with, is_cancelable_status, warn_or_bail,
+        CancelRepoWorktreeDecision,
+    };
     use clap::Parser;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
-
-    #[test]
-    fn reopen_overwrite_accepts_a_confirmed_close_with_fallback_warnings() {
-        let warnings = require_terminal_environment_closed(CloseReport {
-            closed: true,
-            warnings: vec!["stored terminal id was stale; closed by name".into()],
-        })
-        .unwrap();
-
-        assert_eq!(warnings.len(), 1);
-
-        let error = require_terminal_environment_closed(CloseReport {
-            closed: false,
-            warnings: vec!["terminal environment is ambiguous".into()],
-        })
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("terminal environment is ambiguous"));
-    }
-
-    #[test]
-    fn reopen_overwrite_closes_the_archived_terminal_environment() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let mut archived = test_workspace("reopen-old-terminal");
-        archived.multiplexer.kind = MultiplexerKind::Cmux;
-        archived.multiplexer_state = stored_terminal_state(
-            r#"
-version = 1
-adapter = "cmux"
-
-[payload]
-group = "workspace_group:old"
-"#,
-        );
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Canceled, &archived)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_output());
-
-        let warnings = close_terminal_environment_for_reopen_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            "reopen-old-terminal",
-            &runner,
-        )
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        assert_eq!(runner.take_calls()[0].program, "cmux");
-    }
 
     #[derive(Parser)]
     struct TestListCli {
@@ -1719,22 +1241,6 @@ group = "workspace_group:old"
         }
     }
 
-    fn success_output() -> Output {
-        Output {
-            status: ExitStatus::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        }
-    }
-
-    fn success_stdout(stdout: &str) -> Output {
-        Output {
-            status: ExitStatus::from_raw(0),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
-        }
-    }
-
     fn failure_output(stderr: &str) -> Output {
         Output {
             status: ExitStatus::from_raw(1 << 8),
@@ -1747,218 +1253,12 @@ group = "workspace_group:old"
         toml::from_str(source).unwrap()
     }
 
-    fn stored_terminal_state_table(state: &StoredTerminalEnvironmentState) -> toml::Table {
-        toml::Value::try_from(state)
-            .unwrap()
-            .as_table()
-            .unwrap()
-            .clone()
-    }
-
     fn missing_worktree(repo_name: &str, worktree_path: &str) -> RepoWorktreeStatus {
         RepoWorktreeStatus {
             repo_name: repo_name.into(),
             worktree_path: worktree_path.into(),
             exists: false,
         }
-    }
-
-    #[test]
-    fn start_rolls_back_created_worktree_when_post_create_hook_fails() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let workspace_dir = temp.path().join("workspaces/fair-fox");
-        let mut repo_cfg = repo_config("/repo/api");
-        repo_cfg.hooks.post_create =
-            Some(crate::config::global::HookValue::Simple("exit 42".into()));
-        config_mgr.save_repo_config("api", &repo_cfg).unwrap();
-        let workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "fair-fox",
-            "Fix start rollback",
-            "zootree/fair-fox",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("refs/heads/main\n"));
-        runner.push_response(success_output());
-        runner.push_response(failure_output("boom"));
-        runner.push_response(success_output());
-
-        let err = start_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            &StartArgs {
-                multiplexer: None,
-                name: Some("fair-fox".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap_err();
-        let msg = format!("{:#}", err);
-
-        assert!(msg.contains("hook failed"), "unexpected error: {msg}");
-        assert!(
-            !workspace_dir.exists(),
-            "rollback should remove empty workspace dir created by start"
-        );
-        let (status, _) = config_mgr.load_workspace("fair-fox").unwrap();
-        assert_eq!(status, WorkspaceStatus::Pending);
-        let calls = runner.take_calls();
-        assert_eq!(
-            calls[2].env.get("ZOOTREE_HOOK").map(String::as_str),
-            Some("post_create")
-        );
-        assert_eq!(
-            calls[2].env.get("ZOOTREE_OPERATION").map(String::as_str),
-            Some("start")
-        );
-        assert_eq!(
-            calls[2]
-                .env
-                .get("ZOOTREE_WORKSPACE_STATUS")
-                .map(String::as_str),
-            Some("pending")
-        );
-        assert_eq!(
-            calls[2]
-                .env
-                .get("ZOOTREE_REPO_SOURCE_DIR")
-                .map(String::as_str),
-            Some("/repo/api")
-        );
-        assert_eq!(
-            calls[3].args,
-            vec![
-                "-C",
-                "/repo/api",
-                "worktree",
-                "remove",
-                "--force",
-                &format!("{}/api", workspace_dir.to_string_lossy()),
-            ]
-        );
-    }
-
-    #[test]
-    fn start_runs_post_start_with_the_persisted_in_progress_status() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = temp.path().join("workspaces/calm-river");
-        let workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "calm-river",
-            "Start workspace hook",
-            "zootree/calm-river",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let mut global = GlobalConfig::default();
-        global.hooks.post_start = Some(crate::config::global::HookValue::Simple(
-            "after-start".into(),
-        ));
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("refs/heads/main\n"));
-        runner.push_response(success_output());
-        runner.push_response(success_output());
-
-        start_workspace_with(
-            &config_mgr,
-            &global,
-            &runner,
-            &StartArgs {
-                multiplexer: None,
-                name: Some("calm-river".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap();
-
-        let calls = runner.take_calls();
-        let hook = calls.iter().find(|call| call.program == "sh").unwrap();
-        assert_eq!(hook.args, vec!["-c", "after-start"]);
-        assert_eq!(
-            hook.env.get("ZOOTREE_HOOK").map(String::as_str),
-            Some("post_start")
-        );
-        assert_eq!(
-            hook.env.get("ZOOTREE_OPERATION").map(String::as_str),
-            Some("start")
-        );
-        assert_eq!(
-            hook.env.get("ZOOTREE_WORKSPACE_STATUS").map(String::as_str),
-            Some("in_progress")
-        );
-        assert_eq!(hook.cwd.as_deref(), Some(workspace_dir.to_str().unwrap()));
-    }
-
-    #[test]
-    fn start_syncs_workspace_instruction_indexes_after_state_commit() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(temp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = temp.path().join("workspaces/calm-river");
-        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
-        std::fs::write(workspace_dir.join("api/AGENTS.md"), "api rules").unwrap();
-        std::fs::write(workspace_dir.join("api/CLAUDE.md"), "api rules").unwrap();
-        let workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "calm-river",
-            "Sync instruction indexes",
-            "zootree/calm-river",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("refs/heads/main\n"));
-        runner.push_response(success_output());
-
-        start_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            &StartArgs {
-                multiplexer: None,
-                name: Some("calm-river".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
-            "# Workspace repository instructions\n\n\
-- For work in `api/`, read and follow `api/AGENTS.md`.\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace_dir.join("CLAUDE.md")).unwrap(),
-            "@api/CLAUDE.md\n"
-        );
     }
 
     #[test]
@@ -2294,247 +1594,6 @@ group = "workspace_group:old"
     }
 
     #[test]
-    fn start_activation_failure_is_partial_success_and_open_retries() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = tmp.path().join("workspaces/partial-start");
-        let mut workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "partial-start",
-            "Partial terminal activation",
-            "zootree/partial-start",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        workspace.multiplexer.kind = MultiplexerKind::Zellij;
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let start_runner = MockRunner::new();
-        start_runner.push_response(success_stdout("refs/heads/main\n"));
-        start_runner.push_response(success_output());
-        start_runner.push_response(failure_output("cmux unavailable"));
-
-        let error = start_workspace_and_activate_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &start_runner,
-            &StartArgs {
-                multiplexer: Some(MultiplexerKind::Cmux),
-                name: Some("partial-start".into()),
-                no_multiplexer: false,
-                run_agent: None,
-            },
-        )
-        .unwrap_err();
-
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("started and remains in_progress"),
-            "{message}"
-        );
-        assert!(message.contains("zootree open partial-start"), "{message}");
-        let (status, after_failure) = config_mgr.load_workspace("partial-start").unwrap();
-        assert_eq!(status, WorkspaceStatus::InProgress);
-        assert!(after_failure.multiplexer_state.is_empty());
-        assert_eq!(after_failure.multiplexer.kind, MultiplexerKind::Cmux);
-        assert!(workspace_dir.exists());
-        let start_calls = start_runner.take_calls();
-        assert!(!start_calls
-            .iter()
-            .any(|call| { call.program == "git" && call.args.iter().any(|arg| arg == "remove") }));
-
-        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
-        let open_runner = MockRunner::new();
-        open_runner.push_response(success_stdout(
-            r#"{"groups":[{"name":"Partial terminal activation","ref":"workspace_group:7"}]}"#,
-        ));
-        open_runner.push_response(success_output());
-
-        let warnings = open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &open_runner,
-            "partial-start",
-        )
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        let (_, after_retry) = config_mgr.load_workspace("partial-start").unwrap();
-        let state = stored_terminal_state_table(&after_retry.multiplexer_state);
-        assert_eq!(
-            state.get("version").and_then(toml::Value::as_integer),
-            Some(1)
-        );
-        assert_eq!(
-            state.get("adapter").and_then(toml::Value::as_str),
-            Some("cmux")
-        );
-    }
-
-    #[test]
-    fn no_multiplexer_skips_only_start_and_open_can_activate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        config_mgr
-            .save_repo_config("api", &repo_config("/repo/api"))
-            .unwrap();
-        let workspace_dir = tmp.path().join("workspaces/deferred-terminal");
-        let mut workspace = list_workspace(
-            WorkspaceStatus::Pending,
-            "deferred-terminal",
-            "Deferred terminal",
-            "zootree/deferred-terminal",
-            &workspace_dir.to_string_lossy(),
-            vec![repo("api", Some("main"))],
-        )
-        .workspace;
-        workspace.multiplexer.kind = MultiplexerKind::Zellij;
-        workspace.multiplexer.herdr.session = "saved-session".into();
-        config_mgr
-            .save_workspace(&WorkspaceStatus::Pending, &workspace)
-            .unwrap();
-        let start_runner = MockRunner::new();
-        start_runner.push_response(success_stdout("refs/heads/main\n"));
-        start_runner.push_response(success_output());
-
-        let (started, warnings) = start_workspace_and_activate_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &start_runner,
-            &StartArgs {
-                multiplexer: Some(MultiplexerKind::Cmux),
-                name: Some("deferred-terminal".into()),
-                no_multiplexer: true,
-                run_agent: None,
-            },
-        )
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        assert_eq!(started.multiplexer.kind, MultiplexerKind::Cmux);
-        assert_eq!(started.multiplexer.herdr.session, "saved-session");
-        assert!(started.multiplexer_state.is_empty());
-        assert!(start_runner
-            .take_calls()
-            .iter()
-            .all(|call| call.program == "git"));
-        std::fs::create_dir_all(workspace_dir.join("api")).unwrap();
-        let open_runner = MockRunner::new();
-        open_runner.push_response(success_stdout(
-            r#"{"groups":[{"name":"Deferred terminal","ref":"workspace_group:9"}]}"#,
-        ));
-        open_runner.push_response(success_output());
-
-        open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &open_runner,
-            "deferred-terminal",
-        )
-        .unwrap();
-
-        let (_, opened) = config_mgr.load_workspace("deferred-terminal").unwrap();
-        assert!(!opened.multiplexer_state.is_empty());
-        assert_eq!(open_runner.take_calls()[0].program, "cmux");
-    }
-
-    #[test]
-    fn open_persists_canonical_state_and_returns_reconciliation_warning() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let mut workspace = test_workspace("warning-state");
-        workspace.multiplexer.kind = MultiplexerKind::Cmux;
-        workspace.multiplexer_state = stored_terminal_state(
-            r#"
-version = 99
-adapter = "future"
-
-[payload]
-identity = "future:1"
-"#,
-        );
-        config_mgr
-            .save_workspace(&WorkspaceStatus::InProgress, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout(
-            r#"{"groups":[{"name":"warning-state title","ref":"workspace_group:11"}]}"#,
-        ));
-        runner.push_response(success_output());
-
-        let warnings = open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            "warning-state",
-        )
-        .unwrap();
-
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("version 99")));
-        let (_, opened) = config_mgr.load_workspace("warning-state").unwrap();
-        let state = stored_terminal_state_table(&opened.multiplexer_state);
-        assert_eq!(
-            state.get("version").and_then(toml::Value::as_integer),
-            Some(1)
-        );
-        assert_eq!(
-            state.get("adapter").and_then(toml::Value::as_str),
-            Some("cmux")
-        );
-    }
-
-    #[test]
-    fn open_uses_the_same_activation_path_for_zellij() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
-        config_mgr.ensure_dirs().unwrap();
-        let mut workspace = test_workspace("zellij-open");
-        workspace.multiplexer.kind = MultiplexerKind::Zellij;
-        workspace.multiplexer_state = stored_terminal_state(
-            r#"
-version = 1
-adapter = "zellij"
-
-[payload]
-session = "zootree-zellij-open"
-"#,
-        );
-        config_mgr
-            .save_workspace(&WorkspaceStatus::InProgress, &workspace)
-            .unwrap();
-        let runner = MockRunner::new();
-        runner.push_response(success_stdout("zootree-zellij-open\n"));
-        runner.push_response(success_output());
-
-        open_workspace_with(
-            &config_mgr,
-            &GlobalConfig::default(),
-            &runner,
-            "zellij-open",
-        )
-        .unwrap();
-
-        let calls = runner.take_calls();
-        assert_eq!(calls[0].program, "zellij");
-        let (_, opened) = config_mgr.load_workspace("zellij-open").unwrap();
-        let state = stored_terminal_state_table(&opened.multiplexer_state);
-        assert_eq!(
-            state.get("adapter").and_then(toml::Value::as_str),
-            Some("zellij")
-        );
-    }
-
-    #[test]
     fn done_archives_before_best_effort_close_and_surfaces_failure() {
         let tmp = tempfile::tempdir().unwrap();
         let config_mgr = ConfigManager::with_base_dir(tmp.path().join("config"));
@@ -2560,6 +1619,7 @@ group = "workspace_group:12"
             &GlobalConfig::default(),
             &workspace,
             &runner,
+            &CallerContext::from_vars(|_| None),
         );
         assert!(early_warnings[0].contains("still in_progress"));
         assert!(runner.take_calls().is_empty());
@@ -2571,6 +1631,7 @@ group = "workspace_group:12"
             &GlobalConfig::default(),
             &mut workspace,
             &runner,
+            &CallerContext::from_vars(|_| None),
         )
         .unwrap();
 
@@ -2612,6 +1673,7 @@ session = "zootree-cancel-close"
             &WorkspaceStatus::InProgress,
             &mut workspace,
             &runner,
+            &CallerContext::from_vars(|_| None),
         )
         .unwrap();
 
@@ -2639,15 +1701,19 @@ session = "zootree-cancel-close"
 
     #[test]
     fn warn_or_bail_with_force_returns_ok() {
+        let sink = crate::service::context::CollectingSink::new();
+        let ctx = RequestContext::new(&sink, EnvSnapshot::default());
         let err = anyhow::anyhow!("hook failed");
-        let result = warn_or_bail(true, err, "pre_done hook");
+        let result = warn_or_bail(&ctx, true, err, "pre_done hook");
         assert!(result.is_ok());
     }
 
     #[test]
     fn warn_or_bail_without_force_returns_err_with_hint() {
+        let sink = crate::service::context::CollectingSink::new();
+        let ctx = RequestContext::new(&sink, EnvSnapshot::default());
         let err = anyhow::anyhow!("hook failed");
-        let result = warn_or_bail(false, err, "pre_done hook");
+        let result = warn_or_bail(&ctx, false, err, "pre_done hook");
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         assert!(

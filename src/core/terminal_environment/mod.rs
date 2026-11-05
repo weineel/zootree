@@ -25,6 +25,9 @@ pub enum AgentIntent {
 pub struct Activation {
     pub stored_state: StoredTerminalEnvironmentState,
     pub warnings: Vec<String>,
+    /// User-facing information lines (for example how to attach later); the
+    /// caller decides how to show them.
+    pub notices: Vec<String>,
 }
 
 /// Best-effort cleanup information returned when closing a terminal
@@ -33,6 +36,34 @@ pub struct Activation {
 pub struct CloseReport {
     pub closed: bool,
     pub warnings: Vec<String>,
+}
+
+/// Where the request comes from, as far as terminal environments care: whether
+/// the caller already sits inside a zellij or herdr session. Injectable so a
+/// Daemon can act on behalf of a client's terminal instead of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerContext {
+    in_zellij: bool,
+    herdr: herdr::HerdrCallerContext,
+}
+
+impl CallerContext {
+    /// Reads variables through `get` (`ZELLIJ`, `ZELLIJ_SESSION_NAME`,
+    /// `HERDR_ENV`, `HERDR_SOCKET_PATH`).
+    pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            in_zellij: get("ZELLIJ").is_some() || get("ZELLIJ_SESSION_NAME").is_some(),
+            herdr: herdr::HerdrCallerContext::from_vars(get),
+        }
+    }
+
+    /// The context of the current process.
+    pub fn from_process_env() -> Self {
+        Self {
+            in_zellij: crate::core::multiplexer::zellij::is_inside_zellij(),
+            herdr: herdr::HerdrCallerContext::from_env(),
+        }
+    }
 }
 
 pub(crate) struct PreparedRepositoryAddition {
@@ -92,6 +123,22 @@ impl<'a, R: CommandRunner> TerminalEnvironment<'a, R> {
             runner,
             in_zellij: crate::core::multiplexer::zellij::is_inside_zellij(),
             herdr_caller: herdr::HerdrCallerContext::from_env(),
+        }
+    }
+
+    /// Facade for an explicit caller context instead of the process environment.
+    pub fn with_caller(
+        config_manager: &'a ConfigManager,
+        global_config: &'a GlobalConfig,
+        runner: &'a R,
+        caller: &CallerContext,
+    ) -> Self {
+        Self {
+            config_manager,
+            global_config,
+            runner,
+            in_zellij: caller.in_zellij,
+            herdr_caller: caller.herdr.clone(),
         }
     }
 

@@ -1,9 +1,10 @@
-use crate::config::global::HooksConfig;
-use crate::config::repo::RepoConfig;
+use crate::cli::remote::{self, DaemonClient, ExecOptions};
+use crate::cli::workspace::CliEventSink;
 use crate::config::ConfigManager;
 use crate::core::completers::complete_repo;
 use crate::core::editor;
-use crate::core::repo_names::unique_repo_name;
+use crate::service::repos::{register_repo, remove_repo, RegisterRepoRequest, RemoveRepoRequest};
+use crate::service::{EnvSnapshot, RequestContext};
 use crate::tui;
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -50,25 +51,6 @@ pub enum RepoCommands {
     },
 }
 
-fn repo_add_base_name(name: &Option<String>, path: &str) -> String {
-    name.clone().unwrap_or_else(|| {
-        std::path::Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| path.to_string())
-    })
-}
-
-fn resolve_repo_add_name(
-    config_mgr: &ConfigManager,
-    name: &Option<String>,
-    path: &str,
-) -> Result<String> {
-    let base = repo_add_base_name(name, path);
-    unique_repo_name(config_mgr, &base)
-}
-
 fn format_repo_list_entry(name: &str, path: &str) -> String {
     let expanded = shellexpand::tilde(path).into_owned();
     let missing = if Path::new(&expanded).exists() {
@@ -79,9 +61,80 @@ fn format_repo_list_entry(name: &str, path: &str) -> String {
     format!("  {} -> {}{}", name, path, missing)
 }
 
+fn print_repo_list(repos: &serde_json::Value) {
+    let entries = repos.as_array().map(Vec::as_slice).unwrap_or_default();
+    if entries.is_empty() {
+        println!("no repos registered");
+        return;
+    }
+    for entry in entries {
+        println!(
+            "{}",
+            format_repo_list_entry(
+                entry["name"].as_str().unwrap_or_default(),
+                entry["path"].as_str().unwrap_or_default()
+            )
+        );
+    }
+}
+
+fn list_repos_locally(config_mgr: &ConfigManager, json: bool) -> Result<()> {
+    if json {
+        let mut out = Vec::new();
+        for name in config_mgr.list_repos()? {
+            let config = config_mgr.load_repo_config(&name)?;
+            out.push(crate::cli::json_view::repo_entry(&name, &config));
+        }
+        println!("{}", crate::cli::json_view::to_pretty_json(&out)?);
+        return Ok(());
+    }
+    let repos = config_mgr.list_repos()?;
+    if repos.is_empty() {
+        println!("no repos registered");
+    } else {
+        for name in &repos {
+            let config = config_mgr.load_repo_config(name)?;
+            println!("{}", format_repo_list_entry(name, &config.path));
+        }
+    }
+    Ok(())
+}
+
+/// Registers through the Daemon. The path is made absolute here: the Daemon's
+/// working directory is not this command's. `false`: register locally.
+fn add_through_daemon(
+    daemon: &DaemonClient,
+    name: &Option<String>,
+    path: &str,
+    default_target_branch: &Option<String>,
+) -> Result<bool> {
+    if path.is_empty() {
+        anyhow::bail!("repository path is required");
+    }
+    let expanded = shellexpand::tilde(path).into_owned();
+    let absolute = std::path::absolute(&expanded).unwrap_or_else(|_| expanded.clone().into());
+    let mut body = serde_json::json!({
+        "path": absolute.to_string_lossy(),
+        // Named from the path as typed, as the local command does.
+        "name": crate::service::repos::repo_add_base_name(name, path),
+    });
+    if let Some(branch) = default_target_branch {
+        body["default_target_branch"] = serde_json::json!(branch);
+    }
+    Ok(daemon
+        .execute("POST", "/repos", body, &ExecOptions::default())?
+        .is_some())
+}
+
 pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.ensure_dirs()?;
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let daemon = match cmd {
+        RepoCommands::Edit { .. } => None,
+        _ => remote::connect(&config_mgr),
+    };
 
     match cmd {
         RepoCommands::Add {
@@ -89,43 +142,32 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
             path,
             default_target_branch,
         } => {
-            let expanded = shellexpand::tilde(path).into_owned();
-            let abs_path = std::fs::canonicalize(&expanded)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
-
-            let repo_name = resolve_repo_add_name(&config_mgr, name, path)?;
-
-            let repo_config = RepoConfig {
-                path: abs_path.to_string_lossy().into_owned(),
-                default_target_branch: default_target_branch.clone(),
-                copy_files: Vec::new(),
-                hooks: HooksConfig::default(),
-                lazygit: None,
-            };
-            config_mgr.save_repo_config(&repo_name, &repo_config)?;
-            println!("repo '{}' registered at {}", repo_name, abs_path.display());
-            Ok(())
-        }
-        RepoCommands::List { json: true } => {
-            let mut out = Vec::new();
-            for name in config_mgr.list_repos()? {
-                let config = config_mgr.load_repo_config(&name)?;
-                out.push(crate::cli::json_view::repo_entry(&name, &config));
-            }
-            println!("{}", crate::cli::json_view::to_pretty_json(&out)?);
-            Ok(())
-        }
-        RepoCommands::List { json: false } => {
-            let repos = config_mgr.list_repos()?;
-            if repos.is_empty() {
-                println!("no repos registered");
-            } else {
-                for name in &repos {
-                    let config = config_mgr.load_repo_config(name)?;
-                    println!("{}", format_repo_list_entry(name, &config.path));
+            if let Some(daemon) = &daemon {
+                if add_through_daemon(daemon, name, path, default_target_branch)? {
+                    return Ok(());
                 }
             }
+            register_repo(
+                &config_mgr,
+                &ctx,
+                &RegisterRepoRequest {
+                    name: name.clone(),
+                    path: path.clone(),
+                    default_target_branch: default_target_branch.clone(),
+                },
+            )?;
             Ok(())
+        }
+        RepoCommands::List { json } => {
+            if let Some(repos) = daemon.as_ref().and_then(|d| d.read("/repos")) {
+                if *json {
+                    println!("{}", crate::cli::json_view::to_pretty_json(&repos)?);
+                } else {
+                    print_repo_list(&repos);
+                }
+                return Ok(());
+            }
+            list_repos_locally(&config_mgr, *json)
         }
         RepoCommands::Edit { name } => {
             let name = match name {
@@ -155,8 +197,20 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
                     repos[idx].clone()
                 }
             };
-            config_mgr.remove_repo_config(&name)?;
-            println!("repo '{}' removed", name);
+            if let Some(daemon) = &daemon {
+                if daemon
+                    .execute(
+                        "DELETE",
+                        &format!("/repos/{name}"),
+                        serde_json::json!({}),
+                        &ExecOptions::default(),
+                    )?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+            }
+            remove_repo(&config_mgr, &ctx, &RemoveRepoRequest { name })?;
             Ok(())
         }
     }
@@ -166,6 +220,8 @@ pub fn handle_repo_command(cmd: &RepoCommands) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::global::HooksConfig;
+    use crate::config::repo::RepoConfig;
+    use crate::service::repos::{repo_add_base_name, resolve_repo_add_name};
 
     fn repo_config(path: &str) -> RepoConfig {
         RepoConfig {

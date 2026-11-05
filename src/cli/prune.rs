@@ -1,9 +1,12 @@
-use crate::config::workspace::WorkspaceStatus;
+use crate::cli::remote::{self, DaemonClient, ExecOptions};
+use crate::cli::workspace::CliEventSink;
+use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
+use crate::service::prune::{archived_workspaces, prune_workspaces, PruneRequest, PruneTarget};
+use crate::service::{EnvSnapshot, RequestContext};
 use crate::tui;
 use anyhow::Result;
 use clap::Args;
-use std::path::Path;
 
 #[derive(Args)]
 pub struct PruneArgs {
@@ -14,47 +17,97 @@ pub struct PruneArgs {
 pub fn handle_prune(args: &PruneArgs) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
 
-    let mut archived = Vec::new();
-    for status in [WorkspaceStatus::Done, WorkspaceStatus::Canceled] {
-        let workspaces = config_mgr.list_workspaces(Some(std::slice::from_ref(&status)))?;
-        for ws in workspaces {
-            archived.push((status.clone(), ws));
+    let archived = archived_workspaces(&config_mgr)?;
+    // With nothing archived the service reports it; no prompt is needed.
+    let request = if args.all || archived.is_empty() {
+        PruneRequest {
+            all: true,
+            targets: Vec::new(),
         }
-    }
-
-    if archived.is_empty() {
-        println!("no archived workspaces to prune");
-        return Ok(());
-    }
-
-    let to_prune = if args.all {
-        archived
     } else {
         let names: Vec<String> = archived
             .iter()
             .map(|(s, w)| format!("{} ({:?})", w.name, s))
             .collect();
         let selected = tui::select_multi("Select workspaces to prune", &names)?;
-        selected.into_iter().map(|i| archived[i].clone()).collect()
+        PruneRequest {
+            all: false,
+            targets: selected
+                .into_iter()
+                .map(|i| PruneTarget {
+                    name: archived[i].1.name.clone(),
+                    status: archived[i].0.clone(),
+                })
+                .collect(),
+        }
     };
 
-    if to_prune.is_empty() {
-        println!("nothing selected");
-        return Ok(());
-    }
-
-    for (status, ws) in &to_prune {
-        let ws_dir = shellexpand::tilde(&ws.workspace_dir).into_owned();
-
-        if Path::new(&ws_dir).exists() {
-            std::fs::remove_dir_all(&ws_dir)?;
-            println!("  removed directory: {}", ws_dir);
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        if prune_through_daemon(&daemon, &archived, &request)? {
+            return Ok(());
         }
-
-        config_mgr.delete_workspace_config(&ws.name, status)?;
-        println!("  pruned: {}", ws.name);
     }
 
-    println!("{} workspace(s) pruned", to_prune.len());
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    prune_workspaces(&config_mgr, &ctx, &request)?;
     Ok(())
+}
+
+/// Prunes through the Daemon, one Operation per Workspace. Each prints its own
+/// closing count, which is dropped; the total is printed once at the end, as
+/// the local service does. `false`: the Daemon could not take the first
+/// request, so everything still has to be done locally.
+fn prune_through_daemon(
+    daemon: &DaemonClient,
+    archived: &[(WorkspaceStatus, WorkspaceConfig)],
+    request: &PruneRequest,
+) -> Result<bool> {
+    if archived.is_empty() {
+        println!("no archived workspaces to prune");
+        return Ok(true);
+    }
+    let names: Vec<String> = if request.all {
+        archived.iter().map(|(_, ws)| ws.name.clone()).collect()
+    } else {
+        // The local service rejects a target that is not archived.
+        for target in &request.targets {
+            if !archived
+                .iter()
+                .any(|(status, ws)| *status == target.status && ws.name == target.name)
+            {
+                anyhow::bail!("archived workspace '{}' not found", target.name);
+            }
+        }
+        request.targets.iter().map(|t| t.name.clone()).collect()
+    };
+    if names.is_empty() {
+        println!("nothing selected");
+        return Ok(true);
+    }
+    let options = ExecOptions {
+        skip_step: Some(is_prune_total),
+        ..Default::default()
+    };
+    for (index, name) in names.iter().enumerate() {
+        let finished = daemon.execute(
+            "DELETE",
+            &format!("/workspaces/{name}"),
+            serde_json::json!({}),
+            &options,
+        )?;
+        if finished.is_none() {
+            if index == 0 {
+                return Ok(false);
+            }
+            anyhow::bail!("lost the zootree daemon after pruning {index} workspace(s)");
+        }
+    }
+    println!("{} workspace(s) pruned", names.len());
+    Ok(true)
+}
+
+fn is_prune_total(message: &str) -> bool {
+    message.ends_with(" workspace(s) pruned")
+        && message.chars().next().is_some_and(|c| c.is_ascii_digit())
 }

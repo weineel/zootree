@@ -6,7 +6,33 @@ pub mod workspace;
 
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+
+/// Held while a lifecycle mutation of one Workspace runs; dropping it releases the lock.
+#[derive(Debug)]
+pub struct WorkspaceLock {
+    _file: std::fs::File,
+}
+
+/// Another zootree process (CLI or Daemon) holds the Workspace lock. Callers
+/// that need to tell this apart from other failures downcast to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBusy {
+    pub workspace: String,
+}
+
+impl std::fmt::Display for WorkspaceBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "workspace '{}' is being modified by another zootree process; try again when it finishes",
+            self.workspace
+        )
+    }
+}
+
+impl std::error::Error for WorkspaceBusy {}
 
 pub struct ConfigManager {
     pub base_dir: PathBuf,
@@ -168,15 +194,64 @@ impl ConfigManager {
             .join(format!("{}.toml", name)))
     }
 
+    /// Writes a Workspace configuration atomically so concurrent readers never
+    /// observe a truncated file.
     pub fn save_workspace(
         &self,
         status: &workspace::WorkspaceStatus,
         config: &workspace::WorkspaceConfig,
     ) -> Result<()> {
-        let path = self.workspace_config_path(status, &config.name)?;
-        let content = toml::to_string_pretty(config)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        self.save_workspace_atomic(status, config)
+    }
+
+    /// Takes the cross-process lock that serializes lifecycle mutations of one
+    /// Workspace. Fails immediately, naming the situation, when another zootree
+    /// process (CLI or Daemon) already holds it. The lock is released when the
+    /// returned guard is dropped, including when the holder crashes.
+    pub fn lock_workspace(&self, name: &str) -> Result<WorkspaceLock> {
+        name::validate_config_name("workspace", name)?;
+        let dir = self.base_dir.join("workspaces").join(".locks");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{name}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("failed to open workspace lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(WorkspaceLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(WorkspaceBusy {
+                workspace: name.to_string(),
+            }
+            .into()),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("failed to lock workspace {}", path.display()))
+            }
+        }
+    }
+
+    /// Like [`Self::lock_workspace`], but keeps retrying for up to `wait`
+    /// while another process holds the lock. For short critical sections that
+    /// must not be skipped (persisting terminal state after an activation).
+    pub fn lock_workspace_for(
+        &self,
+        name: &str,
+        wait: std::time::Duration,
+    ) -> Result<WorkspaceLock> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match self.lock_workspace(name) {
+                Err(error)
+                    if error.downcast_ref::<WorkspaceBusy>().is_some()
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                other => return other,
+            }
+        }
     }
 
     pub(crate) fn save_workspace_atomic(

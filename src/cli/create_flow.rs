@@ -457,7 +457,7 @@ pub fn build_repo_draft_entries<R: CommandRunner>(
     Ok(repos)
 }
 
-fn build_requested_repo_draft_entries<R: CommandRunner>(
+pub(crate) fn build_requested_repo_draft_entries<R: CommandRunner>(
     config_mgr: &ConfigManager,
     runner: &R,
     repos: Vec<(String, Option<String>)>,
@@ -531,6 +531,6 @@ fn default_branch(global: &GlobalConfig, name: &str) -> String {
     format!("{}/{}", global.branch_prefix, name)
 }
 
-fn default_workspace_dir(global: &GlobalConfig, name: &str) -> String {
+pub(crate) fn default_workspace_dir(global: &GlobalConfig, name: &str) -> String {
     format!("{}/{}", shellexpand::tilde(&global.workspace_root), name)
 }

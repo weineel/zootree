@@ -4,13 +4,15 @@ use anyhow::Result;
 use clap::Args;
 use clap_complete::{ArgValueCompleter, CompletionCandidate};
 
+use crate::cli::remote::{self, ExecOptions};
+use crate::cli::workspace::CliEventSink;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{complete_single_repo_spec, complete_workspace, WorkspaceFilter};
-use crate::core::workspace_repository::{
-    add, AddRepositoryRequest, AddRepositoryResult, TerminalUpdate,
-};
+use crate::core::workspace_repository::AddRepositoryRequest;
 use crate::runner::RealRunner;
+use crate::service::add_repo::add_repo_to_workspace;
+use crate::service::{EnvSnapshot, RequestContext};
 use crate::tui;
 
 #[derive(Args)]
@@ -41,17 +43,32 @@ pub fn handle_add_repo(args: &AddRepoArgs) -> Result<()> {
         Some(repo) => parse_repo_spec(repo)?,
         None => (select_repository(&config_manager, &workspace)?, None),
     };
-    let result = add(
+    if let Some(daemon) = remote::connect(&config_manager) {
+        let mut body = serde_json::json!({ "repo": repo });
+        if let Some(target_branch) = &target_branch {
+            body["target_branch"] = serde_json::json!(target_branch);
+        }
+        let path = format!("/workspaces/{workspace_name}/add-repo");
+        if daemon
+            .execute("POST", &path, body, &ExecOptions::default())?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    add_repo_to_workspace(
         &config_manager,
         &global_config,
         &RealRunner,
+        &ctx,
         &AddRepositoryRequest {
             workspace: workspace_name,
             repo,
             target_branch,
         },
     )?;
-    print_result(&result);
     Ok(())
 }
 
@@ -130,23 +147,6 @@ fn parse_repo_spec(spec: &str) -> Result<(String, Option<String>)> {
 
 fn complete_add_repo(current: &OsStr) -> Vec<CompletionCandidate> {
     complete_single_repo_spec(current)
-}
-
-fn print_result(result: &AddRepositoryResult) {
-    println!(
-        "repository '{}' added to workspace '{}'",
-        result.repo, result.workspace
-    );
-    println!("  target branch: {}", result.target_branch);
-    println!("  workspace branch: {}", result.workspace_branch);
-    println!("  worktree: {}", result.worktree_path);
-    println!(
-        "  terminal: {}",
-        match result.terminal {
-            TerminalUpdate::Updated => "updated existing environment",
-            TerminalUpdate::Absent => "environment absent; skipped",
-        }
-    );
 }
 
 #[cfg(test)]

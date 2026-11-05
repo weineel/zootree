@@ -1,11 +1,10 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
-use tracing_appender::rolling;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use zootree::cli::{Cli, Commands};
 use zootree::config::{global::GlobalConfig, ConfigManager};
-use zootree::core::logging::{resolve_log_dir, resolve_log_file_path, LOG_FILE_NAME};
+use zootree::core::logging::{build_file_appender, resolve_log_dir, resolve_log_file_path};
 
 fn init_tracing(
     verbose: bool,
@@ -16,14 +15,7 @@ fn init_tracing(
     let log_dir = resolve_log_dir(config_mgr, global);
     std::fs::create_dir_all(&log_dir)?;
 
-    let mut file_appender = rolling::RollingFileAppender::builder()
-        .rotation(rolling::Rotation::DAILY)
-        .filename_prefix(LOG_FILE_NAME)
-        .latest_symlink(LOG_FILE_NAME);
-    if let Some(max_files) = global.log.max_files {
-        file_appender = file_appender.max_log_files(max_files as usize);
-    }
-    let file_appender = file_appender.build(&log_dir)?;
+    let file_appender = build_file_appender(&log_dir, global.log.max_files)?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let terminal_level = if quiet {
@@ -107,6 +99,11 @@ fn main() {
             eprintln!("aborted");
             std::process::exit(1);
         }
+        if let Some(interrupted) = e.downcast_ref::<zootree::cli::remote::Interrupted>() {
+            eprintln!();
+            eprintln!("{interrupted}");
+            std::process::exit(zootree::cli::remote::INTERRUPTED_EXIT_CODE);
+        }
         tracing::error!("{:#}", e);
         std::process::exit(1);
     }
@@ -116,6 +113,12 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
     match command {
         Commands::Config(args) => {
             zootree::cli::config::handle_config_command(&args.command, global)?;
+        }
+        Commands::Daemon(args) => {
+            zootree::cli::daemon::handle_daemon_command(&args.command, config_mgr)?;
+        }
+        Commands::Operations(args) => {
+            zootree::cli::operations::handle_operations_command(&args.command, config_mgr)?;
         }
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;

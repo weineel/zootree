@@ -174,6 +174,7 @@ pub(super) fn activate<R: CommandRunner>(
             return Ok(Activation {
                 stored_state: encode_current_state(MultiplexerKind::Cmux, &payload)?,
                 warnings,
+                notices: Vec::new(),
             });
         }
         FocusResult::FocusedFound(group) => {
@@ -192,6 +193,7 @@ pub(super) fn activate<R: CommandRunner>(
                     },
                 )?,
                 warnings,
+                notices: Vec::new(),
             });
         }
         FocusResult::Ambiguous => {
@@ -225,6 +227,7 @@ pub(super) fn activate<R: CommandRunner>(
     Ok(Activation {
         stored_state: encode_current_state(MultiplexerKind::Cmux, &payload)?,
         warnings,
+        notices: Vec::new(),
     })
 }
 

@@ -1254,3 +1254,118 @@ fn workspace_status_value_enum_parses_kebab_case() {
         WorkspaceStatus::Canceled
     );
 }
+
+#[test]
+fn concurrent_log_appender_builds_never_fail_on_the_latest_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    zootree::core::logging::build_file_appender(&path, Some(7)).unwrap();
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}
+
+fn locking_workspace(name: &str) -> zootree::config::workspace::WorkspaceConfig {
+    zootree::config::workspace::WorkspaceConfig {
+        title: "t".into(),
+        name: name.into(),
+        description: String::new(),
+        branch: format!("zootree/{name}"),
+        workspace_dir: "/tmp/x".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        agent_cli: None,
+        multiplexer: Default::default(),
+        multiplexer_state: Default::default(),
+        repos: vec![],
+        events: vec![],
+    }
+}
+
+#[test]
+fn workspace_lock_is_exclusive_until_released() {
+    let dir = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(dir.path().to_path_buf());
+
+    let first = mgr.lock_workspace("calm-bolt").unwrap();
+    let error = mgr.lock_workspace("calm-bolt").unwrap_err().to_string();
+    assert!(
+        error.contains("calm-bolt") && error.contains("another zootree process"),
+        "{error}"
+    );
+
+    drop(first);
+    mgr.lock_workspace("calm-bolt").unwrap();
+}
+
+#[test]
+fn workspace_locks_do_not_block_other_workspaces() {
+    let dir = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(dir.path().to_path_buf());
+
+    let _a = mgr.lock_workspace("alpha").unwrap();
+    let _b = mgr.lock_workspace("beta").unwrap();
+}
+
+#[test]
+fn workspace_lock_rejects_unsafe_names() {
+    let dir = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(dir.path().to_path_buf());
+
+    assert!(mgr.lock_workspace("../escape").is_err());
+    assert!(!dir.path().join("escape.lock").exists());
+}
+
+#[test]
+fn workspace_lock_files_are_not_listed_as_workspaces() {
+    let dir = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(dir.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let _lock = mgr.lock_workspace("calm-bolt").unwrap();
+
+    assert!(mgr.list_workspaces(None).unwrap().is_empty());
+}
+
+#[test]
+fn saving_a_workspace_never_exposes_a_partial_file_to_readers() {
+    let dir = TempDir::new().unwrap();
+    let mgr = ConfigManager::with_base_dir(dir.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let status = zootree::config::workspace::WorkspaceStatus::Pending;
+    let mut workspace = locking_workspace("busy");
+    mgr.save_workspace(&status, &workspace).unwrap();
+
+    let reader_dir = dir.path().to_path_buf();
+    let reader = std::thread::spawn(move || {
+        let mgr = ConfigManager::with_base_dir(reader_dir);
+        for _ in 0..500 {
+            mgr.load_workspace("busy")
+                .expect("reader saw a partial file");
+        }
+    });
+    for i in 0..500 {
+        workspace.description = format!("revision {i} {}", "x".repeat(4096));
+        mgr.save_workspace(&status, &workspace).unwrap();
+    }
+    reader.join().unwrap();
+}
+
+#[test]
+fn workspace_lock_file_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = ConfigManager::with_base_dir(tmp.path().to_path_buf());
+    mgr.ensure_dirs().unwrap();
+    let _lock = mgr.lock_workspace("private").unwrap();
+    let path = tmp.path().join("workspaces/.locks/private.lock");
+    let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
