@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `daemon start` 启动后台进程并确认就绪;`daemon status` 报告运行状态;`daemon stop` 正常退出
 - [ ] 第二次启动被拒绝并说明已有实例在运行
