@@ -2,6 +2,7 @@ pub mod add_repo;
 pub mod completions;
 pub mod config;
 pub mod create_flow;
+pub mod daemon;
 pub mod edit;
 pub mod info;
 pub mod json_view;
@@ -33,6 +34,8 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "Manage global configuration")]
     Config(config::ConfigArgs),
+    #[command(about = "Manage the optional background daemon")]
+    Daemon(daemon::DaemonArgs),
     #[command(about = "Manage registered repositories")]
     Repo(repo::RepoArgs),
     #[command(about = "Create a new workspace")]

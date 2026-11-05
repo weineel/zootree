@@ -109,6 +109,9 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
         Commands::Config(args) => {
             zootree::cli::config::handle_config_command(&args.command, global)?;
         }
+        Commands::Daemon(args) => {
+            zootree::cli::daemon::handle_daemon_command(&args.command, config_mgr)?;
+        }
         Commands::Repo(args) => {
             zootree::cli::repo::handle_repo_command(&args.command)?;
         }
