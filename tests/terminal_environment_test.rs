@@ -82,7 +82,16 @@ fn state_payload_string(state: &StoredTerminalEnvironmentState, key: &str) -> Op
         .map(str::to_string)
 }
 
+/// Herdr activation inspects `HERDR_*` to decide whether the caller is inside a
+/// Herdr session. Clear them so the tests behave the same when run from a Herdr pane.
+fn clear_herdr_caller_env() {
+    for key in ["HERDR_ENV", "HERDR_SOCKET_PATH"] {
+        std::env::remove_var(key);
+    }
+}
+
 fn herdr_workspace(repo_names: &[&str]) -> WorkspaceConfig {
+    clear_herdr_caller_env();
     let mut workspace = workspace(repo_names);
     workspace.title = "Support Herdr".into();
     workspace.description = "Exercise Herdr reconciliation".into();
@@ -131,6 +140,7 @@ fn command_arg<'a>(args: &'a [String], name: &str) -> &'a str {
 
 #[test]
 fn herdr_activate_reuses_stored_workspace_without_rebuilding_topology() {
+    clear_herdr_caller_env();
     let (_temp, config_manager) = setup_config(&["api"]);
     let global_config = GlobalConfig::default();
     let runner = MockRunner::new();
