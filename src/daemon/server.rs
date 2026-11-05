@@ -1,5 +1,6 @@
 use super::auth::{self, Authenticator};
 use super::error::{self, ApiError, PROTOCOL_HEADER};
+use super::events::{self, EventHub};
 use super::operations::{self, OperationRegistry, RunnerFactory};
 use super::transport::Listener;
 use super::{
@@ -29,6 +30,7 @@ pub(super) struct AppState {
     pub activity: Arc<Activity>,
     pub shutdown: Arc<Notify>,
     pub operations: Arc<OperationRegistry>,
+    pub events: Arc<EventHub>,
     pub runner: RunnerFactory,
 }
 
@@ -47,6 +49,7 @@ fn router(state: AppState) -> Router {
         .route("/workspaces/{name}/done", post(done))
         .route("/workspaces/{name}/cancel", post(cancel))
         .route("/operations/{id}", get(operation))
+        .route("/events", get(event_stream))
         .merge(mutations::routes())
         .route(
             "/operations/{id}/cancel",
@@ -174,13 +177,18 @@ async fn submit(
         })?;
     let view = state.operations.view(handle.id());
     let runner = state.runner.clone();
+    let events = state.events.clone();
     // Detached on purpose: closing the client connection never stops the work.
     // A panic drops the handle, which records the failure.
     tokio::task::spawn_blocking(move || {
         let runner = runner.make().with_cancel(handle.cancel_token());
         let sink = handle.sink();
         let ctx = RequestContext::new(&sink, job.env);
-        match (job.work)(&mgr, &runner, &ctx) {
+        let outcome = (job.work)(&mgr, &runner, &ctx);
+        // The Daemon's own operations announce their effect directly, before
+        // the Operation is marked finished; no scan involved.
+        events::announce_outcome(&*events, &mgr, kind, &name, outcome.is_ok());
+        match outcome {
             Ok(result) => handle.succeed(result),
             Err(e) => handle.fail_with(&e),
         }
@@ -232,6 +240,35 @@ async fn operation(
         .ok_or_else(|| ApiError::not_found(format!("operation '{id}' not found")))
 }
 
+/// `GET /events`: Server-Sent Events. `Last-Event-ID` resumes after that
+/// sequence number; see `events` for the frames.
+async fn event_stream(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let last_event_id = match headers.get("last-event-id") {
+        None => None,
+        Some(raw) => Some(
+            raw.to_str()
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .ok_or_else(|| {
+                    ApiError::bad_request("Last-Event-ID must be a non-negative integer")
+                })?,
+        ),
+    };
+    let stream = events::subscribe(
+        state.events.clone(),
+        state.operations.clone(),
+        &state.activity,
+        state.base_dir.clone(),
+        last_event_id,
+    )
+    .await?;
+    Ok(axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
 async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -266,6 +303,7 @@ pub(super) fn run(
         .build()?;
     runtime.block_on(async move {
         let activity = state.activity.clone();
+        let hub = state.events.clone();
         let app = router(state);
         let stop = shutdown.clone();
         let done = async move {
@@ -276,6 +314,8 @@ pub(super) fn run(
                     tracing::info!("daemon idle; exiting");
                 }
             }
+            // Open event streams would otherwise hold graceful shutdown open.
+            hub.close();
         };
         match listener {
             Listener::Unix(listener) => {

@@ -196,13 +196,17 @@ fn spawn(state: &AppState, kind: &'static str, key: &str, job: Job) -> Accepted 
     let view = state.operations.view(handle.id());
     let mgr = ConfigManager::with_base_dir(state.base_dir.clone());
     let runner = state.runner.clone();
+    let events = state.events.clone();
+    let key = key.to_string();
     // Detached on purpose: closing the client connection never stops the work.
     // A panic drops the handle, which records the failure.
     tokio::task::spawn_blocking(move || {
         let runner = runner.make();
         let sink = handle.sink();
         let ctx = RequestContext::new(&sink, job.env);
-        match (job.work)(&mgr, &runner, &ctx) {
+        let outcome = (job.work)(&mgr, &runner, &ctx);
+        super::events::announce_outcome(&*events, &mgr, kind, &key, outcome.is_ok());
+        match outcome {
             Ok(result) => handle.succeed(result),
             Err(e) => handle.fail(operations::OperationError::from_service_error(&e)),
         }

@@ -10,6 +10,7 @@ mod cancel;
 pub mod client;
 pub mod endpoint;
 pub mod error;
+pub mod events;
 mod mutations;
 pub mod operations;
 mod server;
@@ -33,7 +34,7 @@ pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
 /// Capability strings; new behavior is gated by adding one here.
 /// `web` is reserved for a future Web UI transport and must not be declared
 /// until that exists (docs/daemon-extension-points.md).
-pub const CAPABILITIES: &[&str] = &["status", "read_api", "operations"];
+pub const CAPABILITIES: &[&str] = &["status", "read_api", "operations", "events"];
 /// Idle time without connections or Operations before the Daemon exits.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -48,6 +49,8 @@ pub struct DaemonOptions {
     pub runner: RunnerFactory,
     /// How many finished Operation records to keep, and for how long.
     pub operation_retention: Retention,
+    /// How much event history to keep for resuming subscribers.
+    pub event_retention: events::EventRetention,
 }
 
 impl DaemonOptions {
@@ -58,6 +61,7 @@ impl DaemonOptions {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             runner: RunnerFactory::real(),
             operation_retention: Retention::default(),
+            event_retention: events::EventRetention::default(),
         }
     }
 
@@ -247,6 +251,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
 
     let activity = Arc::new(Activity::new());
     let shutdown = Arc::new(tokio::sync::Notify::new());
+    let events = events::EventHub::new(options.event_retention);
     let state = server::AppState {
         auth: Arc::new(auth::BearerToken::new(token.clone())),
         base_dir: options.base_dir.clone(),
@@ -254,7 +259,8 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
         started_at: discovery.started_at.clone(),
         activity: activity.clone(),
         shutdown: shutdown.clone(),
-        operations: OperationRegistry::new(options.operation_retention),
+        operations: OperationRegistry::new(options.operation_retention, events.clone()),
+        events,
         runner: options.runner.clone(),
     };
     let idle_timeout = options.idle_timeout;

@@ -65,7 +65,8 @@ src/
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}、POST /operations/{id}/cancel；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}、POST /operations/{id}/cancel、GET /events；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── events.rs    # 全局事件流 GET /events（SSE）：EventHub 环形缓冲、序号、续传、resync、DaemonEvent、EventProducer 接口、subscribe
 │   ├── auth.rs      # 可替换的鉴权层：Authenticator trait + BearerToken（令牌校验）+ require_auth 中间件
 │   ├── transport.rs # 监听器传输枚举 Listener（目前仅 Unix；回环 TCP 仅预留）
 │   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
@@ -201,6 +202,12 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 Daemon 绝不执行前台 attach：start/reopen（以及 `create` 带 `start`）把服务层的 `AttachRequest` 放进结果的 `attach`，agent 命令在 `agent_cli`，由 Consumer 在自己的终端执行。start 回滚、reopen 非交互提示（缺 `from` 等返回 `operation_failed`）沿用服务层。`create` 缺 title 或 repos/template 在登记 Operation 前 400 `bad_request`，不会进入向导；未给 `name` 时由处理函数先生成，使忙碌键确定。忙碌键：Workspace 操作用 Workspace 名，repo 注册/移除用 `repo:<名>`（Operation 的 `workspace` 字段即该键）。新增此类端点时把处理函数放进 `mutations.rs`，在 `routes()` 注册。
 
 显式取消：`POST /operations/{id}/cancel`（无请求体）。运行中返回 202 `{id, outcome:"cancel_requested", status:"running", operation}`；已结束（含已取消）返回 200 `{id, outcome:"already_finished", status, operation}`，幂等不报错；未知 id 404。客户端断开从不影响 Operation，只有此请求会停止它。取消是尽力而为且一次性：`runner::CancelToken` 经 `DynRunner::with_cancel` 作用于该 Operation 的每条子进程命令，`CommandRunner::run_cancellable`（`RealRunner` 为子进程独立进程组并整组 SIGKILL，默认实现只检查开始前的请求）中断当前命令并返回 `runner::Canceled`；令牌被消费一次，之后服务层的回滚命令（如 start 的 `StartRollback`）不会再被打断。命令被打断且工作返回错误时状态为 `canceled`，`canceled` 字段为 `{stopped_at(最后一步名或 null), interrupted_command, cleanup(rolled_back|rollback_failed|none), notes[], detail}`；不可安全中断的步骤（如 merge）会在 `notes` 如实说明可能留下部分结果。取消到达时没有命令可打断、或工作已先完成，则 Operation 保持真实结果（succeeded/failed），`cancel_requested` 为 true。有运行中的 Operation 时 `Activity::begin_operation` 阻止空闲退出，取消结束后计数归零。测试见 `tests/daemon_cancel_test.rs`。
+
+### Daemon 事件流（`GET /events`，能力串 `events`）
+
+`events::EventHub` 保存最近 1000 条或 10 分钟（`DaemonOptions::event_retention`）的事件，序号从 1 单调递增，既是 SSE `id` 也在 data 的 `seq` 里。事件名与字段（data 另带 `seq`、`at`）：`workspace.changed{workspace: 完整 json_view 摘要}`、`workspace.removed{name}`、`operation.started{operation_id,kind,workspace,started_at}`、`operation.progress{operation_id,workspace,phase(step|step_started|step_finished|warning),message,ok?}`、`operation.log{operation_id,workspace,message}`、`operation.finished{operation_id,kind,workspace,status,result,error,finished_at}`、`repo.changed{name,action}`（尚无生产者，供 repo 端点使用）。控制帧（无 id，不占序号）：`snapshot{seq,workspaces[全部状态],operations[运行中]}`、`resync{reason(gap_too_large|unknown_position|lagged),seq}`、`replay{from,to,count}`、`ready{seq,replay}`（id=当前序号）。订阅顺序：`begin()` 在锁内固定位置（先监听）→ 读快照 → `ready` → 推送位置之后的事件，所以快照与订阅之间的变化会作为事件再出现一次而不会丢（workspace 事件带完整摘要，重复应用无害）。带 `Last-Event-ID` 重连：位置仍在缓冲内则先发 `replay` 标记、回放之后的事件、`ready{replay:true}`；已被淘汰或大于当前序号（Daemon 重启）则发 `resync` 后接新快照与 `ready`；慢订阅者落后到被淘汰时发 `resync(lagged)` 并断开。`Last-Event-ID` 非数字返回 400。打开的事件流算一个连接，阻止空闲退出；关闭 Daemon 时 `hub.close()` 结束所有流，否则优雅停机会被挂住。
+
+生产者只依赖小接口 `EventProducer::publish(DaemonEvent)`（`AppState::events`）。Operation 的 started/progress/log/finished 由 `OperationRegistry` 在 `start`/`record_event`/`finish` 处发出；`server::submit` 在服务调用结束后（无论成败）用 `events::announce_workspace` 读出该 Workspace 当前状态发 `workspace.changed`（或不存在时 `workspace.removed`），先于 `operation.finished`，所以新增修改端点经 `submit` 自动获得 Workspace 事件，不依赖扫描。外部变化检测（票 10）的挂接点：持有 `Arc<EventHub>` 调 `publish`，用 `EventHub::subscriber_count()` 决定是否扫描。测试用 `client::EventStream` 读 SSE，见 `tests/daemon_events_test.rs`。
 
 Web 扩展点仅预留（见 `docs/daemon-extension-points.md`）：传输走 `transport::Listener`、鉴权走 `auth::Authenticator`、能力串预留 `web`（默认不声明）、静态资源挂载点在 `server::router`。改这些位置时不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
 

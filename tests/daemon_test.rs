@@ -64,7 +64,7 @@ fn capabilities_are_exactly_the_implemented_set_and_do_not_declare_web() {
     let body = get(&daemon, "/status").json().unwrap();
     assert_eq!(
         body["capabilities"],
-        serde_json::json!(["status", "read_api", "operations"])
+        serde_json::json!(["status", "read_api", "operations", "events"])
     );
 
     daemon.shutdown();

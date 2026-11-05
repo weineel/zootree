@@ -13,6 +13,7 @@
 
 use super::cancel;
 use super::error::{self, ApiError};
+use super::events::{DaemonEvent, EventHub, EventProducer};
 use super::{Activity, ActivityGuard};
 use crate::config::{ConfigManager, WorkspaceBusy};
 use crate::runner::{CancelToken, CommandRunner, CommandSpec, OutputLine};
@@ -161,13 +162,15 @@ pub struct Busy {
 pub struct OperationRegistry {
     records: Mutex<Vec<Record>>,
     retention: Retention,
+    events: Arc<EventHub>,
 }
 
 impl OperationRegistry {
-    pub fn new(retention: Retention) -> Arc<Self> {
+    pub fn new(retention: Retention, events: Arc<EventHub>) -> Arc<Self> {
         Arc::new(Self {
             records: Mutex::new(Vec::new()),
             retention,
+            events,
         })
     }
 
@@ -190,6 +193,13 @@ impl OperationRegistry {
             });
         }
         let id = new_id();
+        let started_at = chrono::Utc::now().to_rfc3339();
+        self.events.publish(DaemonEvent::OperationStarted {
+            operation_id: id.clone(),
+            kind,
+            workspace: workspace.to_string(),
+            started_at: started_at.clone(),
+        });
         records.push(Record {
             id: id.clone(),
             kind,
@@ -198,7 +208,7 @@ impl OperationRegistry {
             output: Vec::new(),
             cancel: CancelToken::new(),
             step: None,
-            started_at: chrono::Utc::now().to_rfc3339(),
+            started_at,
             finished_at: None,
             finished: None,
         });
@@ -231,8 +241,18 @@ impl OperationRegistry {
         Some((running, record.view()))
     }
 
-    /// Appends a service event to the Operation's output. This is where an
-    /// event stream will also fan the event out.
+    /// Views of the Operations still running (for the event stream snapshot).
+    pub fn running_views(&self) -> Vec<Value> {
+        let records = self.records.lock().unwrap();
+        records
+            .iter()
+            .filter(|r| matches!(r.state, State::Running))
+            .map(Record::view)
+            .collect()
+    }
+
+    /// Appends a service event to the Operation's output and fans it out to
+    /// the event stream as `operation.progress` / `operation.log`.
     pub fn record_event(&self, id: &str, event: &ServiceEvent) {
         let line = match event {
             ServiceEvent::Started {
@@ -256,6 +276,9 @@ impl OperationRegistry {
                 record.step = Some(step.clone());
             } else if let ServiceEvent::Step(step) = event {
                 record.step = Some(step.trim().to_string());
+            }
+            if let Some(event) = stream_event(id, &record.workspace, event) {
+                self.events.publish(event);
             }
             record.output.push(line);
         }
@@ -284,6 +307,22 @@ impl OperationRegistry {
             record.state = state;
             record.finished_at = Some(chrono::Utc::now().to_rfc3339());
             record.finished = Some(Instant::now());
+            let (status, result, error) = match &record.state {
+                State::Succeeded(v) => ("succeeded", v.clone(), Value::Null),
+                State::Failed(e) => ("failed", Value::Null, e.to_json()),
+                State::Running => ("running", Value::Null, Value::Null),
+                // The cancel details (stopped step, cleanup outcome) travel as the result.
+                State::Canceled(info) => ("canceled", info.clone(), Value::Null),
+            };
+            self.events.publish(DaemonEvent::OperationFinished {
+                operation_id: record.id.clone(),
+                kind: record.kind,
+                workspace: record.workspace.clone(),
+                status,
+                result,
+                error,
+                finished_at: record.finished_at.clone(),
+            });
         }
         self.prune(&mut records);
     }
@@ -303,6 +342,30 @@ impl OperationRegistry {
                 true
             }
         });
+    }
+}
+
+/// Service event as stream event. Start and finish are covered by
+/// `operation.started` / `operation.finished`, so they map to nothing.
+fn stream_event(id: &str, workspace: &str, event: &ServiceEvent) -> Option<DaemonEvent> {
+    let progress = |phase, message: &String, ok| DaemonEvent::OperationProgress {
+        operation_id: id.to_string(),
+        workspace: workspace.to_string(),
+        phase,
+        message: message.clone(),
+        ok,
+    };
+    match event {
+        ServiceEvent::Started { .. } | ServiceEvent::Finished { .. } => None,
+        ServiceEvent::Step(m) => Some(progress("step", m, None)),
+        ServiceEvent::StepStarted(n) => Some(progress("step_started", n, None)),
+        ServiceEvent::StepFinished { name, ok } => Some(progress("step_finished", name, Some(*ok))),
+        ServiceEvent::Warning(m) => Some(progress("warning", m, None)),
+        ServiceEvent::Log(m) => Some(DaemonEvent::OperationLog {
+            operation_id: id.to_string(),
+            workspace: workspace.to_string(),
+            message: m.clone(),
+        }),
     }
 }
 
