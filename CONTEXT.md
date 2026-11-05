@@ -60,6 +60,18 @@ _Avoid_: Config directory, repository configuration
 The zootree-managed record of one Workspace's metadata, lifecycle state, and Terminal environment recovery hints. Users may edit it directly.
 _Avoid_: Workspace config file, workspace state
 
+**Daemon**:
+An optional local background process that lets several Consumers share one view of Workspaces and observe changes. Zootree behaves identically without it; it is never required for correctness.
+_Avoid_: Server, service, agent
+
+**Consumer**:
+A program that drives or observes Workspaces through zootree, such as the command line, Orca, or a web page.
+_Avoid_: Client app, frontend
+
+**Operation**:
+One tracked execution of a state-changing request, such as starting or completing a Workspace. It has an identity, reports progress while running, and ends with a result that can be read afterwards.
+_Avoid_: Job, task, command run
+
 ## Lifecycle boundary
 
 Workspace workflows activate or close a Terminal environment through the single public lifecycle facade. Zellij and cmux reconciliation, layout preparation, runtime references, and command translation remain internal implementation details.
