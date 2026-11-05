@@ -10,6 +10,8 @@ pub mod context;
 pub mod create;
 pub mod lifecycle;
 pub mod prune;
+pub mod reopen;
 pub mod repos;
+pub mod start;
 
 pub use context::{EnvRunner, EnvSnapshot, EventSink, RequestContext, ServiceEvent};

@@ -41,11 +41,26 @@ fn strip_ansi_escape_sequences(input: &str) -> String {
 pub(in crate::core) struct ZellijCommands<'a, R: CommandRunner> {
     runner: &'a R,
     in_zellij: bool,
+    notices: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'a, R: CommandRunner> ZellijCommands<'a, R> {
     pub(in crate::core) fn new(runner: &'a R, in_zellij: bool) -> Self {
-        Self { runner, in_zellij }
+        Self {
+            runner,
+            in_zellij,
+            notices: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// User-facing notice lines produced while activating; the caller decides
+    /// how to show them.
+    pub(in crate::core) fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut self.notices.borrow_mut())
+    }
+
+    fn notice(&self, line: String) {
+        self.notices.borrow_mut().push(line);
     }
 
     fn zellij(&self, args: Vec<String>) -> Result<std::process::Output> {
@@ -149,11 +164,11 @@ impl<'a, R: CommandRunner> ZellijCommands<'a, R> {
         workspace_name: &str,
     ) -> Result<()> {
         if self.in_zellij {
-            println!("zellij session '{}' already exists.", session_name);
-            println!(
+            self.notice(format!("zellij session '{}' already exists.", session_name));
+            self.notice(format!(
                 "Run `zootree open {}` (outside zellij) to attach.",
                 workspace_name
-            );
+            ));
             Ok(())
         } else {
             self.attach_session(session_name)
@@ -168,14 +183,14 @@ impl<'a, R: CommandRunner> ZellijCommands<'a, R> {
     ) -> Result<()> {
         if self.in_zellij {
             self.start_session_background(session_name, layout_file)?;
-            println!(
+            self.notice(format!(
                 "zellij session '{}' is running in background.",
                 session_name
-            );
-            println!(
+            ));
+            self.notice(format!(
                 "Run `zootree open {}` (outside zellij) to attach.",
                 workspace_name
-            );
+            ));
             Ok(())
         } else {
             self.start_session(session_name, layout_file)
