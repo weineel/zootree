@@ -95,12 +95,14 @@ pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> Result<Output>;
 }
 
-pub struct RealRunner;      // 真实执行命令
+pub struct RealRunner;      // 真实执行命令（run_streaming 边读边回调）
 pub struct MockRunner {     // 测试用
     pub calls: RefCell<Vec<CommandSpec>>,
     pub responses: RefCell<Vec<Output>>,
 }
 ```
+
+`run_streaming(spec, &mut FnMut(OutputLine))` 在整体捕获之外逐行转发 stdout/stderr（失败时仍返回完整输出）；默认实现先 `run` 再回放，所以 `MockRunner` 无需改动，回放顺序为先 stdout 后 stderr。`HookEngine::execute_streaming` 与 `GitOps::with_output` 使用它；服务层据此发出 `ServiceEvent::StepStarted/Log/StepFinished`，CLI 适配层仅在 `-v/--verbose`（debug 级）下显示，默认输出不变。
 
 所有 `core/` 模块的函数接受 `&R: CommandRunner` 泛型参数。
 

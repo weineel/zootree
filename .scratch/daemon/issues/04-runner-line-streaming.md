@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — [zootree] 为 done 和 cancel 抽出服务层,并引入请求上下文
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 外部命令执行接口支持逐行转发,同时保留整体捕获的用法和测试替身
 - [ ] 服务层在步骤开始、结束和每行输出时发出事件

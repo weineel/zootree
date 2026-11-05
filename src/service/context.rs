@@ -1,4 +1,4 @@
-use crate::runner::{CommandRunner, CommandSpec};
+use crate::runner::{CommandRunner, CommandSpec, OutputLine};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::process::{ExitStatus, Output};
@@ -14,8 +14,12 @@ pub enum ServiceEvent {
     },
     /// A user-visible progress line (what the CLI prints to stdout).
     Step(String),
-    /// A line of output from a child process.
+    /// A line of output from a child process, prefixed with its step name.
     Log(String),
+    /// An external step (hook, git command) began.
+    StepStarted(String),
+    /// An external step ended; `ok` is false when it failed.
+    StepFinished { name: String, ok: bool },
     /// A non-fatal problem (what the CLI sends to the log as a warning).
     Warning(String),
     /// The operation ended successfully; `summary` is the closing message.
@@ -120,6 +124,11 @@ impl<'a> RequestContext<'a> {
         self.emit(ServiceEvent::Step(message.into()));
     }
 
+    /// Emits one child-process output line as a [`ServiceEvent::Log`].
+    pub fn log_line(&self, step: &str, line: &OutputLine) {
+        self.emit(ServiceEvent::Log(format!("[{}] {}", step, line.text)));
+    }
+
     pub fn warn(&self, message: impl Into<String>) {
         self.emit(ServiceEvent::Warning(message.into()));
     }
@@ -169,6 +178,14 @@ impl<'a, R: CommandRunner> EnvRunner<'a, R> {
 impl<R: CommandRunner> CommandRunner for EnvRunner<'_, R> {
     fn run(&self, spec: &CommandSpec) -> Result<Output> {
         self.inner.run(&self.apply(spec))
+    }
+
+    fn run_streaming(
+        &self,
+        spec: &CommandSpec,
+        on_line: &mut dyn FnMut(OutputLine),
+    ) -> Result<Output> {
+        self.inner.run_streaming(&self.apply(spec), on_line)
     }
 
     fn run_interactive(&self, spec: &CommandSpec) -> Result<ExitStatus> {
