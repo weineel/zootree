@@ -1,9 +1,11 @@
+use super::auth::{self, Authenticator};
 use super::error::{self, ApiError, PROTOCOL_HEADER};
+use super::transport::Listener;
 use super::{api, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::config::ConfigManager;
 use anyhow::Result;
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,7 +17,7 @@ use tokio::sync::Notify;
 
 #[derive(Clone)]
 pub(super) struct AppState {
-    pub token: String,
+    pub auth: Arc<dyn Authenticator>,
     pub base_dir: std::path::PathBuf,
     pub pid: u32,
     pub started_at: String,
@@ -24,8 +26,10 @@ pub(super) struct AppState {
 }
 
 fn router(state: AppState) -> Router {
-    // Authentication is its own layer so other listeners (later: loopback TCP)
-    // can swap it without touching handlers.
+    // Authentication is its own layer (`auth`), so another transport can bring
+    // a different Authenticator without touching handlers. Reserved seam: a
+    // static-asset mount for a future Web UI would be attached to this router
+    // (as a fallback service, behind its own auth decision); not implemented.
     Router::new()
         .route("/status", get(status))
         .route("/shutdown", post(shutdown))
@@ -35,7 +39,10 @@ fn router(state: AppState) -> Router {
         .route("/agents", get(agents))
         .fallback(not_found)
         .layer(middleware::from_fn(negotiate_version))
-        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             track_activity,
@@ -45,23 +52,6 @@ fn router(state: AppState) -> Router {
 
 async fn track_activity(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let _guard = state.activity.begin_request();
-    next.run(request).await
-}
-
-async fn authenticate(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    if presented != Some(state.token.as_str()) {
-        return ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: error::UNAUTHORIZED,
-            message: "missing or invalid token".to_string(),
-        }
-        .into_response();
-    }
     next.run(request).await
 }
 
@@ -161,7 +151,7 @@ async fn not_found() -> ApiError {
 /// Runs the server until shutdown is requested, a signal arrives, or the idle
 /// rule fires. Blocks the calling thread.
 pub(super) fn run(
-    listener: std::os::unix::net::UnixListener,
+    listener: Listener,
     state: AppState,
     idle_timeout: Duration,
     shutdown: Arc<Notify>,
@@ -171,21 +161,26 @@ pub(super) fn run(
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let listener = tokio::net::UnixListener::from_std(listener)?;
         let activity = state.activity.clone();
         let app = router(state);
         let stop = shutdown.clone();
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                tokio::select! {
-                    _ = stop.notified() => {}
-                    _ = wait_for_signal() => {}
-                    _ = wait_until_idle(activity, idle_timeout) => {
-                        tracing::info!("daemon idle; exiting");
-                    }
+        let done = async move {
+            tokio::select! {
+                _ = stop.notified() => {}
+                _ = wait_for_signal() => {}
+                _ = wait_until_idle(activity, idle_timeout) => {
+                    tracing::info!("daemon idle; exiting");
                 }
-            })
-            .await?;
+            }
+        };
+        match listener {
+            Listener::Unix(listener) => {
+                let listener = tokio::net::UnixListener::from_std(listener)?;
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(done)
+                    .await?;
+            }
+        }
         Ok(())
     })
 }
