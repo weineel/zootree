@@ -10,6 +10,7 @@ pub mod client;
 pub mod endpoint;
 pub mod error;
 pub mod events;
+mod mutations;
 pub mod operations;
 mod server;
 mod transport;

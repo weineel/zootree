@@ -182,7 +182,23 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 所有修改请求立即返回 202 与 Operation 视图（`id/kind/workspace/status(running|succeeded|failed)/output[]/result/error/started_at/finished_at`），经 `GET /operations/{id}` 查询。`done`/`cancel` 请求体为可选 JSON（空体=默认值，未知字段 400）：字段对应服务层 `DoneRequest`/`CancelRequest`，另有 `env`（白名单环境快照；省略时用 Daemon 自身环境，不会得到空 PATH）。cancel 遇未提交改动时 Operation 以 `confirmation_required`（带 `repos`）失败，调用方带 `confirmed_uncommitted` 或 `force` 重试，Daemon 绝不提示。同一 Workspace 已有运行中的 Operation 时第二个请求 409 `busy` 且错误对象带 `operation_id`，不排队；不同 Workspace 并行。命令行（不经 Daemon）持有文件锁时，服务层返回类型化的 `config::WorkspaceBusy`，Operation 以 `busy` 失败（不是 `internal_error`）；其余服务错误为 `operation_failed`，`message` 是完整错误链。
 
-新增修改端点的方式：构造 `operations::Job`（环境快照 + 同步服务调用），交给 `server::submit`；它做校验、`OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）、`spawn_blocking`，服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入 Operation 输出（事件流在此处扇出）。Operation 句柄未显式结束就被丢弃（worker panic）会记为失败，Workspace 不会卡在忙碌。记录只存内存；`DaemonOptions::operation_retention` 可调保留策略，`DaemonOptions::runner` 可替换子进程运行器（测试用）。能力串 `operations`。
+新增修改端点的方式：构造 `operations::Job`（环境快照 + 同步服务调用），交给 `server::submit`（其余端点见 `mutations.rs`，同样流程）；它做校验、`OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）、`spawn_blocking`，服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入 Operation 输出（事件流在此处扇出）。Operation 句柄未显式结束就被丢弃（worker panic）会记为失败，Workspace 不会卡在忙碌。记录只存内存；`DaemonOptions::operation_retention` 可调保留策略，`DaemonOptions::runner` 可替换子进程运行器（测试用）。能力串 `operations`。
+
+### Daemon 其余修改端点（`src/daemon/mutations.rs`）
+
+全部返回 202 与 Operation，请求体为可选 JSON（未知字段 400），都带可选 `env` 快照并传给服务层（`create` 也经 `EnvRunner`）。`run_agent` 取值：缺省/`false` 不跑 agent，`true` 用默认 agent，字符串为命令或别名。
+
+| 端点 | 请求体字段 | Operation 结果 |
+|---|---|---|
+| `POST /workspaces/{name}/start` | `multiplexer`、`no_multiplexer`、`run_agent` | `{workspace, dry_run, attach:{program,args}\|null, agent_cli}` |
+| `POST /workspaces/{name}/reopen` | `multiplexer`、`from[]`（`current` 或 `REPO:BRANCH`）、`overwrite[]`、`run_agent`、`skip_hooks`、`no_multiplexer`、`dry_run` | 同 start |
+| `POST /workspaces/{name}/add-repo` | `repo`（必填）、`target_branch` | `{repo, workspace, target_branch, workspace_branch, worktree_path, terminal}` |
+| `POST /workspaces` | `title`（必填）、`repos[]`（名字或 `{name,target_branch}`）或 `template`（二选一必填）、`name`、`description`、`branch`、`multiplexer`、`start`、`run_agent` | `{workspace, status, title, branch, repos, started, attach, agent_cli}` |
+| `DELETE /workspaces/{name}` | 仅 `env` | `{pruned:[name]}`；仅 done/canceled 可删，其余 400 |
+| `POST /repos` | `path`（必填）、`name`、`default_target_branch` | `{name, path}` |
+| `DELETE /repos/{name}` | 仅 `env` | `{name}` |
+
+Daemon 绝不执行前台 attach：start/reopen（以及 `create` 带 `start`）把服务层的 `AttachRequest` 放进结果的 `attach`，agent 命令在 `agent_cli`，由 Consumer 在自己的终端执行。start 回滚、reopen 非交互提示（缺 `from` 等返回 `operation_failed`）沿用服务层。`create` 缺 title 或 repos/template 在登记 Operation 前 400 `bad_request`，不会进入向导；未给 `name` 时由处理函数先生成，使忙碌键确定。忙碌键：Workspace 操作用 Workspace 名，repo 注册/移除用 `repo:<名>`（Operation 的 `workspace` 字段即该键）。新增此类端点时把处理函数放进 `mutations.rs`，在 `routes()` 注册。
 
 ### Daemon 事件流（`GET /events`，能力串 `events`）
 

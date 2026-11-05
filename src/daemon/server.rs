@@ -3,7 +3,9 @@ use super::error::{self, ApiError, PROTOCOL_HEADER};
 use super::events::{self, EventHub};
 use super::operations::{self, OperationRegistry, RunnerFactory};
 use super::transport::Listener;
-use super::{api, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use super::{
+    api, mutations, Activity, CAPABILITIES, MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION,
+};
 use crate::config::ConfigManager;
 use crate::service::RequestContext;
 use anyhow::Result;
@@ -48,6 +50,7 @@ fn router(state: AppState) -> Router {
         .route("/workspaces/{name}/cancel", post(cancel))
         .route("/operations/{id}", get(operation))
         .route("/events", get(event_stream))
+        .merge(mutations::routes())
         .fallback(not_found)
         .layer(middleware::from_fn(negotiate_version))
         .layer(middleware::from_fn_with_state(
@@ -180,7 +183,7 @@ async fn submit(
         let outcome = (job.work)(&mgr, &runner, &ctx);
         // The Daemon's own operations announce their effect directly, before
         // the Operation is marked finished; no scan involved.
-        events::announce_workspace(&*events, &mgr, &name);
+        events::announce_outcome(&*events, &mgr, kind, &name, outcome.is_ok());
         match outcome {
             Ok(result) => handle.succeed(result),
             Err(e) => handle.fail(operations::OperationError::from_service_error(&e)),

@@ -538,3 +538,80 @@ fn events_require_the_token_and_honour_version_rules() {
 fn events_capability_is_declared() {
     assert!(daemon::CAPABILITIES.contains(&"events"));
 }
+
+fn send(daemon: &DaemonHandle, method: &str, path: &str, body: Value) {
+    let body = body.to_string();
+    let response = request_with_body(
+        &daemon.socket,
+        method,
+        path,
+        Some(&daemon.token),
+        &[],
+        Some(&body),
+        T,
+    )
+    .unwrap();
+    assert_eq!(response.status, 202, "{}", response.body);
+}
+
+#[test]
+fn deleting_an_archived_workspace_emits_removed() {
+    let env = env();
+    let ws = WorkspaceConfig {
+        title: "Old".into(),
+        name: "old".into(),
+        description: String::new(),
+        branch: "zootree/old".into(),
+        workspace_dir: env.tmp.path().join("ws/old").to_string_lossy().into_owned(),
+        created_at: "2026-06-29T10:00:00+08:00".into(),
+        agent_cli: None,
+        multiplexer: MultiplexerConfig::default(),
+        multiplexer_state: Default::default(),
+        repos: Vec::<RepoEntry>::new(),
+        events: Vec::new(),
+    };
+    env.mgr.save_workspace(&WorkspaceStatus::Done, &ws).unwrap();
+    let daemon = start(&env, Script::default(), |_| {});
+    let mut stream = subscribe(&daemon, None);
+    until_ready(&mut stream);
+
+    send(&daemon, "DELETE", "/workspaces/old", json!({}));
+    let frames = until(&mut stream, "operation.finished");
+    assert_eq!(
+        names(&frames),
+        [
+            "operation.started",
+            "workspace.removed",
+            "operation.finished"
+        ]
+    );
+    assert_eq!(frames[1].data["name"], "old");
+    stop(daemon);
+}
+
+#[test]
+fn registering_and_removing_a_repo_emit_repo_changed() {
+    let env = env();
+    let src = env.tmp.path().join("checkout");
+    std::fs::create_dir_all(&src).unwrap();
+    let daemon = start(&env, Script::default(), |_| {});
+    let mut stream = subscribe(&daemon, None);
+    until_ready(&mut stream);
+
+    send(
+        &daemon,
+        "POST",
+        "/repos",
+        json!({"path": src.to_string_lossy()}),
+    );
+    let added = until(&mut stream, "operation.finished");
+    let changed = added.iter().find(|f| f.event == "repo.changed").unwrap();
+    assert_eq!(changed.data["name"], "checkout");
+    assert_eq!(changed.data["action"], "added");
+
+    send(&daemon, "DELETE", "/repos/checkout", json!({}));
+    let removed = until(&mut stream, "operation.finished");
+    let changed = removed.iter().find(|f| f.event == "repo.changed").unwrap();
+    assert_eq!(changed.data["action"], "removed");
+    stop(daemon);
+}

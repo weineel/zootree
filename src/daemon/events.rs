@@ -347,6 +347,34 @@ pub fn announce_workspace(events: &dyn EventProducer, mgr: &ConfigManager, name:
     }
 }
 
+/// Announces what a finished Daemon operation may have changed. `key` is the
+/// Operation's target: a Workspace name, or `repo:<name>` for repositories.
+/// After a failure only a Workspace that still exists is re-announced (it may
+/// be partially changed); a removal is announced only after a success.
+pub fn announce_outcome(
+    events: &dyn EventProducer,
+    mgr: &ConfigManager,
+    kind: &str,
+    key: &str,
+    succeeded: bool,
+) {
+    if let Some(repo) = key.strip_prefix("repo:") {
+        if succeeded {
+            let action = if kind == "repo-remove" {
+                "removed"
+            } else {
+                "added"
+            };
+            events.publish(DaemonEvent::RepoChanged {
+                name: repo.to_string(),
+                action,
+            });
+        }
+    } else if succeeded || mgr.locate_workspace_config(key).is_ok() {
+        announce_workspace(events, mgr, key);
+    }
+}
+
 fn snapshot(
     mgr: &ConfigManager,
     operations: &OperationRegistry,
