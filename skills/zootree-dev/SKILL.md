@@ -79,7 +79,7 @@ src/
 │   ├── info.rs      # InfoApp + 格式化辅助函数
 │   └── prompt.rs    # TUI 通用确认 prompt
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
-├── service/         # 服务层：done/cancel 等生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs）
+├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/cancel，create.rs，add_repo.rs，prune.rs，repos.rs 仓库注册/移除）
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
 
@@ -106,7 +106,7 @@ pub struct MockRunner {     // 测试用
 
 ### Hook invocation 门面
 
-`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` 只做参数解析、交互选择和事件打印。测试见 `tests/service_lifecycle_test.rs`（临时配置目录 + `MockRunner`）。
+`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`（临时配置目录 + `MockRunner`）。
 
 `src/core/hook.rs` 以类型化 `HookInvocation` 作为 Hook module 的唯一执行 interface。Workspace 与 repo invocation 分别通过 `for_workspace` / `for_repository` 构造；`HookStage`、`HookOperation` 和 `WorkspaceStatus` 明确执行阶段与持久化状态。repo 构造器接收 repo/global 两个候选 Hook，在 module 内统一执行 repo-first/global-fallback 并生成配置来源，调用者不能单独伪造 provenance。
 

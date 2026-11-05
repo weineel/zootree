@@ -5,7 +5,11 @@
 //! child processes with the caller's environment snapshot, so the CLI and the
 //! Daemon can share the same code.
 
+pub mod add_repo;
 pub mod context;
+pub mod create;
 pub mod lifecycle;
+pub mod prune;
+pub mod repos;
 
 pub use context::{EnvRunner, EnvSnapshot, EventSink, RequestContext, ServiceEvent};
