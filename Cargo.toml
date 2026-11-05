@@ -33,6 +33,8 @@ unicode-width = "0.2"
 fuzzy-matcher = "0.3"
 shlex = "1.3"
 textwrap = "0.16"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "time", "signal", "sync"] }
+axum = "0.8.9"
 
 [dev-dependencies]
 tempfile = "3"

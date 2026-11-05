@@ -20,6 +20,7 @@ src/
 │   ├── repo.rs      # repo add/list/edit/remove
 │   ├── edit.rs      # edit [name] [--path]: 打开 Workspace configuration 并在编辑后校验
 │   ├── add_repo.rs  # add-repo 参数、交互选择、结果输出与 core transaction 调用
+│   ├── daemon.rs    # daemon start|stop|status 与隐藏的前台入口 daemon run
 │   ├── create_flow.rs # create draft、当前 repo 发现、校验与 WorkspaceConfig 转换
 │   ├── workspace.rs # create/start/list/open/reopen/done/cancel
 │   ├── template.rs  # template list/save
@@ -61,6 +62,11 @@ src/
 │   ├── workspace_instruction_index.rs # workspace 根 AGENTS.md/CLAUDE.md 派生索引与 best-effort 原子替换
 │   ├── workspace_repository.rs # in-progress workspace 增加 repo 的跨 Git/hook/terminal/config 事务
 │   └── completers.rs # 动态补全候选生成器 (workspace/repo/template/agent alias)
+├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
+│   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
+│   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
+│   ├── server.rs    # axum 路由：/status、/shutdown，令牌鉴权层，空闲/信号退出
+│   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
 │   ├── create_wizard/
@@ -232,7 +238,7 @@ fn test_something() {
 }
 ```
 
-Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Daemon 测试放在 `tests/daemon_test.rs`：进程内在临时目录的 unix socket 上启动 Daemon，只通过 HTTP、发现文件与文件系统断言，绝不触碰真实 `~/.config/zootree`。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 
@@ -255,6 +261,8 @@ Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`
 | `chrono` (0.4, serde) | 时间戳 |
 | `shlex` (1) | 把 `agent_cli` 字符串模板拆成 argv |
 | `cargo-husky` (1, dev, `default-features = false`, `user-hooks`) | 安装 `.cargo-husky/hooks/` 下的 git hook 到 `.git/hooks/`，在 `cargo check --tests` 首次构建时生效 |
+| `tokio` (1, rt-multi-thread/net/macros/time/signal/sync) | 仅承载 Daemon 传输；核心保持同步，阻塞工作用 `spawn_blocking` |
+| `axum` (0.8) | Daemon 的 HTTP 服务（unix socket） |
 | `ratatui` (0.30) | TUI 框架，`src/tui_app/` 的渲染内核 |
 | `crossterm` (0.29) | 终端后端：raw mode、事件读取、alternate screen |
 
