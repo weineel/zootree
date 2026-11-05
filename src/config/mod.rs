@@ -14,6 +14,25 @@ pub struct WorkspaceLock {
     _file: std::fs::File,
 }
 
+/// Another zootree process (CLI or Daemon) holds the Workspace lock. Callers
+/// that need to tell this apart from other failures downcast to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBusy {
+    pub workspace: String,
+}
+
+impl std::fmt::Display for WorkspaceBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "workspace '{}' is being modified by another zootree process; try again when it finishes",
+            self.workspace
+        )
+    }
+}
+
+impl std::error::Error for WorkspaceBusy {}
+
 pub struct ConfigManager {
     pub base_dir: PathBuf,
 }
@@ -201,11 +220,13 @@ impl ConfigManager {
             .with_context(|| format!("failed to open workspace lock {}", path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok(WorkspaceLock { _file: file }),
-            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
-                "workspace '{name}' is being modified by another zootree process; try again when it finishes"
-            ),
-            Err(std::fs::TryLockError::Error(error)) => Err(error)
-                .with_context(|| format!("failed to lock workspace {}", path.display())),
+            Err(std::fs::TryLockError::WouldBlock) => Err(WorkspaceBusy {
+                workspace: name.to_string(),
+            }
+            .into()),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("failed to lock workspace {}", path.display()))
+            }
         }
     }
 

@@ -15,8 +15,9 @@ pub const BAD_REQUEST: &str = "bad_request";
 pub const UNAUTHORIZED: &str = "unauthorized";
 /// No such endpoint or resource. HTTP 404.
 pub const NOT_FOUND: &str = "not_found";
-/// Reserved for later tickets: the target is busy with another Operation.
-/// HTTP 409. Nothing returns it yet.
+/// The target Workspace is busy: another Operation is running on it (HTTP 409
+/// with `operation_id` naming it), or a command-line process holds its lock
+/// (an Operation failure with this code).
 pub const BUSY: &str = "busy";
 /// Unexpected server-side failure. HTTP 500.
 pub const INTERNAL_ERROR: &str = "internal_error";
@@ -27,12 +28,22 @@ pub const CLIENT_TOO_OLD: &str = "client_too_old";
 /// the client's target) must be upgraded. HTTP 426.
 pub const CLIENT_TOO_NEW: &str = "client_too_new";
 
+/// Operation failure: the request needs the caller's confirmation (cancel with
+/// uncommitted changes). The error carries `repos`; retry with
+/// `confirmed_uncommitted` or `force`. Only appears in an Operation's `error`.
+pub const CONFIRMATION_REQUIRED: &str = "confirmation_required";
+/// Operation failure: the operation ran and failed; `message` carries the full
+/// error chain. Only appears in an Operation's `error`.
+pub const OPERATION_FAILED: &str = "operation_failed";
+
 /// Every code the Daemon may return, for documentation and tests.
 pub const ERROR_CODES: &[&str] = &[
     BAD_REQUEST,
     UNAUTHORIZED,
     NOT_FOUND,
     BUSY,
+    CONFIRMATION_REQUIRED,
+    OPERATION_FAILED,
     INTERNAL_ERROR,
     CLIENT_TOO_OLD,
     CLIENT_TOO_NEW,
@@ -46,6 +57,8 @@ pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
+    /// For `busy`: the Operation currently running on the target.
+    pub operation_id: Option<String>,
 }
 
 impl ApiError {
@@ -54,7 +67,14 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            operation_id: None,
         }
+    }
+
+    pub fn busy(message: impl Into<String>, operation_id: impl Into<String>) -> Self {
+        let mut error = Self::new(StatusCode::CONFLICT, BUSY, message);
+        error.operation_id = Some(operation_id.into());
+        error
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -72,10 +92,10 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "error": { "code": self.code, "message": self.message } })),
-        )
-            .into_response()
+        let mut error = json!({ "code": self.code, "message": self.message });
+        if let Some(id) = self.operation_id {
+            error["operation_id"] = json!(id);
+        }
+        (self.status, Json(json!({ "error": error }))).into_response()
     }
 }

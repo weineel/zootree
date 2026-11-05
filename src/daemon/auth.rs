@@ -36,11 +36,11 @@ impl Authenticator for BearerToken {
         if presented == Some(self.token.as_str()) {
             Ok(())
         } else {
-            Err(ApiError {
-                status: StatusCode::UNAUTHORIZED,
-                code: error::UNAUTHORIZED,
-                message: "missing or invalid token".to_string(),
-            })
+            Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                error::UNAUTHORIZED,
+                "missing or invalid token",
+            ))
         }
     }
 }

@@ -64,7 +64,7 @@ fn capabilities_are_exactly_the_implemented_set_and_do_not_declare_web() {
     let body = get(&daemon, "/status").json().unwrap();
     assert_eq!(
         body["capabilities"],
-        serde_json::json!(["status", "read_api"])
+        serde_json::json!(["status", "read_api", "operations"])
     );
 
     daemon.shutdown();
@@ -688,6 +688,8 @@ mod read_api {
                 "unauthorized",
                 "not_found",
                 "busy",
+                "confirmation_required",
+                "operation_failed",
                 "internal_error",
                 "client_too_old",
                 "client_too_new"
