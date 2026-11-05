@@ -19,7 +19,7 @@
 //!   Operation.
 
 use crate::config::ConfigManager;
-use crate::daemon::client::{self, EventStream};
+use crate::daemon::client::{self, EventStream, HttpStatusError};
 use crate::daemon::PROTOCOL_VERSION;
 use crate::daemon::{self, DaemonOptions, DaemonState};
 use crate::service::start::AttachRequest;
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Request header in which this client declares its protocol version.
-pub const PROTOCOL_HEADER: &str = "X-Zootree-Protocol-Version";
+pub use crate::daemon::client::PROTOCOL_HEADER;
 /// What the Daemon must offer for the client mode to be used.
 const REQUIRED_CAPABILITIES: [&str; 3] = ["read_api", "operations", "events"];
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -181,7 +181,12 @@ impl std::error::Error for ApiFailure {}
 
 impl ApiFailure {
     fn is_incompatible(&self) -> bool {
-        self.code == "client_too_old" || self.code == "client_too_new"
+        matches!(
+            self.code.as_str(),
+            crate::daemon::error::CLIENT_TOO_OLD
+                | crate::daemon::error::CLIENT_TOO_NEW
+                | crate::daemon::error::PROTOCOL_VERSION_REQUIRED
+        )
     }
 }
 
@@ -321,15 +326,25 @@ impl DaemonClient {
         )
         .map_err(|e| {
             let text = format!("{e:#}");
-            if text.contains("client_too_old") || text.contains("client_too_new") {
-                Unavailable::Incompatible(ApiFailure {
-                    http_status: 426,
-                    code: "client_too_new".into(),
+            let rejected = e
+                .downcast_ref::<HttpStatusError>()
+                .and_then(|status| Some((status.status, status.error_code()?)))
+                .filter(|(_, code)| {
+                    matches!(
+                        code.as_str(),
+                        crate::daemon::error::CLIENT_TOO_OLD
+                            | crate::daemon::error::CLIENT_TOO_NEW
+                            | crate::daemon::error::PROTOCOL_VERSION_REQUIRED
+                    )
+                });
+            match rejected {
+                Some((http_status, code)) => Unavailable::Incompatible(ApiFailure {
+                    http_status,
+                    code,
                     message: text,
                     operation_id: None,
-                })
-            } else {
-                Unavailable::Down(text)
+                }),
+                None => Unavailable::Down(text),
             }
         })?;
         // Subscribing before submitting means no event of ours can be missed.

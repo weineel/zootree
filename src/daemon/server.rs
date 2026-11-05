@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
+pub(super) type Accepted = Result<(StatusCode, Json<serde_json::Value>), ApiError>;
+
 #[derive(Clone)]
 pub(super) struct AppState {
     pub auth: Arc<dyn Authenticator>,
@@ -73,21 +75,31 @@ async fn track_activity(State(state): State<AppState>, request: Request, next: N
     next.run(request).await
 }
 
-/// Rejects clients that declare an incompatible protocol version. The header
-/// is optional; `/status` is exempt so a client can always learn the Daemon's
-/// versions to explain the mismatch. Runs after authentication.
+/// Rejects clients that declare no protocol version or an incompatible one.
+/// The header is required everywhere except `/status`, which stays exempt so
+/// a client can always learn the Daemon's versions to explain the mismatch.
+/// Runs after authentication.
 async fn negotiate_version(request: Request, next: Next) -> Response {
     if request.uri().path() != "/status" {
-        if let Some(raw) = request.headers().get(PROTOCOL_HEADER) {
-            let declared = raw.to_str().ok().and_then(|v| v.trim().parse::<u32>().ok());
-            let Some(declared) = declared else {
-                return ApiError::bad_request(format!(
-                    "{PROTOCOL_HEADER} must be a non-negative integer"
-                ))
-                .into_response();
-            };
-            if declared < MIN_COMPATIBLE_PROTOCOL_VERSION {
-                return ApiError::new(
+        let Some(raw) = request.headers().get(PROTOCOL_HEADER) else {
+            return ApiError::new(
+                StatusCode::UPGRADE_REQUIRED,
+                error::PROTOCOL_VERSION_REQUIRED,
+                format!(
+                    "{PROTOCOL_HEADER} is required (this daemon speaks protocol {PROTOCOL_VERSION}, minimum compatible {MIN_COMPATIBLE_PROTOCOL_VERSION}); please upgrade the client"
+                ),
+            )
+            .into_response();
+        };
+        let declared = raw.to_str().ok().and_then(|v| v.trim().parse::<u32>().ok());
+        let Some(declared) = declared else {
+            return ApiError::bad_request(format!(
+                "{PROTOCOL_HEADER} must be a non-negative integer"
+            ))
+            .into_response();
+        };
+        if declared < MIN_COMPATIBLE_PROTOCOL_VERSION {
+            return ApiError::new(
                     StatusCode::UPGRADE_REQUIRED,
                     error::CLIENT_TOO_OLD,
                     format!(
@@ -95,9 +107,9 @@ async fn negotiate_version(request: Request, next: Next) -> Response {
                     ),
                 )
                 .into_response();
-            }
-            if declared > PROTOCOL_VERSION {
-                return ApiError::new(
+        }
+        if declared > PROTOCOL_VERSION {
+            return ApiError::new(
                     StatusCode::UPGRADE_REQUIRED,
                     error::CLIENT_TOO_NEW,
                     format!(
@@ -105,7 +117,6 @@ async fn negotiate_version(request: Request, next: Next) -> Response {
                     ),
                 )
                 .into_response();
-            }
         }
     }
     next.run(request).await
@@ -146,38 +157,52 @@ async fn agents(State(state): State<AppState>) -> Result<Json<serde_json::Value>
     blocking(&state, |mgr| api::agent_catalog(&mgr)).await
 }
 
-/// Accepts a state-changing request: validates it, claims the Workspace (409
-/// `busy` with the running Operation's id otherwise), starts the work on a
-/// blocking thread and answers 202 with the new Operation.
+/// Accepts a state-changing request on an existing Workspace: checks that it
+/// exists, then hands the job to [`spawn`].
 async fn submit(
     state: &AppState,
     kind: &'static str,
     name: String,
     job: operations::Job,
-) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Accepted {
     let mgr = ConfigManager::with_base_dir(state.base_dir.clone());
     let check_name = name.clone();
-    let mgr = tokio::task::spawn_blocking(move || {
-        api::require_workspace(&mgr, &check_name).map(|()| mgr)
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("check task failed: {e}")))??;
+    tokio::task::spawn_blocking(move || api::require_workspace(&mgr, &check_name))
+        .await
+        .map_err(|e| ApiError::internal(format!("check task failed: {e}")))??;
+    spawn(state, kind, &name, job)
+}
 
+/// The one way every Operation kind starts: claims `key` (a Workspace name or
+/// `repo:<name>`; 409 `busy` with the running Operation's id otherwise), runs
+/// the job on a blocking thread with a runner that honours the Operation's
+/// cancel token, and answers 202 with the new Operation. Because all kinds
+/// share this path, `POST /operations/{id}/cancel` works for every one of
+/// them, and a canceled Operation is recorded as such.
+pub(super) fn spawn(
+    state: &AppState,
+    kind: &'static str,
+    key: &str,
+    job: operations::Job,
+) -> Accepted {
     let handle = state
         .operations
-        .start(kind, &name, &state.activity)
+        .start(kind, key, &state.activity)
         .map_err(|busy| {
+            let what = match key.strip_prefix("repo:") {
+                Some(repo) => format!("repo '{repo}'"),
+                None => format!("workspace '{key}'"),
+            };
             ApiError::busy(
-                format!(
-                    "workspace '{name}' already has operation {} running",
-                    busy.operation_id
-                ),
+                format!("{what} already has operation {} running", busy.operation_id),
                 busy.operation_id,
             )
         })?;
     let view = state.operations.view(handle.id());
+    let mgr = ConfigManager::with_base_dir(state.base_dir.clone());
     let runner = state.runner.clone();
     let events = state.events.clone();
+    let key = key.to_string();
     // Detached on purpose: closing the client connection never stops the work.
     // A panic drops the handle, which records the failure.
     tokio::task::spawn_blocking(move || {
@@ -187,7 +212,7 @@ async fn submit(
         let outcome = (job.work)(&mgr, &runner, &ctx);
         // The Daemon's own operations announce their effect directly, before
         // the Operation is marked finished; no scan involved.
-        events::announce_outcome(&*events, &mgr, kind, &name, outcome.is_ok());
+        events::announce_outcome(&*events, &mgr, kind, &key, outcome.is_ok());
         match outcome {
             Ok(result) => handle.succeed(result),
             Err(e) => handle.fail_with(&e),

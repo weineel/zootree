@@ -27,6 +27,10 @@ pub const CLIENT_TOO_OLD: &str = "client_too_old";
 /// The client declared a protocol version above the Daemon's; the Daemon (or
 /// the client's target) must be upgraded. HTTP 426.
 pub const CLIENT_TOO_NEW: &str = "client_too_new";
+/// The request carries no `X-Zootree-Protocol-Version` header. Every endpoint
+/// except `/status` requires it, so a client that predates the header gets a
+/// clear upgrade error instead of undefined behaviour. HTTP 426.
+pub const PROTOCOL_VERSION_REQUIRED: &str = "protocol_version_required";
 
 /// Operation failure: the request needs the caller's confirmation (cancel with
 /// uncommitted changes). The error carries `repos`; retry with
@@ -47,6 +51,7 @@ pub const ERROR_CODES: &[&str] = &[
     INTERNAL_ERROR,
     CLIENT_TOO_OLD,
     CLIENT_TOO_NEW,
+    PROTOCOL_VERSION_REQUIRED,
 ];
 
 /// Request header in which a client declares its protocol version.

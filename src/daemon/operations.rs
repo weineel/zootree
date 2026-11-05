@@ -552,7 +552,7 @@ pub fn parse_body<T: for<'de> Deserialize<'de> + Default>(raw: &[u8]) -> Result<
 
 /// Environment snapshot sent by the client. Absent: the Daemon's own
 /// whitelisted environment (never an empty one, which would strip PATH).
-fn snapshot(env: Option<BTreeMap<String, String>>) -> EnvSnapshot {
+pub fn snapshot(env: Option<BTreeMap<String, String>>) -> EnvSnapshot {
     match env {
         Some(vars) => EnvSnapshot::from_pairs(vars),
         None => EnvSnapshot::capture(),

@@ -5,8 +5,9 @@
 //! The buffer keeps the most recent [`EventRetention::max_events`] events no
 //! older than [`EventRetention::max_age`].
 //!
-//! Subscribing is "listen first, snapshot second, ready last": the hub fixes
-//! the subscriber's position under its lock, then the snapshot is read, then
+//! Subscribing is "listen first, baseline and snapshot second, ready last":
+//! the hub fixes the subscriber's position under its lock, the external change
+//! detector records its baseline (if it has none), then the snapshot is read, then
 //! `ready` is sent, then everything published after the fixed position is
 //! streamed. A change that lands between the position and the snapshot is
 //! therefore delivered again as an event (workspace events carry the full
@@ -219,6 +220,8 @@ pub struct EventHub {
     signal: watch::Sender<Signal>,
     retention: EventRetention,
     subscribers: AtomicUsize,
+    /// Set by the external change detector's driver; see [`Self::ensure_baseline`].
+    baseline: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 enum Start {
@@ -244,7 +247,23 @@ impl EventHub {
             .0,
             retention,
             subscribers: AtomicUsize::new(0),
+            baseline: Mutex::new(None),
         })
+    }
+
+    /// Registers the function that makes the external change detector record
+    /// its baseline now (a no-op while it already has one).
+    pub(crate) fn set_baseline(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.baseline.lock().unwrap() = Some(hook);
+    }
+
+    /// Makes sure the external change detector has a baseline before the
+    /// caller reads its snapshot. Blocking.
+    fn ensure_baseline(&self) {
+        let hook = self.baseline.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Number of open event streams.
@@ -511,12 +530,20 @@ pub async fn subscribe(
             queue.extend(replay.iter().map(Stored::frame));
         }
     }
-    // 2. snapshot.
-    if needs_snapshot {
-        let mgr = ConfigManager::with_base_dir(base_dir);
-        let snap = tokio::task::spawn_blocking(move || snapshot(&mgr, &operations, cursor))
-            .await
-            .map_err(|e| ApiError::internal(format!("snapshot task failed: {e}")))??;
+    // 2. baseline, then snapshot. The external change detector records what
+    // the files look like now before the snapshot reads them, so a change in
+    // between is reported by a later scan instead of being lost.
+    let baseline_hub = hub.clone();
+    let mgr = ConfigManager::with_base_dir(base_dir);
+    let snap = tokio::task::spawn_blocking(move || {
+        baseline_hub.ensure_baseline();
+        needs_snapshot
+            .then(|| snapshot(&mgr, &operations, cursor))
+            .transpose()
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("snapshot task failed: {e}")))??;
+    if let Some(snap) = snap {
         queue.push_back(control("snapshot", snap));
     }
     // 3. ready.
