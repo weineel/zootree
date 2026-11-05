@@ -4,7 +4,7 @@
 
 **Blocked by:** 08 — [zootree] 其余修改端点:start、reopen、add-repo、create、归档删除、repo 注册和移除; 09 — [zootree] 事件流:SSE、序号、断线续传、重新同步; 11 — [zootree] 显式取消 Operation,以及运行中不空闲退出
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Daemon 运行时,命令行输出与不经过 Daemon 时一致
 - [ ] 命令通过事件流等待 Operation 并实时打印进度
