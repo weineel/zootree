@@ -2880,6 +2880,7 @@ dependencies = [
  "fuzzy-matcher",
  "glob",
  "kdl",
+ "libc",
  "rand",
  "ratatui",
  "ratatui-textarea",

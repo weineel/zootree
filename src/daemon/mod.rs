@@ -6,6 +6,7 @@
 
 mod api;
 mod auth;
+mod cancel;
 pub mod client;
 pub mod endpoint;
 pub mod error;
