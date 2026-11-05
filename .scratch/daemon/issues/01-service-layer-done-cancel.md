@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] done 与 cancel 的服务函数不依赖命令行参数类型,也不直接打印或进入交互;缺少必要决定(如未提交改动的确认)时报错而不是提示
 - [ ] 请求上下文包含事件接口和环境快照;服务执行的外部命令使用快照中的环境
