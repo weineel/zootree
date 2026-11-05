@@ -23,7 +23,12 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    #[arg(long, global = true, help = "Enable verbose logging output")]
+    #[arg(
+        short = 'v',
+        long,
+        global = true,
+        help = "Enable verbose logging output (live hook/git output)"
+    )]
     pub verbose: bool,
 
     #[arg(long, global = true, help = "Suppress all output except errors")]

@@ -260,3 +260,120 @@ fn cancel_with_uncommitted_changes_requires_confirmation_then_proceeds() {
         WorkspaceStatus::Canceled
     );
 }
+
+fn hook_workspace(name: &str, hook: &str) -> (tempfile::TempDir, ConfigManager) {
+    let (tmp, mgr) = setup();
+    let mut global = GlobalConfig::default();
+    global.hooks.pre_done = Some(HookValue::Simple(hook.into()));
+    mgr.save_global_config(&global).unwrap();
+    let ws = workspace(name, &tmp.path().join("ws"), &[]);
+    mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+        .unwrap();
+    (tmp, mgr)
+}
+
+fn failing_output(stdout: &str, stderr: &str) -> Output {
+    Output {
+        status: ExitStatus::from_raw(1 << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+#[test]
+fn done_emits_hook_step_and_log_events_in_order() {
+    let (_tmp, mgr) = hook_workspace("logs", "build");
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = runner_with_successes(Some("compiling\nlinking\n"));
+    let req = DoneRequest {
+        name: "logs".into(),
+        no_merge: true,
+        no_clean: true,
+        ..Default::default()
+    };
+    done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+
+    let events = sink.events();
+    let hook_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ServiceEvent::StepStarted(_)
+                    | ServiceEvent::Log(_)
+                    | ServiceEvent::StepFinished { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        hook_events,
+        vec![
+            ServiceEvent::StepStarted("pre_done".into()),
+            ServiceEvent::Log("[pre_done] compiling".into()),
+            ServiceEvent::Log("[pre_done] linking".into()),
+            ServiceEvent::StepFinished {
+                name: "pre_done".into(),
+                ok: true
+            },
+        ]
+    );
+}
+
+#[test]
+fn failing_hook_still_aborts_without_force_and_carries_full_stderr() {
+    let (_tmp, mgr) = hook_workspace("fail", "build");
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    runner.push_response(failing_output("partial\n", "line a\nline b\n"));
+    let req = DoneRequest {
+        name: "fail".into(),
+        no_merge: true,
+        no_clean: true,
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("pre_done hook failed (use --force to proceed anyway)"));
+    assert!(text.contains("line a\nline b"));
+    assert_eq!(
+        mgr.load_workspace("fail").unwrap().0,
+        WorkspaceStatus::InProgress
+    );
+    let events = sink.events();
+    assert!(events.contains(&ServiceEvent::Log("[pre_done] partial".into())));
+    assert!(events.contains(&ServiceEvent::StepFinished {
+        name: "pre_done".into(),
+        ok: false
+    }));
+}
+
+#[test]
+fn failing_hook_with_force_warns_and_continues() {
+    let (_tmp, mgr) = hook_workspace("forced", "build");
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = runner_with_successes(None);
+    runner
+        .responses
+        .borrow_mut()
+        .insert(0, failing_output("", "bad\n"));
+    let req = DoneRequest {
+        name: "forced".into(),
+        no_merge: true,
+        no_clean: true,
+        force: true,
+        ..Default::default()
+    };
+    done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+    assert!(sink
+        .events()
+        .iter()
+        .any(|e| matches!(e, ServiceEvent::Warning(m) if m.contains("pre_done hook failed"))));
+    assert_eq!(
+        mgr.load_workspace("forced").unwrap().0,
+        WorkspaceStatus::Done
+    );
+}

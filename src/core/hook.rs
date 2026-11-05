@@ -1,6 +1,6 @@
 use crate::config::global::HookValue;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
-use crate::runner::{CommandRunner, CommandSpec};
+use crate::runner::{CommandRunner, CommandSpec, OutputLine};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
@@ -218,6 +218,16 @@ impl<'a, R: CommandRunner> HookEngine<'a, R> {
     }
 
     pub fn execute(&self, invocation: &HookInvocation<'_>) -> Result<()> {
+        self.execute_streaming(invocation, &mut |_| {})
+    }
+
+    /// Runs the hook, handing each output line to `on_line` as it appears.
+    /// Failure still carries the complete stderr.
+    pub fn execute_streaming(
+        &self,
+        invocation: &HookInvocation<'_>,
+        on_line: &mut dyn FnMut(OutputLine),
+    ) -> Result<()> {
         let (program, args) = match invocation.hook {
             HookValue::Simple(cmd) => ("sh".to_string(), vec!["-c".to_string(), cmd.clone()]),
             HookValue::File { file } => (
@@ -240,7 +250,7 @@ impl<'a, R: CommandRunner> HookEngine<'a, R> {
                 .collect(),
         };
 
-        let output = self.runner.run(&spec)?;
+        let output = self.runner.run_streaming(&spec, on_line)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("hook failed: {}", stderr);
