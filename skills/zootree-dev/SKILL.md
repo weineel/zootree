@@ -65,12 +65,13 @@ src/
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents、POST /workspaces/{name}/done|cancel、GET /operations/{id}、POST /operations/{id}/cancel；鉴权层 → 版本协商层；读取经 spawn_blocking
 │   ├── auth.rs      # 可替换的鉴权层：Authenticator trait + BearerToken（令牌校验）+ require_auth 中间件
 │   ├── transport.rs # 监听器传输枚举 Listener（目前仅 Unix；回环 TCP 仅预留）
 │   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
 │   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy/confirmation_required/operation_failed/internal_error/client_too_old/client_too_new）
-│   ├── operations.rs # Operation 注册表（状态/累计输出/结果/起止时间、按 Workspace 的忙碌判定、保留最近 100 条或 24 小时）、OperationHandle/OperationSink、RunnerFactory、done/cancel 请求体与 Job
+│   ├── cancel.rs    # POST /operations/{id}/cancel 处理器与取消结果说明（canceled_info）
+│   ├── operations.rs # Operation 注册表（状态 running|succeeded|failed|canceled/累计输出/结果/起止时间、按 Workspace 的忙碌判定、保留最近 100 条或 24 小时）、OperationHandle/OperationSink、RunnerFactory、done/cancel 请求体与 Job
 │   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
@@ -179,9 +180,11 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 ### Daemon Operation（修改请求）
 
-所有修改请求立即返回 202 与 Operation 视图（`id/kind/workspace/status(running|succeeded|failed)/output[]/result/error/started_at/finished_at`），经 `GET /operations/{id}` 查询。`done`/`cancel` 请求体为可选 JSON（空体=默认值，未知字段 400）：字段对应服务层 `DoneRequest`/`CancelRequest`，另有 `env`（白名单环境快照；省略时用 Daemon 自身环境，不会得到空 PATH）。cancel 遇未提交改动时 Operation 以 `confirmation_required`（带 `repos`）失败，调用方带 `confirmed_uncommitted` 或 `force` 重试，Daemon 绝不提示。同一 Workspace 已有运行中的 Operation 时第二个请求 409 `busy` 且错误对象带 `operation_id`，不排队；不同 Workspace 并行。命令行（不经 Daemon）持有文件锁时，服务层返回类型化的 `config::WorkspaceBusy`，Operation 以 `busy` 失败（不是 `internal_error`）；其余服务错误为 `operation_failed`，`message` 是完整错误链。
+所有修改请求立即返回 202 与 Operation 视图（`id/kind/workspace/status(running|succeeded|failed|canceled)/output[]/result/error/cancel_requested/canceled/started_at/finished_at`），经 `GET /operations/{id}` 查询。`done`/`cancel` 请求体为可选 JSON（空体=默认值，未知字段 400）：字段对应服务层 `DoneRequest`/`CancelRequest`，另有 `env`（白名单环境快照；省略时用 Daemon 自身环境，不会得到空 PATH）。cancel 遇未提交改动时 Operation 以 `confirmation_required`（带 `repos`）失败，调用方带 `confirmed_uncommitted` 或 `force` 重试，Daemon 绝不提示。同一 Workspace 已有运行中的 Operation 时第二个请求 409 `busy` 且错误对象带 `operation_id`，不排队；不同 Workspace 并行。命令行（不经 Daemon）持有文件锁时，服务层返回类型化的 `config::WorkspaceBusy`，Operation 以 `busy` 失败（不是 `internal_error`）；其余服务错误为 `operation_failed`，`message` 是完整错误链。
 
 新增修改端点的方式：构造 `operations::Job`（环境快照 + 同步服务调用），交给 `server::submit`；它做校验、`OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）、`spawn_blocking`，服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入 Operation 输出（事件流在此处扇出）。Operation 句柄未显式结束就被丢弃（worker panic）会记为失败，Workspace 不会卡在忙碌。记录只存内存；`DaemonOptions::operation_retention` 可调保留策略，`DaemonOptions::runner` 可替换子进程运行器（测试用）。能力串 `operations`。
+
+显式取消：`POST /operations/{id}/cancel`（无请求体）。运行中返回 202 `{id, outcome:"cancel_requested", status:"running", operation}`；已结束（含已取消）返回 200 `{id, outcome:"already_finished", status, operation}`，幂等不报错；未知 id 404。客户端断开从不影响 Operation，只有此请求会停止它。取消是尽力而为且一次性：`runner::CancelToken` 经 `DynRunner::with_cancel` 作用于该 Operation 的每条子进程命令，`CommandRunner::run_cancellable`（`RealRunner` 为子进程独立进程组并整组 SIGKILL，默认实现只检查开始前的请求）中断当前命令并返回 `runner::Canceled`；令牌被消费一次，之后服务层的回滚命令（如 start 的 `StartRollback`）不会再被打断。命令被打断且工作返回错误时状态为 `canceled`，`canceled` 字段为 `{stopped_at(最后一步名或 null), interrupted_command, cleanup(rolled_back|rollback_failed|none), notes[], detail}`；不可安全中断的步骤（如 merge）会在 `notes` 如实说明可能留下部分结果。取消到达时没有命令可打断、或工作已先完成，则 Operation 保持真实结果（succeeded/failed），`cancel_requested` 为 true。有运行中的 Operation 时 `Activity::begin_operation` 阻止空闲退出，取消结束后计数归零。测试见 `tests/daemon_cancel_test.rs`。
 
 Web 扩展点仅预留（见 `docs/daemon-extension-points.md`）：传输走 `transport::Listener`、鉴权走 `auth::Authenticator`、能力串预留 `web`（默认不声明）、静态资源挂载点在 `server::router`。改这些位置时不得改变现有 unix socket 与令牌校验行为，也不得加入未使用的运行时代码。
 
@@ -260,7 +263,7 @@ fn test_something() {
 }
 ```
 
-Daemon Operation 测试放在 `tests/daemon_operations_test.rs`（`RunnerFactory` 注入可阻塞的运行器替身，用闸门制造"忙碌"）。Daemon 骨架与只读测试放在 `tests/daemon_test.rs`：进程内在临时目录的 unix socket 上启动 Daemon，只通过 HTTP、发现文件与文件系统断言，绝不触碰真实 `~/.config/zootree`。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
+Daemon Operation 测试放在 `tests/daemon_operations_test.rs`、取消与空闲保护在 `tests/daemon_cancel_test.rs`（`RunnerFactory` 注入可阻塞的运行器替身，用闸门制造"忙碌"）。Daemon 骨架与只读测试放在 `tests/daemon_test.rs`：进程内在临时目录的 unix socket 上启动 Daemon，只通过 HTTP、发现文件与文件系统断言，绝不触碰真实 `~/.config/zootree`。Hook environment contract 与完整 invocation 矩阵放在 `tests/hook_test.rs`；各 lifecycle 测试只补其 producer 时序与既有 rollback/partial-success 边界。Terminal environment 的 activate/close contract 放在 `tests/terminal_environment_test.rs`；Workspace instruction index 的精确渲染、覆盖和 best-effort contract 放在 `tests/workspace_instruction_index_test.rs`；跨 Git/hook/terminal/config 的 repo transaction 放在 `tests/workspace_repository_test.rs`；顶级参数解析放在 `tests/add_repo_cli_test.rs`。Zellij/cmux/Herdr 的低层命令翻译测试放在对应 crate-private module 的 `#[cfg(test)]` 中，不为 integration tests 公开 adapter seam。Zellij KDL 与 cmux JSON renderer 分别继续由 `tests/layout_test.rs` 和 `tests/cmux_layout_test.rs` 覆盖。
 
 ### 配置测试
 
@@ -284,6 +287,7 @@ Daemon Operation 测试放在 `tests/daemon_operations_test.rs`（`RunnerFactory
 | `shlex` (1) | 把 `agent_cli` 字符串模板拆成 argv |
 | `cargo-husky` (1, dev, `default-features = false`, `user-hooks`) | 安装 `.cargo-husky/hooks/` 下的 git hook 到 `.git/hooks/`，在 `cargo check --tests` 首次构建时生效 |
 | `tokio` (1, rt-multi-thread/net/macros/time/signal/sync) | 仅承载 Daemon 传输；核心保持同步，阻塞工作用 `spawn_blocking` |
+| `libc` (0.2) | 取消时对子进程组发 SIGKILL（`runner.rs`） |
 | `axum` (0.8) | Daemon 的 HTTP 服务（unix socket） |
 | `ratatui` (0.30) | TUI 框架，`src/tui_app/` 的渲染内核 |
 | `crossterm` (0.29) | 终端后端：raw mode、事件读取、alternate screen |
