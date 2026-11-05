@@ -1151,7 +1151,13 @@ impl EventSink for CliEventSink {
     fn emit(&self, event: ServiceEvent) {
         match event {
             ServiceEvent::Started { .. } => {}
-            ServiceEvent::Step(message) | ServiceEvent::Log(message) => println!("{message}"),
+            ServiceEvent::Step(message) => println!("{message}"),
+            // Child output is shown live under --verbose (debug level) only.
+            ServiceEvent::Log(message) => tracing::debug!("{}", message),
+            ServiceEvent::StepStarted(name) => tracing::debug!("step '{}' started", name),
+            ServiceEvent::StepFinished { name, ok } => {
+                tracing::debug!("step '{}' finished (ok: {})", name, ok)
+            }
             ServiceEvent::Warning(message) => tracing::warn!("{}", message),
             ServiceEvent::Finished { summary, .. } => println!("{summary}"),
         }
