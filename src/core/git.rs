@@ -1,4 +1,4 @@
-use crate::runner::{CommandRunner, CommandSpec};
+use crate::runner::{CommandRunner, CommandSpec, OutputLine};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
@@ -10,11 +10,24 @@ pub struct GitWorktree {
 
 pub struct GitOps<'a, R: CommandRunner> {
     runner: &'a R,
+    on_line: Option<&'a dyn Fn(&OutputLine)>,
 }
 
 impl<'a, R: CommandRunner> GitOps<'a, R> {
     pub fn new(runner: &'a R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            on_line: None,
+        }
+    }
+
+    /// Forwards output lines of the git commands that change state (merge,
+    /// push, worktree changes) to `on_line` while they run.
+    pub fn with_output(runner: &'a R, on_line: &'a dyn Fn(&OutputLine)) -> Self {
+        Self {
+            runner,
+            on_line: Some(on_line),
+        }
     }
 
     fn git(&self, repo_path: &str, args: Vec<&str>) -> Result<std::process::Output> {
@@ -27,7 +40,10 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
             env: HashMap::new(),
             env_remove: vec![],
         };
-        let output = self.runner.run(&spec)?;
+        let output = match self.on_line {
+            Some(on_line) => self.runner.run_streaming(&spec, &mut |l| on_line(&l))?,
+            None => self.runner.run(&spec)?,
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
