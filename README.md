@@ -272,7 +272,18 @@ zootree template save <name> --from <workspace>
 ```bash
 zootree prune                        # Clean up orphaned worktrees
 zootree logs                         # View logs
+zootree operations cancel <id>       # Ask a running daemon to stop an operation
 ```
+
+If a compatible `zootree daemon` is already running, `list`, `info --json`,
+`start`, `done`, `cancel`, `reopen`, `add-repo`, `create`, `prune` and
+`repo add|list|remove` run through it and print the same output as without it.
+The daemon is never started by these commands; without one (or with an
+incompatible protocol version, which prints a warning on stderr) they run
+locally exactly as before. `edit`, `config *`, interactive pickers and the
+terminal attach always run in your terminal. Ctrl-C only stops waiting
+(exit code 130); the operation keeps running until you run
+`zootree operations cancel <id>`.
 
 ## Configuration
 

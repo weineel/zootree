@@ -142,12 +142,20 @@ pub struct SseFrame {
     pub data: serde_json::Value,
 }
 
-/// Blocking reader of `GET /events`, for tests and simple consumers. Frames
-/// are read one at a time; keep-alive comments are skipped.
+/// Blocking reader of `GET /events`. Frames are read one at a time;
+/// keep-alive comments are skipped. A read that times out keeps what was
+/// already received, so the caller may poll with short timeouts and call
+/// again.
 #[derive(Debug)]
 pub struct EventStream {
     reader: std::io::BufReader<UnixStream>,
     pending: String,
+    /// Partially read chunk-size line.
+    line: String,
+    /// Partially read chunk payload (plus its trailing CRLF).
+    chunk: Vec<u8>,
+    /// Payload length of the chunk being read, once its size line is known.
+    chunk_len: Option<usize>,
 }
 
 impl EventStream {
@@ -211,11 +219,15 @@ impl EventStream {
         Ok(Self {
             reader,
             pending: String::new(),
+            line: String::new(),
+            chunk: Vec::new(),
+            chunk_len: None,
         })
     }
 
     /// Next frame, `Ok(None)` when the server ended the stream. Fails when
-    /// nothing arrives within `timeout`.
+    /// nothing arrives within `timeout`; the error then wraps an
+    /// `std::io::Error` of kind `WouldBlock` or `TimedOut`, and nothing is lost.
     pub fn next_frame(&mut self, timeout: Duration) -> Result<Option<SseFrame>> {
         use std::io::BufRead;
         // Setting the timeout fails on a socket the peer already closed; the
@@ -228,19 +240,37 @@ impl EventStream {
                     return Ok(Some(frame));
                 }
             }
-            let mut size_line = String::new();
-            if self.reader.read_line(&mut size_line)? == 0 {
-                return Ok(None);
+            let payload = match self.chunk_len {
+                Some(len) => len,
+                None => {
+                    if self.reader.read_line(&mut self.line)? == 0 {
+                        return Ok(None);
+                    }
+                    let size = usize::from_str_radix(self.line.trim(), 16)
+                        .with_context(|| format!("bad chunk size {:?}", self.line))?;
+                    self.line.clear();
+                    if size == 0 {
+                        return Ok(None);
+                    }
+                    self.chunk.clear();
+                    self.chunk_len = Some(size);
+                    size
+                }
+            };
+            let wanted = payload + 2;
+            while self.chunk.len() < wanted {
+                let mut buf = [0u8; 4096];
+                let take = (wanted - self.chunk.len()).min(buf.len());
+                let read = std::io::Read::read(&mut self.reader, &mut buf[..take])?;
+                if read == 0 {
+                    return Ok(None);
+                }
+                self.chunk.extend_from_slice(&buf[..read]);
             }
-            let size = usize::from_str_radix(size_line.trim(), 16)
-                .with_context(|| format!("bad chunk size {size_line:?}"))?;
-            if size == 0 {
-                return Ok(None);
-            }
-            let mut chunk = vec![0u8; size + 2];
-            self.reader.read_exact(&mut chunk)?;
+            self.chunk_len = None;
             self.pending
-                .push_str(&String::from_utf8_lossy(&chunk[..size]).replace("\r\n", "\n"));
+                .push_str(&String::from_utf8_lossy(&self.chunk[..payload]).replace("\r\n", "\n"));
+            self.chunk.clear();
         }
     }
 }

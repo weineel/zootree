@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Args;
 use clap_complete::{ArgValueCompleter, CompletionCandidate};
 
+use crate::cli::remote::{self, ExecOptions};
 use crate::cli::workspace::CliEventSink;
 use crate::config::workspace::{WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
@@ -42,6 +43,19 @@ pub fn handle_add_repo(args: &AddRepoArgs) -> Result<()> {
         Some(repo) => parse_repo_spec(repo)?,
         None => (select_repository(&config_manager, &workspace)?, None),
     };
+    if let Some(daemon) = remote::connect(&config_manager) {
+        let mut body = serde_json::json!({ "repo": repo });
+        if let Some(target_branch) = &target_branch {
+            body["target_branch"] = serde_json::json!(target_branch);
+        }
+        let path = format!("/workspaces/{workspace_name}/add-repo");
+        if daemon
+            .execute("POST", &path, body, &ExecOptions::default())?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
     add_repo_to_workspace(
