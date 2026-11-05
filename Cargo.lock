@@ -2877,6 +2877,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dirs",
+ "futures-util",
  "fuzzy-matcher",
  "glob",
  "kdl",
