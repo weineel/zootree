@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 — [zootree] Daemon 骨架:生命周期、发现文件、令牌、状态接口
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 四类读取接口返回的结构与已发布的 `--json` 一致
 - [ ] 缺少或错误的令牌被拒绝

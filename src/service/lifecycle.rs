@@ -11,7 +11,7 @@ use crate::core::terminal_environment::TerminalEnvironment;
 use crate::core::worktree_status::{
     ensure_required_worktrees_exist, repo_worktree_statuses, RepoWorktreeStatus,
 };
-use crate::runner::CommandRunner;
+use crate::runner::{CommandRunner, OutputLine};
 use crate::service::{EnvRunner, RequestContext, ServiceEvent};
 use anyhow::Result;
 use chrono::Local;
@@ -90,6 +90,36 @@ pub(crate) fn warn_or_bail(
     } else {
         Err(err.context(format!("{} (use --force to proceed anyway)", context)))
     }
+}
+
+/// Runs a hook, emitting step start/end events and one log event per output
+/// line. The error (and its complete stderr) is returned unchanged so callers
+/// keep their `warn_or_bail` semantics.
+fn run_hook<R: CommandRunner>(
+    ctx: &RequestContext<'_>,
+    engine: &HookEngine<'_, R>,
+    invocation: &HookInvocation<'_>,
+    step: &str,
+) -> Result<()> {
+    ctx.emit(ServiceEvent::StepStarted(step.to_string()));
+    let result = engine.execute_streaming(invocation, &mut |line| ctx.log_line(step, &line));
+    ctx.emit(ServiceEvent::StepFinished {
+        name: step.to_string(),
+        ok: result.is_ok(),
+    });
+    result
+}
+
+/// Runs a git step, emitting step start/end events around it. The `GitOps`
+/// in the service functions forwards its output lines as log events.
+fn git_step<T>(ctx: &RequestContext<'_>, step: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    ctx.emit(ServiceEvent::StepStarted(step.to_string()));
+    let result = f();
+    ctx.emit(ServiceEvent::StepFinished {
+        name: step.to_string(),
+        ok: result.is_ok(),
+    });
+    result
 }
 
 fn expanded_workspace_dir(workspace: &WorkspaceConfig) -> String {
@@ -232,7 +262,8 @@ pub fn done_workspace<R: CommandRunner>(
     let runner = EnvRunner::new(runner, &ctx.env);
     let runner = &runner;
     let global = config_mgr.load_global_config()?;
-    let git = GitOps::new(runner);
+    let log_git = |line: &OutputLine| ctx.log_line("git", line);
+    let git = GitOps::with_output(runner, &log_git);
     let hook_engine = HookEngine::new(runner);
     let name = req.name.clone();
 
@@ -280,7 +311,7 @@ pub fn done_workspace<R: CommandRunner>(
             WorkspaceStatus::InProgress,
             &workspace,
         ) {
-            if let Err(e) = hook_engine.execute(&invocation) {
+            if let Err(e) = run_hook(ctx, &hook_engine, &invocation, "pre_done") {
                 warn_or_bail(ctx, req.force, e, "pre_done hook failed")?;
             }
         }
@@ -327,21 +358,23 @@ pub fn done_workspace<R: CommandRunner>(
             } else {
                 format!("{}\n\n{}", workspace.title, workspace.description)
             };
-            git.merge_with_worktree(
-                &repo_path,
-                Some(&worktree_path),
-                &workspace.branch,
-                &target_branch,
-                req.strategy.as_deref(),
-                &message,
-            )?;
+            git_step(ctx, "merge", || {
+                git.merge_with_worktree(
+                    &repo_path,
+                    Some(&worktree_path),
+                    &workspace.branch,
+                    &target_branch,
+                    req.strategy.as_deref(),
+                    &message,
+                )
+            })?;
             ctx.step(format!(
                 "  merged {} -> {} ({})",
                 workspace.branch, target_branch, repo_entry.name
             ));
 
             if req.push {
-                git.push(&repo_path, &target_branch)?;
+                git_step(ctx, "push", || git.push(&repo_path, &target_branch))?;
                 ctx.step(format!("  pushed {} ({})", target_branch, repo_entry.name));
             }
         }
@@ -363,7 +396,7 @@ pub fn done_workspace<R: CommandRunner>(
                         target_branch: Some(&target_branch),
                     },
                 ) {
-                    if let Err(e) = hook_engine.execute(&invocation) {
+                    if let Err(e) = run_hook(ctx, &hook_engine, &invocation, "pre_remove") {
                         warn_or_bail(ctx, req.force, e, "pre_remove hook failed")?;
                     }
                 }
@@ -415,7 +448,8 @@ pub fn cancel_workspace<R: CommandRunner>(
     let runner = EnvRunner::new(runner, &ctx.env);
     let runner = &runner;
     let global = config_mgr.load_global_config()?;
-    let git = GitOps::new(runner);
+    let log_git = |line: &OutputLine| ctx.log_line("git", line);
+    let git = GitOps::with_output(runner, &log_git);
     let hook_engine = HookEngine::new(runner);
     let name = req.name.clone();
 
@@ -477,7 +511,7 @@ pub fn cancel_workspace<R: CommandRunner>(
             WorkspaceStatus::InProgress,
             &workspace,
         ) {
-            if let Err(e) = hook_engine.execute(&invocation) {
+            if let Err(e) = run_hook(ctx, &hook_engine, &invocation, "pre_cancel") {
                 warn_or_bail(ctx, req.force, e, "pre_cancel hook failed")?;
             }
         }
@@ -518,7 +552,7 @@ pub fn cancel_workspace<R: CommandRunner>(
                         target_branch: repo_entry.target_branch.as_deref(),
                     },
                 ) {
-                    if let Err(e) = hook_engine.execute(&invocation) {
+                    if let Err(e) = run_hook(ctx, &hook_engine, &invocation, "pre_remove") {
                         warn_or_bail(ctx, req.force, e, "pre_remove hook failed")?;
                     }
                 }

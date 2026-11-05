@@ -28,6 +28,19 @@ pub fn request(
     token: Option<&str>,
     timeout: Duration,
 ) -> Result<HttpResponse> {
+    request_with_headers(socket, method, path, token, &[], timeout)
+}
+
+/// Like [`request`] with extra request headers (for example the protocol
+/// version header).
+pub fn request_with_headers(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<HttpResponse> {
     let mut stream = UnixStream::connect(socket)
         .with_context(|| format!("failed to connect to {}", socket.display()))?;
     stream.set_read_timeout(Some(timeout))?;
@@ -37,6 +50,9 @@ pub fn request(
     );
     if let Some(token) = token {
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;

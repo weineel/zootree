@@ -4,8 +4,10 @@
 //! socket. The zootree core stays synchronous; the async runtime only carries
 //! the transport.
 
+mod api;
 pub mod client;
 pub mod endpoint;
+pub mod error;
 mod server;
 
 use anyhow::{Context, Result};
@@ -23,7 +25,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Oldest client protocol version this Daemon still serves.
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
 /// Capability strings; new behavior is gated by adding one here.
-pub const CAPABILITIES: &[&str] = &["status"];
+pub const CAPABILITIES: &[&str] = &["status", "read_api"];
 /// Idle time without connections or Operations before the Daemon exits.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -233,6 +235,7 @@ pub fn start(options: DaemonOptions) -> Result<DaemonHandle> {
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let state = server::AppState {
         token: token.clone(),
+        base_dir: options.base_dir.clone(),
         pid: discovery.pid,
         started_at: discovery.started_at.clone(),
         activity: activity.clone(),

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — [zootree] 为 done 和 cancel 抽出服务层,并引入请求上下文
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] create、add-repo、prune、repo 注册、repo 移除各有不依赖命令行参数类型的服务函数
 - [ ] 交互式向导和选择器只存在于命令行适配层

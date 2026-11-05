@@ -457,7 +457,7 @@ pub fn build_repo_draft_entries<R: CommandRunner>(
     Ok(repos)
 }
 
-fn build_requested_repo_draft_entries<R: CommandRunner>(
+pub(crate) fn build_requested_repo_draft_entries<R: CommandRunner>(
     config_mgr: &ConfigManager,
     runner: &R,
     repos: Vec<(String, Option<String>)>,

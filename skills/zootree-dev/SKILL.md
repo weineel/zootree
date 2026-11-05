@@ -65,7 +65,9 @@ src/
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
 │   ├── mod.rs       # start()/DaemonHandle、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由：/status、/shutdown，令牌鉴权层，空闲/信号退出
+│   ├── server.rs    # axum 路由：/status、/shutdown、只读 /workspaces、/workspaces/{name}、/repos、/agents；鉴权层 → 版本协商层；读取经 spawn_blocking
+│   ├── api.rs       # 只读接口的同步 body 构造，复用 cli::json_view / AgentCatalog，不改字段
+│   ├── error.rs     # ApiError 与稳定错误码常量 ERROR_CODES（bad_request/unauthorized/not_found/busy[预留]/internal_error/client_too_old/client_too_new）
 │   └── client.rs    # 阻塞式 unix socket HTTP 客户端（CLI 与测试共用）
 ├── tui_app/         # TUI 应用框架（ratatui + crossterm）
 │   ├── mod.rs       # Event / App trait / run_app 事件循环
@@ -79,7 +81,7 @@ src/
 │   ├── info.rs      # InfoApp + 格式化辅助函数
 │   └── prompt.rs    # TUI 通用确认 prompt
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
-├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/cancel，start.rs start/open/AttachRequest，reopen.rs）
+├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/cancel，start.rs start/open/AttachRequest，reopen.rs，create.rs，add_repo.rs，prune.rs，repos.rs 仓库注册/移除）
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
 
@@ -95,18 +97,20 @@ pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> Result<Output>;
 }
 
-pub struct RealRunner;      // 真实执行命令
+pub struct RealRunner;      // 真实执行命令（run_streaming 边读边回调）
 pub struct MockRunner {     // 测试用
     pub calls: RefCell<Vec<CommandSpec>>,
     pub responses: RefCell<Vec<Output>>,
 }
 ```
 
+`run_streaming(spec, &mut FnMut(OutputLine))` 在整体捕获之外逐行转发 stdout/stderr（失败时仍返回完整输出）；默认实现先 `run` 再回放，所以 `MockRunner` 无需改动，回放顺序为先 stdout 后 stderr。`HookEngine::execute_streaming` 与 `GitOps::with_output` 使用它；服务层据此发出 `ServiceEvent::StepStarted/Log/StepFinished`，CLI 适配层仅在 `-v/--verbose`（debug 级）下显示，默认输出不变。
+
 所有 `core/` 模块的函数接受 `&R: CommandRunner` 泛型参数。
 
 ### Hook invocation 门面
 
-`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` 只做参数解析、交互选择和事件打印。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
+`src/service/` 是 CLI 与将来 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
 
 `src/core/hook.rs` 以类型化 `HookInvocation` 作为 Hook module 的唯一执行 interface。Workspace 与 repo invocation 分别通过 `for_workspace` / `for_repository` 构造；`HookStage`、`HookOperation` 和 `WorkspaceStatus` 明确执行阶段与持久化状态。repo 构造器接收 repo/global 两个候选 Hook，在 module 内统一执行 repo-first/global-fallback 并生成配置来源，调用者不能单独伪造 provenance。
 
@@ -165,6 +169,10 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 ### 机器可读输出
 
 `list --json`、`info <name> --json`、`repo list --json` 的结构由 `src/cli/json_view.rs` 的纯函数构建，属于对外稳定契约（Orca 等调用方依赖）。`info --json` 带有已解析的 `agent_command`（argv）。交互式提示在 stdin 不是终端时（`run_inline`）直接报错，保证被程序调用时不会挂起。
+
+### Daemon 只读 API 与信封
+
+只读接口返回的 body 与 `--json` 完全相同（`/workspaces` 默认 pending+in_progress，可用 `?status=a&status=b,c` 过滤，未知查询参数忽略；`/agents` 返回 `AgentCatalog`）。错误统一为 `{"error":{"code","message"}}`，客户端只按 `code` 分支；新增码可以，改名/复用不可。客户端可用请求头 `X-Zootree-Protocol-Version` 声明协议版本：低于 `MIN_COMPATIBLE_PROTOCOL_VERSION` 返回 426 `client_too_old`，高于 `PROTOCOL_VERSION` 返回 426 `client_too_new`，不带头则放行；`/status` 豁免以便客户端查看版本。鉴权先于版本检查。能力串 `read_api` 标记这组接口。`busy`（409）仅预留，尚无调用方。
 
 ### 命令路由
 

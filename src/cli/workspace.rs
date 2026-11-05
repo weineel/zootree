@@ -1,10 +1,8 @@
 use crate::cli::create_flow::{
-    create_args_need_wizard, discover_current_repo_candidate, draft_from_args,
-    persist_selected_pending_repos, resolve_agent_cli_for_draft, workspace_from_draft,
-    AfterCreateMode, CreateDraftError, CreateWizardOutput,
+    create_args_need_wizard, discover_current_repo_candidate, draft_from_args, AfterCreateMode,
+    CreateWizardOutput,
 };
 use crate::config::global::MultiplexerKind;
-use crate::config::template::TemplateConfig;
 use crate::config::workspace::{RepoEntry, WorkspaceConfig, WorkspaceStatus};
 use crate::config::ConfigManager;
 use crate::core::completers::{
@@ -16,6 +14,7 @@ use crate::core::reopen::{ReopenBase, ReopenOptions, ReopenPrompt, ReopenSources
 use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::worktree_status::{missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus};
 use crate::runner::RealRunner;
+use crate::service::create::create_workspace_from_draft;
 use crate::service::lifecycle::{
     cancel_candidate_statuses, cancel_workspace, done_workspace, CancelRequest, DoneRequest,
     UncommittedConfirmationRequired,
@@ -28,7 +27,6 @@ use crate::service::{EnvSnapshot, EventSink, RequestContext, ServiceEvent};
 use crate::tui;
 use crate::tui_app::create_wizard::run_create_wizard;
 use anyhow::Result;
-use chrono::Local;
 use clap::Args;
 use clap_complete::ArgValueCompleter;
 use std::collections::BTreeSet;
@@ -129,95 +127,19 @@ pub fn handle_create(args: &CreateArgs) -> Result<()> {
         None
     };
     let draft = draft_from_args(args, &config_mgr, &runner, &global, current_repo, &existing)?;
-    let mut output = if needs_wizard {
+    let output = if needs_wizard {
         run_create_wizard(draft, global.clone(), existing.clone())?
     } else {
-        let errors = draft.validate(&existing, &global);
-        if !errors.is_empty() {
-            anyhow::bail!("invalid create options: {}", format_draft_errors(&errors));
-        }
         CreateWizardOutput { draft }
     };
-    persist_selected_pending_repos(&config_mgr, &mut output.draft)?;
-    let agent_cli = resolve_agent_cli_for_draft(&output.draft.after_create, &global)?;
-    let multiplexer = output
-        .draft
-        .multiplexer
-        .clone()
-        .unwrap_or_else(|| global.multiplexer.clone());
-    let workspace = workspace_from_draft(
-        &output.draft,
-        Local::now().to_rfc3339(),
-        agent_cli,
-        multiplexer,
-    );
-    let name = workspace.name.clone();
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    let outcome = create_workspace_from_draft(&config_mgr, &ctx, output.draft)?;
+    let name = outcome.workspace.name.clone();
 
-    config_mgr.save_workspace(&WorkspaceStatus::Pending, &workspace)?;
-    save_recently_template(&config_mgr, &workspace)?;
-
-    println!("workspace '{}' created (pending)", name);
-    println!("  branch: {}", workspace.branch);
-    println!(
-        "  repos: {}",
-        workspace
-            .repos
-            .iter()
-            .map(|r| format!("{}:{}", r.name, r.target_branch.as_deref().unwrap_or("*")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    start_after_create_if_needed(&name, &output.draft.after_create)?;
+    start_after_create_if_needed(&name, &outcome.after_create)?;
 
     Ok(())
-}
-
-fn format_draft_errors(errors: &[CreateDraftError]) -> String {
-    errors
-        .iter()
-        .map(|error| match error {
-            CreateDraftError::TitleRequired => "title is required".to_string(),
-            CreateDraftError::TitleSingleLineRequired => "title must be a single line".to_string(),
-            CreateDraftError::WorkspaceNameRequired => "workspace name is required".to_string(),
-            CreateDraftError::WorkspaceNameInvalid(name) => {
-                format!("workspace name '{name}' must use only ASCII letters, numbers, '-' and '_'")
-            }
-            CreateDraftError::WorkspaceNameSingleLineRequired => {
-                "workspace name must be a single line".to_string()
-            }
-            CreateDraftError::WorkspaceBranchRequired => "workspace branch is required".to_string(),
-            CreateDraftError::WorkspaceBranchSingleLineRequired => {
-                "workspace branch must be a single line".to_string()
-            }
-            CreateDraftError::WorkspaceNameExists(name) => {
-                format!("workspace name '{}' already exists", name)
-            }
-            CreateDraftError::RepoRequired => "at least one repo must be selected".to_string(),
-            CreateDraftError::TargetBranchRequired(repo) => {
-                format!("target branch for repo '{}' is required", repo)
-            }
-            CreateDraftError::TargetBranchSingleLineRequired(repo) => {
-                format!("target branch for repo '{}' must be a single line", repo)
-            }
-            CreateDraftError::DefaultAgentMissing => {
-                "--run-agent requires agent_cli in global config (~/.config/zootree/config.toml)"
-                    .to_string()
-            }
-            CreateDraftError::RunAgentSingleLineRequired => {
-                "run-agent must be a single line".to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn save_recently_template(config_mgr: &ConfigManager, workspace: &WorkspaceConfig) -> Result<()> {
-    let recently = TemplateConfig {
-        repos: workspace.repos.iter().map(|r| r.name.clone()).collect(),
-        multiplexer: workspace.multiplexer.clone(),
-    };
-    config_mgr.save_template("recently", &recently)
 }
 
 fn start_after_create_if_needed(name: &str, mode: &AfterCreateMode) -> Result<()> {
@@ -789,13 +711,19 @@ pub struct CancelArgs {
 }
 
 /// CLI adapter for service events: steps go to stdout, warnings to the log.
-struct CliEventSink;
+pub(crate) struct CliEventSink;
 
 impl EventSink for CliEventSink {
     fn emit(&self, event: ServiceEvent) {
         match event {
             ServiceEvent::Started { .. } => {}
-            ServiceEvent::Step(message) | ServiceEvent::Log(message) => println!("{message}"),
+            ServiceEvent::Step(message) => println!("{message}"),
+            // Child output is shown live under --verbose (debug level) only.
+            ServiceEvent::Log(message) => tracing::debug!("{}", message),
+            ServiceEvent::StepStarted(name) => tracing::debug!("step '{}' started", name),
+            ServiceEvent::StepFinished { name, ok } => {
+                tracing::debug!("step '{}' finished (ok: {})", name, ok)
+            }
             ServiceEvent::Warning(message) => tracing::warn!("{}", message),
             ServiceEvent::Finished { summary, .. } => println!("{summary}"),
         }
