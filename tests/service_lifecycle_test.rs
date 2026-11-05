@@ -377,3 +377,62 @@ fn failing_hook_with_force_warns_and_continues() {
         WorkspaceStatus::Done
     );
 }
+
+#[test]
+fn snapshot_without_path_keeps_the_host_path_but_strips_other_whitelisted_vars() {
+    use zootree::runner::{CommandRunner, CommandSpec};
+    use zootree::service::EnvRunner;
+
+    let inner = MockRunner::new();
+    inner.push_response(output(""));
+    // A snapshot that carries SSH_AUTH_SOCK but no PATH.
+    let env = EnvSnapshot::from_pairs([("SSH_AUTH_SOCK".to_string(), "/tmp/caller.sock".into())]);
+    let runner = EnvRunner::new(&inner, &env);
+    runner
+        .run(&CommandSpec {
+            program: "git".into(),
+            args: vec![],
+            cwd: None,
+            env: Default::default(),
+            env_remove: vec![],
+        })
+        .unwrap();
+    let call = &inner.take_calls()[0];
+    assert!(
+        !call.env_remove.iter().any(|n| n == "PATH"),
+        "PATH must stay inherited: {:?}",
+        call.env_remove
+    );
+    assert!(!call.env.contains_key("PATH"));
+    assert_eq!(
+        call.env.get("SSH_AUTH_SOCK").map(String::as_str),
+        Some("/tmp/caller.sock")
+    );
+    // Everything else on the whitelist is removed, never taken from the Daemon.
+    for name in [
+        "ZELLIJ",
+        "ZELLIJ_SESSION_NAME",
+        "HERDR_ENV",
+        "SSH_AGENT_PID",
+    ] {
+        assert!(call.env_remove.iter().any(|n| n == name), "{name}");
+    }
+    // Variables outside the whitelist are never touched.
+    assert!(!call.env_remove.iter().any(|n| n == "HOME"));
+}
+
+#[test]
+fn request_context_builds_the_caller_context_from_the_snapshot() {
+    use zootree::core::terminal_environment::CallerContext;
+
+    let sink = CollectingSink::new();
+    let inside = EnvSnapshot::from_pairs([("ZELLIJ".to_string(), "0".to_string())]);
+    let ctx = RequestContext::new(&sink, inside);
+    assert_eq!(
+        ctx.caller(),
+        CallerContext::from_vars(|n| (n == "ZELLIJ").then(|| "0".to_string()))
+    );
+    let outside = RequestContext::new(&sink, EnvSnapshot::default());
+    assert_eq!(outside.caller(), CallerContext::from_vars(|_| None));
+    assert_ne!(ctx.caller(), outside.caller());
+}

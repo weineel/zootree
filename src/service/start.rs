@@ -6,8 +6,10 @@
 //! attach to, and the caller (the CLI today, a Daemon client later) performs it.
 
 use crate::config::global::{GlobalConfig, MultiplexerKind};
-use crate::config::workspace::{Event, WorkspaceConfig, WorkspaceStatus};
-use crate::config::ConfigManager;
+use crate::config::workspace::{
+    Event, StoredTerminalEnvironmentState, WorkspaceConfig, WorkspaceStatus,
+};
+use crate::config::{ConfigManager, WorkspaceLock};
 use crate::core::copy_files;
 use crate::core::git::GitOps;
 use crate::core::hook::{
@@ -25,6 +27,7 @@ use std::cell::RefCell;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartRequest {
@@ -162,9 +165,42 @@ pub(crate) fn agent_intent(run_agent: Option<Option<String>>) -> AgentIntent {
     }
 }
 
+/// How long persisting terminal state waits for another process's lifecycle
+/// mutation of the same Workspace.
+const TERMINAL_STATE_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// Persists the terminal state produced by an activation. The activation ran
+/// on a copy loaded earlier, and the Workspace lock was not held meanwhile (a
+/// foreground attach must never hold it), so another process may have moved
+/// the Workspace on. Under the lock this reloads the latest configuration,
+/// requires it to still be `in_progress` and writes back only
+/// `multiplexer_state`; every other field keeps the latest stored value.
+/// `held` is the caller's own lock when it already holds one (reopen).
+pub(crate) fn persist_terminal_state(
+    config_mgr: &ConfigManager,
+    name: &str,
+    stored_state: StoredTerminalEnvironmentState,
+    held: Option<&WorkspaceLock>,
+) -> Result<()> {
+    let _lock = match held {
+        Some(_) => None,
+        None => Some(config_mgr.lock_workspace_for(name, TERMINAL_STATE_LOCK_WAIT)?),
+    };
+    let (status, mut latest) = config_mgr.load_workspace(name)?;
+    if !matches!(status, WorkspaceStatus::InProgress) {
+        anyhow::bail!(
+            "workspace '{name}' is {} now (it changed while its terminal environment was being activated); terminal state not saved",
+            status.as_str()
+        );
+    }
+    latest.multiplexer_state = stored_state;
+    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &latest)
+}
+
 /// Activates the Workspace's terminal environment with the request's caller
-/// context, persists the resulting state, reports notices and warnings through
-/// the context and returns the attach the caller still has to perform.
+/// context, persists the resulting state (see [`persist_terminal_state`]),
+/// reports notices and warnings through the context and returns the attach
+/// the caller still has to perform.
 pub(crate) fn activate_terminal_environment<R: CommandRunner>(
     config_mgr: &ConfigManager,
     global: &GlobalConfig,
@@ -172,15 +208,19 @@ pub(crate) fn activate_terminal_environment<R: CommandRunner>(
     runner: &R,
     ctx: &RequestContext<'_>,
     agent_intent: AgentIntent,
+    held_lock: Option<&WorkspaceLock>,
 ) -> Result<Option<AttachRequest>> {
     let deferred = DeferInteractive::new(runner);
     let caller = CallerContext::from_vars(|name| ctx.env.get(name).map(str::to_string));
     let terminal_environment =
         TerminalEnvironment::with_caller(config_mgr, global, &deferred, &caller);
     let activation = terminal_environment.activate(workspace, agent_intent)?;
-    let mut updated = workspace.clone();
-    updated.multiplexer_state = activation.stored_state;
-    config_mgr.save_workspace(&WorkspaceStatus::InProgress, &updated)?;
+    persist_terminal_state(
+        config_mgr,
+        &workspace.name,
+        activation.stored_state,
+        held_lock,
+    )?;
     for notice in activation.notices {
         ctx.step(notice);
     }
@@ -450,6 +490,7 @@ pub fn start_workspace<R: CommandRunner>(
             runner,
             ctx,
             agent_intent(req.run_agent.clone()),
+            None,
         )
         .map_err(|error| {
             anyhow::anyhow!(
@@ -498,6 +539,7 @@ pub fn open_workspace<R: CommandRunner>(
         runner,
         ctx,
         AgentIntent::None,
+        None,
     )?;
     Ok(SessionOutcome {
         workspace: workspace.name,

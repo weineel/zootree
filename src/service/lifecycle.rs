@@ -7,7 +7,7 @@ use crate::core::git::GitOps;
 use crate::core::hook::{
     HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
 };
-use crate::core::terminal_environment::TerminalEnvironment;
+use crate::core::terminal_environment::{CallerContext, TerminalEnvironment};
 use crate::core::worktree_status::{
     ensure_required_worktrees_exist, repo_worktree_statuses, RepoWorktreeStatus,
 };
@@ -175,6 +175,7 @@ pub(crate) fn close_terminal_environment_with<R: CommandRunner>(
     global: &GlobalConfig,
     workspace: &WorkspaceConfig,
     runner: &R,
+    caller: &CallerContext,
 ) -> Vec<String> {
     match config_mgr.load_workspace(&workspace.name) {
         Ok((WorkspaceStatus::Done | WorkspaceStatus::Canceled, _)) => {}
@@ -193,7 +194,7 @@ pub(crate) fn close_terminal_environment_with<R: CommandRunner>(
         }
     }
 
-    let terminal_environment = TerminalEnvironment::new(config_mgr, global, runner);
+    let terminal_environment = TerminalEnvironment::with_caller(config_mgr, global, runner, caller);
     terminal_environment.close(workspace).warnings
 }
 
@@ -203,10 +204,11 @@ pub(crate) fn archive_canceled_workspace_and_close_with<R: CommandRunner>(
     from_status: &WorkspaceStatus,
     workspace: &mut WorkspaceConfig,
     runner: &R,
+    caller: &CallerContext,
 ) -> Result<Vec<String>> {
     archive_canceled_workspace(config_mgr, from_status, workspace)?;
     Ok(close_terminal_environment_with(
-        config_mgr, global, workspace, runner,
+        config_mgr, global, workspace, runner, caller,
     ))
 }
 
@@ -215,6 +217,7 @@ pub(crate) fn archive_done_workspace_and_close_with<R: CommandRunner>(
     global: &GlobalConfig,
     workspace: &mut WorkspaceConfig,
     runner: &R,
+    caller: &CallerContext,
 ) -> Result<Vec<String>> {
     workspace.events.push(Event {
         action: "done".into(),
@@ -228,7 +231,7 @@ pub(crate) fn archive_done_workspace_and_close_with<R: CommandRunner>(
         &WorkspaceStatus::Done,
     )?;
     Ok(close_terminal_environment_with(
-        config_mgr, global, workspace, runner,
+        config_mgr, global, workspace, runner, caller,
     ))
 }
 
@@ -423,8 +426,13 @@ pub fn done_workspace<R: CommandRunner>(
         }
     }
 
-    let warnings =
-        archive_done_workspace_and_close_with(config_mgr, &global, &mut workspace, runner)?;
+    let warnings = archive_done_workspace_and_close_with(
+        config_mgr,
+        &global,
+        &mut workspace,
+        runner,
+        &ctx.caller(),
+    )?;
     report_terminal_environment_warnings(ctx, &workspace.name, warnings);
 
     ctx.emit(ServiceEvent::Finished {
@@ -586,6 +594,7 @@ pub fn cancel_workspace<R: CommandRunner>(
         &status,
         &mut workspace,
         runner,
+        &ctx.caller(),
     )?;
     report_terminal_environment_warnings(ctx, &workspace.name, warnings);
 

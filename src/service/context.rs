@@ -1,3 +1,4 @@
+use crate::core::terminal_environment::CallerContext;
 use crate::runner::{CommandRunner, CommandSpec, OutputLine};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -120,6 +121,12 @@ impl<'a> RequestContext<'a> {
         self.events.emit(event);
     }
 
+    /// The caller's terminal context (zellij / herdr), built from the
+    /// request's environment snapshot instead of the host process's own.
+    pub fn caller(&self) -> CallerContext {
+        CallerContext::from_vars(|name| self.env.get(name).map(str::to_string))
+    }
+
     pub fn step(&self, message: impl Into<String>) {
         self.emit(ServiceEvent::Step(message.into()));
     }
@@ -136,7 +143,10 @@ impl<'a> RequestContext<'a> {
 
 /// Runner decorator that applies an [`EnvSnapshot`] to every command: snapshot
 /// variables are set (unless the spec already sets them) and whitelisted
-/// variables missing from the snapshot are removed.
+/// variables missing from the snapshot are removed. `PATH` is the exception:
+/// a snapshot without it keeps the host's `PATH` (ADR-0005), because a child
+/// without any `PATH` cannot find `git` or `zellij`. Variables outside the
+/// whitelist (HOME and so on) are never touched.
 pub struct EnvRunner<'a, R: CommandRunner> {
     inner: &'a R,
     env: &'a EnvSnapshot,
@@ -158,6 +168,7 @@ impl<'a, R: CommandRunner> EnvRunner<'a, R> {
                 Some(value) => {
                     env.insert(name.to_string(), value.to_string());
                 }
+                None if name == "PATH" => {}
                 None => {
                     if !env_remove.iter().any(|n| n == name) {
                         env_remove.push(name.to_string());

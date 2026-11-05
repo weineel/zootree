@@ -75,7 +75,7 @@ pub fn reopen_workspace<R: CommandRunner, P: ReopenPrompt>(
     let global = config_mgr.load_global_config()?;
     let name = req.name.clone();
 
-    let _workspace_lock = config_mgr.lock_workspace(&name)?;
+    let workspace_lock = config_mgr.lock_workspace(&name)?;
     let mut plan = build_reopen_plan(config_mgr, runner, &name, &req.options, prompt)?;
     ctx.emit(ServiceEvent::Started {
         operation: "reopen",
@@ -128,6 +128,7 @@ pub fn reopen_workspace<R: CommandRunner, P: ReopenPrompt>(
             runner,
             ctx,
             agent_intent(req.run_agent.clone()),
+            Some(&workspace_lock),
         )
         .map_err(|error| {
             anyhow::anyhow!(

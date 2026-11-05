@@ -135,6 +135,7 @@ fn socket_discovery_file_and_directory_are_private_to_the_user() {
 
     assert_eq!(mode(&daemon.paths.socket), 0o600);
     assert_eq!(mode(&daemon.paths.discovery), 0o600);
+    assert_eq!(mode(&daemon.paths.lock), 0o600);
     assert_eq!(mode(&daemon.paths.dir), 0o700);
 
     daemon.shutdown();
