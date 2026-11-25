@@ -190,7 +190,7 @@ zootree done --skip-repo docs
 zootree merge --repo api
 ```
 
-`done` 会先校验所有 repo（worktree 存在、无未提交改动、目标分支与源 checkout 可用），一次性汇总所有问题，之后才开始改动。校验通过后先合并所有选中的 repo，全部成功才统一清理 worktree。合并失败时所有 worktree 都会保留，半合并的源 checkout 会被回滚；再次运行 `done` 会跳过已合并的 repo。如果 Workspace 因缺失的 worktree 被卡住，用 `--skip-repo <repo>`（或 `--force`）。
+`done` 会先校验所有 repo（worktree 存在、无未提交改动、目标分支与源 checkout 可用），一次性汇总所有问题，之后才开始改动。校验通过后先合并所有选中的 repo，全部成功才统一清理 worktree。合并失败时所有 worktree 都会保留，半合并的源 checkout 会被回滚；再次运行 `done` 会跳过已合并的 repo。如果 Workspace 因缺失的 worktree 被卡住，用 `--skip-repo <repo>`；`--force` 不会放行缺失的 worktree。
 
 ## 命令参考
 
@@ -258,9 +258,9 @@ zootree done [name]                  # 完成工作空间
   --push                             # 推送
   --repo <repo>                      # 只合并该 repo（可重复），其余 repo 仍会被清理
   --skip-repo <repo>                 # 不合并该 repo（可重复，与 --repo 互斥）
-  --force                            # 强制执行
+  --force                            # 强制执行（不会放行缺失的 worktree）
 
-zootree merge [name]                 # 像 `done` 一样合并，但不清理、不完成
+zootree merge [name]                 # 像 `done` 一样合并（校验相同），但不清理、不完成
   --repo <repo> / --skip-repo <repo> # 选择 repo，规则同 `done`
   --push                             # 推送目标分支
   --strategy <squash|rebase|merge>

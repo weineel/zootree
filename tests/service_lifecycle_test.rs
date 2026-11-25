@@ -705,3 +705,132 @@ fn merge_does_not_read_the_configuration_of_unselected_repos() {
     };
     merge_workspace(&mgr, &runner, &ctx, &req).unwrap();
 }
+
+#[test]
+fn force_does_not_excuse_a_missing_worktree_of_a_repo_to_merge() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("force", &["api", "web"]);
+    std::fs::remove_dir_all(dir.join("web")).unwrap();
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    pad(&runner);
+    let req = DoneRequest {
+        name: "force".into(),
+        force: true,
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("web: worktree"), "{text}");
+    assert!(text.contains("--skip-repo web"), "{text}");
+    assert!(git_calls(&runner)
+        .iter()
+        .all(|c| !c.contains("--squash") && !c.contains("worktree remove")));
+    assert_eq!(
+        mgr.load_workspace("force").unwrap().0,
+        WorkspaceStatus::InProgress
+    );
+
+    // Leaving it out explicitly is accepted.
+    let runner = MockRunner::new();
+    pad(&runner);
+    let req = DoneRequest {
+        name: "force".into(),
+        force: true,
+        skip_repos: vec!["web".into()],
+        ..Default::default()
+    };
+    done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+}
+
+#[test]
+fn a_recorded_merge_with_a_missing_worktree_only_pushes_on_retry() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("pushed", &["api"]);
+    std::fs::remove_dir_all(dir.join("api")).unwrap();
+    let (_, mut ws) = mgr.load_workspace("pushed").unwrap();
+    ws.events.push(zootree::config::workspace::Event {
+        action: "merged".into(),
+        timestamp: "2026-06-29T10:00:00+08:00".into(),
+        detail: Some("api@h1".into()),
+    });
+    mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+        .unwrap();
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    runner.push_response(output("h1\n")); // preflight: branch head matches
+    runner.push_response(output("refs/heads/main\n")); // preflight: target
+    runner.push_response(output("t1\n")); // push: target head
+    pad(&runner);
+    let req = DoneRequest {
+        name: "pushed".into(),
+        push: true,
+        ..Default::default()
+    };
+    done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+
+    let calls = git_calls(&runner);
+    assert!(
+        calls.iter().any(|c| c.ends_with("push origin main")),
+        "{calls:?}"
+    );
+    assert!(calls.iter().all(|c| !c.contains("--squash")));
+    assert_eq!(
+        mgr.load_workspace("pushed").unwrap().0,
+        WorkspaceStatus::Done
+    );
+}
+
+#[test]
+fn rebase_records_the_branch_head_after_the_rebase() {
+    let (_tmp, mgr, _dir) = workspace_with_worktrees("rebase", &["api"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    preflight_ok(&runner, "before");
+    runner.push_response(output("")); // rebase
+    runner.push_response(output("")); // checkout
+    runner.push_response(output("")); // merge --ff-only
+    runner.push_response(output("after\n")); // branch head after the rebase
+    pad(&runner);
+    let req = DoneRequest {
+        name: "rebase".into(),
+        strategy: Some("rebase".into()),
+        ..Default::default()
+    };
+    done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+
+    let (_, ws) = mgr.load_workspace("rebase").unwrap();
+    let merged: Vec<_> = ws
+        .events
+        .iter()
+        .filter(|e| e.action == "merged")
+        .filter_map(|e| e.detail.clone())
+        .collect();
+    assert_eq!(merged, vec!["api@after".to_string()]);
+}
+
+#[test]
+fn tracked_changes_in_the_source_checkout_block_the_merge_with_a_reason() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("dirty", &["api"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    runner.push_response(output("h1\n")); // branch head
+    runner.push_response(output("")); // worktree is clean
+    runner.push_response(output("refs/heads/main\n")); // target branch exists
+    runner.push_response(output(" M tracked.rs\n")); // source checkout is dirty
+    pad(&runner);
+    let req = DoneRequest {
+        name: "dirty".into(),
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("uncommitted changes to tracked files"),
+        "{text}"
+    );
+    assert!(text.contains("same commit"), "{text}");
+    assert!(dir.join("api").exists());
+}

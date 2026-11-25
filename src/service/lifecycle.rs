@@ -372,18 +372,13 @@ fn preflight<R: CommandRunner>(
                 .unwrap_or(false);
 
         if !worktree_exists {
+            // Never forced: a repo that should be merged but has no worktree
+            // would silently be left out. Leaving it out must be explicit.
             if in_merge && !already_merged {
-                if force {
-                    ctx.warn(format!(
-                        "repo '{}': worktree {} is missing; not merged",
-                        entry.name, worktree_path
-                    ));
-                } else {
-                    problems.push(format!(
-                        "{}: worktree {} is missing (use --skip-repo {} to leave it out, or --force)",
-                        entry.name, worktree_path, entry.name
-                    ));
-                }
+                problems.push(format!(
+                    "{}: worktree {} is missing (use --skip-repo {} to leave it out of the merge)",
+                    entry.name, worktree_path, entry.name
+                ));
             }
         } else if (in_merge || clean) && !force {
             match git.has_uncommitted_changes(&worktree_path) {
@@ -408,7 +403,7 @@ fn preflight<R: CommandRunner>(
                     match git.has_tracked_changes(&repo_path) {
                         Ok(true) => problems.push(format!(
                             "{}: source checkout {} has uncommitted changes to tracked files; \
-                             cannot check out '{}'",
+                             they would end up in the same commit as the merge into '{}'",
                             entry.name, repo_path, target
                         )),
                         Ok(false) => {}
