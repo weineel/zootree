@@ -7,7 +7,8 @@ use zootree::config::ConfigManager;
 use zootree::runner::MockRunner;
 use zootree::service::context::CollectingSink;
 use zootree::service::lifecycle::{
-    cancel_workspace, done_workspace, CancelRequest, DoneRequest, UncommittedConfirmationRequired,
+    cancel_workspace, done_workspace, merge_workspace, CancelRequest, DoneRequest, MergeRequest,
+    UncommittedConfirmationRequired,
 };
 use zootree::service::{EnvSnapshot, RequestContext, ServiceEvent};
 
@@ -67,17 +68,69 @@ fn setup() -> (tempfile::TempDir, ConfigManager) {
     (tmp, mgr)
 }
 
-#[test]
-fn done_dry_run_emits_events_in_order_and_changes_nothing() {
+fn register_repo(mgr: &ConfigManager, name: &str) {
+    mgr.save_repo_config(
+        name,
+        &RepoConfig {
+            path: format!("/src/{name}"),
+            default_target_branch: Some("main".into()),
+            copy_files: Vec::new(),
+            hooks: Default::default(),
+            lazygit: None,
+        },
+    )
+    .unwrap();
+}
+
+/// A workspace whose worktree directories exist on disk.
+fn workspace_with_worktrees(
+    name: &str,
+    repos: &[&str],
+) -> (tempfile::TempDir, ConfigManager, std::path::PathBuf) {
     let (tmp, mgr) = setup();
-    let ws = workspace("dry", &tmp.path().join("ws"), &["api"]);
-    mgr.save_workspace(&WorkspaceStatus::InProgress, &ws)
+    let dir = tmp.path().join("ws");
+    for repo in repos {
+        register_repo(&mgr, repo);
+        std::fs::create_dir_all(dir.join(repo)).unwrap();
+    }
+    mgr.save_workspace(&WorkspaceStatus::InProgress, &workspace(name, &dir, repos))
         .unwrap();
+    (tmp, mgr, dir)
+}
+
+/// Responses for the read-only checks of one repository that merges cleanly:
+/// branch head, uncommitted check, target branch lookup, source status.
+fn preflight_ok(runner: &MockRunner, head: &str) {
+    runner.push_response(output(&format!("{head}\n")));
+    runner.push_response(output(""));
+    runner.push_response(output("refs/heads/main\n"));
+    runner.push_response(output(""));
+}
+
+/// Plain successes for everything after the scripted responses.
+fn pad(runner: &MockRunner) {
+    for _ in 0..30 {
+        runner.push_response(output(""));
+    }
+}
+
+fn git_calls(runner: &MockRunner) -> Vec<String> {
+    runner
+        .take_calls()
+        .into_iter()
+        .filter(|c| c.program == "git")
+        .map(|c| c.args.join(" "))
+        .collect()
+}
+
+#[test]
+fn done_dry_run_validates_then_prints_the_plan_and_changes_nothing() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("dry", &["api"]);
     let sink = CollectingSink::new();
     let ctx = RequestContext::new(&sink, snapshot());
     let runner = MockRunner::new();
+    preflight_ok(&runner, "h1");
 
-    // dry run still requires nothing from git
     let req = DoneRequest {
         name: "dry".into(),
         dry_run: true,
@@ -86,23 +139,212 @@ fn done_dry_run_emits_events_in_order_and_changes_nothing() {
     let outcome = done_workspace(&mgr, &runner, &ctx, &req).unwrap();
 
     assert!(outcome.dry_run);
+    let events: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter(|e| !matches!(e, ServiceEvent::Log(_)))
+        .collect();
     assert_eq!(
-        sink.events(),
+        events,
         vec![
             ServiceEvent::Started {
                 operation: "done",
                 workspace: "dry".into()
             },
             ServiceEvent::Step("dry run for workspace 'dry':".into()),
-            ServiceEvent::Step("  merge zootree/dry -> main".into()),
+            ServiceEvent::Step("  merge zootree/dry -> main (api)".into()),
             ServiceEvent::Step("  clean worktrees and workspace directory".into()),
         ]
     );
-    assert!(runner.take_calls().is_empty());
+    assert!(git_calls(&runner)
+        .iter()
+        .all(|c| !c.contains("merge") && !c.contains("worktree")));
+    assert!(dir.join("api").exists());
     assert_eq!(
         mgr.load_workspace("dry").unwrap().0,
         WorkspaceStatus::InProgress
     );
+}
+
+#[test]
+fn done_rejects_repo_and_skip_repo_together_and_unknown_names() {
+    let (_tmp, mgr, _dir) = workspace_with_worktrees("sel", &["api"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+
+    let both = DoneRequest {
+        name: "sel".into(),
+        repos: vec!["api".into()],
+        skip_repos: vec!["api".into()],
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &both).unwrap_err();
+    assert!(format!("{err:#}").contains("cannot be used together"));
+
+    let unknown = DoneRequest {
+        name: "sel".into(),
+        repos: vec!["nope".into()],
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &unknown).unwrap_err();
+    assert!(format!("{err:#}").contains("no repo(s) nope"));
+    assert!(runner.take_calls().is_empty());
+}
+
+#[test]
+fn failed_preflight_reports_every_problem_and_leaves_everything_untouched() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("pre", &["api", "web"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    preflight_ok(&runner, "h1");
+    // web: branch head, then a dirty worktree.
+    runner.push_response(output("h2\n"));
+    runner.push_response(output(" M file\n"));
+    pad(&runner);
+
+    let req = DoneRequest {
+        name: "pre".into(),
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("web: uncommitted changes"), "{text}");
+
+    assert!(git_calls(&runner)
+        .iter()
+        .all(|c| !c.contains(" merge ") && !c.contains("checkout") && !c.contains("worktree")));
+    assert!(dir.join("api").exists() && dir.join("web").exists());
+    assert_eq!(
+        mgr.load_workspace("pre").unwrap().0,
+        WorkspaceStatus::InProgress
+    );
+}
+
+#[test]
+fn a_failed_merge_keeps_every_worktree_and_a_retry_skips_what_already_merged() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("retry", &["api", "web"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let req = DoneRequest {
+        name: "retry".into(),
+        ..Default::default()
+    };
+
+    // First attempt: api merges, web's squash fails.
+    let runner = MockRunner::new();
+    preflight_ok(&runner, "h1");
+    preflight_ok(&runner, "h2");
+    runner.push_response(output("")); // api: checkout
+    runner.push_response(output("")); // api: merge --squash
+    runner.push_response(output("")); // api: diff --staged (nothing)
+    runner.push_response(output("h1\n")); // api: branch head, recorded
+    runner.push_response(output("")); // web: checkout
+    runner.push_response(failing_output("", "CONFLICT\n")); // web: merge --squash
+    pad(&runner); // rollback
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    assert!(format!("{err:#}").contains("CONFLICT"));
+    assert!(
+        git_calls(&runner)
+            .iter()
+            .any(|c| c.contains("reset --merge")),
+        "half-merged source checkout must be rolled back"
+    );
+    assert!(dir.join("api").exists() && dir.join("web").exists());
+    let (status, ws) = mgr.load_workspace("retry").unwrap();
+    assert_eq!(status, WorkspaceStatus::InProgress);
+    let merged: Vec<_> = ws
+        .events
+        .iter()
+        .filter(|e| e.action == "merged")
+        .filter_map(|e| e.detail.clone())
+        .collect();
+    assert_eq!(merged, vec!["api@h1".to_string()]);
+
+    // Retry: api is recognised as merged and not merged again.
+    let runner = MockRunner::new();
+    runner.push_response(output("h1\n")); // api: branch head (matches record)
+    runner.push_response(output("")); // api: uncommitted check
+    runner.push_response(output("refs/heads/main\n")); // api: target lookup
+    preflight_ok(&runner, "h2"); // web
+    pad(&runner);
+    let outcome = done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+    assert!(!outcome.dry_run);
+    let calls = git_calls(&runner);
+    assert_eq!(
+        calls.iter().filter(|c| c.contains("--squash")).count(),
+        1,
+        "only web is merged again: {calls:?}"
+    );
+    assert_eq!(
+        mgr.load_workspace("retry").unwrap().0,
+        WorkspaceStatus::Done
+    );
+    assert!(!dir.exists());
+}
+
+#[test]
+fn repos_not_selected_are_not_merged_but_are_still_cleaned() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("sub", &["api", "web"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    preflight_ok(&runner, "h1"); // api (selected)
+    runner.push_response(output("")); // web (not selected): uncommitted check
+    pad(&runner);
+    let req = DoneRequest {
+        name: "sub".into(),
+        skip_repos: vec!["web".into()],
+        ..Default::default()
+    };
+    done_workspace(&mgr, &runner, &ctx, &req).unwrap();
+
+    let calls = git_calls(&runner);
+    assert_eq!(calls.iter().filter(|c| c.contains("--squash")).count(), 1);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.contains("worktree remove"))
+            .count(),
+        2
+    );
+    assert!(!dir.exists());
+}
+
+#[test]
+fn merge_integrates_without_cleaning_completing_or_recording() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("mrg", &["api", "web"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    // Only the selected repo is checked: uncommitted, target, source status.
+    runner.push_response(output(""));
+    runner.push_response(output("refs/heads/main\n"));
+    runner.push_response(output(""));
+    pad(&runner);
+    let req = MergeRequest {
+        name: "mrg".into(),
+        repos: vec!["api".into()],
+        ..Default::default()
+    };
+    merge_workspace(&mgr, &runner, &ctx, &req).unwrap();
+
+    let calls = git_calls(&runner);
+    assert_eq!(calls.iter().filter(|c| c.contains("--squash")).count(), 1);
+    assert!(calls.iter().all(|c| !c.contains("worktree")));
+    assert!(dir.join("api").exists() && dir.join("web").exists());
+    let (status, ws) = mgr.load_workspace("mrg").unwrap();
+    assert_eq!(status, WorkspaceStatus::InProgress);
+    assert!(ws.events.is_empty());
+    let events = sink.events();
+    assert!(matches!(
+        events.first(),
+        Some(ServiceEvent::Started {
+            operation: "merge",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -435,4 +677,31 @@ fn request_context_builds_the_caller_context_from_the_snapshot() {
     let outside = RequestContext::new(&sink, EnvSnapshot::default());
     assert_eq!(outside.caller(), CallerContext::from_vars(|_| None));
     assert_ne!(ctx.caller(), outside.caller());
+}
+
+#[test]
+fn merge_does_not_read_the_configuration_of_unselected_repos() {
+    let (tmp, mgr) = setup();
+    let dir = tmp.path().join("ws");
+    register_repo(&mgr, "api");
+    std::fs::create_dir_all(dir.join("api")).unwrap();
+    // "web" has no repo configuration at all.
+    mgr.save_workspace(
+        &WorkspaceStatus::InProgress,
+        &workspace("scoped", &dir, &["api", "web"]),
+    )
+    .unwrap();
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    runner.push_response(output(""));
+    runner.push_response(output("refs/heads/main\n"));
+    runner.push_response(output(""));
+    pad(&runner);
+    let req = MergeRequest {
+        name: "scoped".into(),
+        repos: vec!["api".into()],
+        ..Default::default()
+    };
+    merge_workspace(&mgr, &runner, &ctx, &req).unwrap();
 }

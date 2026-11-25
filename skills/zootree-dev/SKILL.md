@@ -24,7 +24,7 @@ src/
 │   ├── remote.rs    # 命令行客户端模式：发现 Daemon（三态探测 + 协议/能力检查）、事件流等待、Ctrl-C、环境快照
 │   ├── operations.rs # operations cancel <id>：显式取消 Daemon 里的 Operation
 │   ├── create_flow.rs # create draft、当前 repo 发现、校验与 WorkspaceConfig 转换
-│   ├── workspace.rs # create/start/list/open/reopen/done/cancel
+│   ├── workspace.rs # create/start/list/open/reopen/done/merge/cancel
 │   ├── template.rs  # template list/save
 │   ├── prune.rs     # prune 清理
 │   ├── completions.rs # 生成 shell 补全脚本 (completions 子命令)
@@ -67,9 +67,9 @@ src/
 ├── daemon/          # 可选本机 Daemon（ADR-0006）：unix socket 上的 HTTP + JSON，核心保持同步
 │   ├── mod.rs       # start()/DaemonHandle、DaemonOptions、协议版本/能力串常量、单实例 flock、陈旧端点接管、Activity（空闲退出）、inspect()
 │   ├── endpoint.rs  # 端点命名（按大版本）、0600 发现文件、三态存活探测 Liveness
-│   ├── server.rs    # axum 路由与中间件（活动计数 → 鉴权 → 版本协商）、/status、/shutdown、只读端点、done/cancel（submit）、GET /events、空闲/信号退出
+│   ├── server.rs    # axum 路由与中间件（活动计数 → 鉴权 → 版本协商）、/status、/shutdown、只读端点、done/merge/cancel（submit）、GET /events、空闲/信号退出
 │   ├── mutations.rs # start/reopen/add-repo/create/prune/repo 登记与移除等其余修改端点
-│   ├── operations.rs # Operation 注册表（忙碌判定、保留策略）、OperationHandle/OperationSink、RunnerFactory/DynRunner、done/cancel 请求体与 Job
+│   ├── operations.rs # Operation 注册表（忙碌判定、保留策略）、OperationHandle/OperationSink、RunnerFactory/DynRunner、done/merge/cancel 请求体与 Job
 │   ├── cancel.rs    # POST /operations/{id}/cancel 与取消结果说明（canceled_info）
 │   ├── events.rs    # 全局事件流 GET /events（SSE）：EventHub 环形缓冲、序号、续传、resync、DaemonEvent、EventProducer、subscribe
 │   ├── watcher.rs   # 外部变化检测：ChangeDetector trait、FsDetector、Watcher 线程
@@ -90,7 +90,7 @@ src/
 │   ├── info.rs      # InfoApp + 格式化辅助函数
 │   └── prompt.rs    # TUI 通用确认 prompt
 ├── runner.rs        # CommandRunner trait + RealRunner + MockRunner
-├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/cancel，start.rs start/open/AttachRequest，reopen.rs，create.rs，add_repo.rs，prune.rs，repos.rs 仓库注册/移除）
+├── service/         # 服务层：生命周期“请求进、结果出”（context.rs 事件接口/EnvSnapshot/EnvRunner，lifecycle.rs done/merge/cancel（done 分阶段：预检 → 全部合并 → 全部清理，ADR-0007），start.rs start/open/AttachRequest，reopen.rs，create.rs，add_repo.rs，prune.rs，repos.rs 仓库注册/移除）
 └── tui.rs           # dialoguer 封装的交互式 UI 工具函数
 ```
 
@@ -119,7 +119,7 @@ pub struct MockRunner {     // 测试用
 
 ### Hook invocation 门面
 
-`src/service/` 是 CLI 与 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
+`src/service/` 是 CLI 与 Daemon 共用的服务层：函数接收请求对象和 `RequestContext`（`EventSink` 事件接口 + `EnvSnapshot` 环境快照），不得打印、不得进入交互、不依赖 clap 类型；缺少决定时返回错误（如 cancel 的 `UncommittedConfirmationRequired`，由 CLI 适配层提示后带 `confirmed_uncommitted` 重试）。子进程经 `EnvRunner` 套用快照白名单变量。`cli::workspace::handle_done` / `handle_merge` / `handle_cancel` / `handle_start` / `handle_open` / `handle_reopen` / `handle_create`、`cli::add_repo`、`cli::prune`、`cli::repo` 只做参数解析、交互向导/选择和事件打印（`CliEventSink`）；create 向导产出 `CreateDraft` 后交给 `create_workspace_from_draft`，缺 title/repos 时 `create_workspace` 直接报错。start/open/reopen（`start.rs`、`reopen.rs`）不进入前台 attach：终端环境的 `run_interactive` 被 `DeferInteractive` 记录，服务返回 `SessionOutcome.attach: Option<AttachRequest>`，由命令行用 `AttachRequest::run` 执行（Herdr attach 失败为警告，其他为错误）。终端环境的“是否已在 zellij/herdr 会话内”由 `TerminalEnvironment::with_caller(.., &CallerContext)` 注入，服务层从请求的 `EnvSnapshot` 构造（`CallerContext::from_vars`）；`TerminalEnvironment::new` 仍读本进程环境，仅供未经服务层的调用方。Zellij 的提示行经 `Activation.notices` 返回，不再直接 `println!`。start 失败回滚（`StartRollback`）随 start 迁入服务层。测试见 `tests/service_lifecycle_test.rs`、`tests/service_create_repo_test.rs`、`tests/service_start_test.rs`（临时配置目录 + `MockRunner`）。
 
 `src/core/hook.rs` 以类型化 `HookInvocation` 作为 Hook module 的唯一执行 interface。Workspace 与 repo invocation 分别通过 `for_workspace` / `for_repository` 构造；`HookStage`、`HookOperation` 和 `WorkspaceStatus` 明确执行阶段与持久化状态。repo 构造器接收 repo/global 两个候选 Hook，在 module 内统一执行 repo-first/global-fallback 并生成配置来源，调用者不能单独伪造 provenance。
 
@@ -187,10 +187,10 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 
 - `mod.rs`：`start()` 返回 `DaemonHandle`；单实例 flock、陈旧端点接管（只删确认已死的 socket）、`Claim::release` 只清理自己发布的文件；常量 `PROTOCOL_VERSION`、`MIN_COMPATIBLE_PROTOCOL_VERSION`、`CAPABILITIES`、`DEFAULT_IDLE_TIMEOUT`；`DaemonOptions`（端点名、空闲超时、`runner`、`operation_retention`、`event_retention`、`scan_interval`、`detector` 均可由测试替换）；`Activity`（打开的请求/事件流与运行中的 Operation 阻止空闲退出）；`inspect()`。
 - `endpoint.rs`：按大版本的端点名、0600 发现文件（原子写）、三态存活探测 `Liveness`（只有 refused/不存在算已死，超时与权限错误是 Unknown，绝不据此删除）。
-- `server.rs`：路由与中间件顺序（`track_activity` → `require_auth` → `negotiate_version`）、`/status`、`/shutdown`、只读处理器、`done`/`cancel` 与 `submit`、`GET /events`、空闲与信号退出。
+- `server.rs`：路由与中间件顺序（`track_activity` → `require_auth` → `negotiate_version`）、`/status`、`/shutdown`、只读处理器、`done`/`merge`/`cancel` 与 `submit`、`GET /events`、空闲与信号退出。
 - `api.rs`：只读 body 构造，复用 `cli::json_view` 与 `AgentCatalog`，不改字段。
 - `mutations.rs`：其余修改端点（start/reopen/add-repo/create/prune/repo 登记与移除），统一走其中的 `spawn`。
-- `operations.rs`：Operation 注册表（状态、累计输出、结果/错误、原子忙碌判定、保留最近 100 条或 24 小时、仅存内存）、`OperationHandle`（句柄未显式结束就被丢弃，即 worker panic，记为失败，Workspace 不会卡在忙碌）、`OperationSink`、`DynRunner`/`RunnerFactory`、`done`/`cancel` 请求体与 `Job`。服务错误映射：`WorkspaceBusy` → `busy`，`UncommittedConfirmationRequired` → `confirmation_required`（带 `repos`），其余 `operation_failed`（`message` 为完整错误链）。
+- `operations.rs`：Operation 注册表（状态、累计输出、结果/错误、原子忙碌判定、保留最近 100 条或 24 小时、仅存内存）、`OperationHandle`（句柄未显式结束就被丢弃，即 worker panic，记为失败，Workspace 不会卡在忙碌）、`OperationSink`、`DynRunner`/`RunnerFactory`、`done`/`merge`/`cancel` 请求体与 `Job`。服务错误映射：`WorkspaceBusy` → `busy`，`UncommittedConfirmationRequired` → `confirmation_required`（带 `repos`），其余 `operation_failed`（`message` 为完整错误链）。
 - `cancel.rs`：`POST /operations/{id}/cancel` 与取消结果说明 `canceled_info`。
 - `events.rs`：`EventHub`（环形缓冲 1000 条/10 分钟、序号、续传、resync）、`DaemonEvent`、`EventProducer` 接口、`subscribe`、`announce_workspace`/`announce_outcome`。
 - `watcher.rs`：外部变化检测，`ChangeDetector` trait（默认 `FsDetector`）、`Watcher` 线程。
@@ -201,7 +201,7 @@ Herdr mode 把一个 zootree workspace 映射为显式 named session 中的一�
 **开发约定**
 
 - 只读接口的 body 必须与对应 `--json` 完全相同；能力串 `read_api`。新增行为用新的能力串门控，新增字段/错误码/能力不升协议版本，删除方法、改字段语义或改鉴权才升。
-- 新增修改端点：构造 `operations::Job`（环境快照 + 同步服务调用）。`done`/`cancel` 经 `server::submit`（先校验 Workspace 存在），其余放进 `mutations.rs` 并在 `routes()` 注册、经其薄包装 `spawn`；二者最终都走唯一的 `server::spawn`，所以所有 Operation 种类自动获得取消令牌与取消感知的收尾（`fail_with`）。流程：校验 → `OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）→ `spawn_blocking`；服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入输出并扇出到事件流；调用 `events::announce_outcome` 先发 `workspace.changed`/`workspace.removed`/`repo.changed` 再发 `operation.finished`，所以新端点自动获得事件，不依赖扫描。请求体未知字段 400，缺必填字段在登记 Operation 前 400，绝不进入向导或提示。忙碌键：Workspace 名，或 `repo:<名>`。
+- 新增修改端点：构造 `operations::Job`（环境快照 + 同步服务调用）。`done`/`merge`/`cancel` 经 `server::submit`（先校验 Workspace 存在），其余放进 `mutations.rs` 并在 `routes()` 注册、经其薄包装 `spawn`；二者最终都走唯一的 `server::spawn`，所以所有 Operation 种类自动获得取消令牌与取消感知的收尾（`fail_with`）。流程：校验 → `OperationRegistry::start`（原子忙碌判定 + `Activity::begin_operation`）→ `spawn_blocking`；服务事件经 `OperationSink` → `OperationRegistry::record_event` 进入输出并扇出到事件流；调用 `events::announce_outcome` 先发 `workspace.changed`/`workspace.removed`/`repo.changed` 再发 `operation.finished`，所以新端点自动获得事件，不依赖扫描。请求体未知字段 400，缺必填字段在登记 Operation 前 400，绝不进入向导或提示。忙碌键：Workspace 名，或 `repo:<名>`。
 - 服务层不得提示、不得打印；缺少决定时返回类型化错误，由调用方带确认字段重试。Daemon 绝不执行前台 attach，`AttachRequest` 放进结果的 `attach`。
 - 环境快照：请求体 `env` 经 `EnvSnapshot::from_pairs` 过滤到 `SNAPSHOT_ENV_VARS` 白名单（7 个变量）；省略时用 `operations::snapshot` 里的 `EnvSnapshot::capture()`（Daemon 自身环境），不能得到空 PATH（`snapshot` 只有这一份，mutations 复用）。`EnvRunner` 对白名单变量按请求覆盖：快照缺失的变量在子进程里移除，`PATH` 例外保持继承（ADR-0005）；白名单之外的变量（`HOME` 等）沿用 Daemon 环境。`TerminalEnvironment` 的调用方上下文一律用 `with_caller` + `RequestContext::caller()`（done/cancel 关闭终端、add-repo 都是），不要在服务层用 `TerminalEnvironment::new`。
 - 终端状态落盘：start/open/reopen 激活终端后经 `start::persist_terminal_state` 保存，在 Workspace 锁内重新加载最新配置、确认仍为 in_progress、只改 `multiplexer_state`；前台 attach 不在服务层执行，所以不会长期持锁。reopen 已持锁，传入自己的锁。

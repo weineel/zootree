@@ -18,7 +18,8 @@ use super::{Activity, ActivityGuard};
 use crate::config::{ConfigManager, WorkspaceBusy};
 use crate::runner::{CancelToken, CommandRunner, CommandSpec, OutputLine};
 use crate::service::lifecycle::{
-    cancel_workspace, done_workspace, CancelRequest, DoneRequest, UncommittedConfirmationRequired,
+    cancel_workspace, done_workspace, merge_workspace, CancelRequest, DoneRequest, MergeRequest,
+    UncommittedConfirmationRequired,
 };
 use crate::service::{EnvSnapshot, EventSink, RequestContext, ServiceEvent};
 use anyhow::Result;
@@ -570,6 +571,20 @@ pub struct DoneBody {
     pub force: bool,
     pub skip_hooks: bool,
     pub dry_run: bool,
+    pub repos: Vec<String>,
+    pub skip_repos: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MergeBody {
+    pub env: Option<BTreeMap<String, String>>,
+    pub push: bool,
+    pub strategy: Option<String>,
+    pub force: bool,
+    pub dry_run: bool,
+    pub repos: Vec<String>,
+    pub skip_repos: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -608,11 +623,31 @@ pub fn done_job(name: &str, body: DoneBody) -> Job {
         force: body.force,
         skip_hooks: body.skip_hooks,
         dry_run: body.dry_run,
+        repos: body.repos,
+        skip_repos: body.skip_repos,
     };
     Job {
         env: snapshot(body.env),
         work: Box::new(move |mgr, runner, ctx| {
             Ok(outcome_json(&done_workspace(mgr, runner, ctx, &req)?))
+        }),
+    }
+}
+
+pub fn merge_job(name: &str, body: MergeBody) -> Job {
+    let req = MergeRequest {
+        name: name.to_string(),
+        push: body.push,
+        strategy: body.strategy,
+        force: body.force,
+        dry_run: body.dry_run,
+        repos: body.repos,
+        skip_repos: body.skip_repos,
+    };
+    Job {
+        env: snapshot(body.env),
+        work: Box::new(move |mgr, runner, ctx| {
+            Ok(outcome_json(&merge_workspace(mgr, runner, ctx, &req)?))
         }),
     }
 }

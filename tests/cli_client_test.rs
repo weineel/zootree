@@ -161,6 +161,8 @@ impl Home {
         self.register_repo("r1");
         self.workspace("pend", WorkspaceStatus::Pending, &["r1"]);
         self.workspace("prog", WorkspaceStatus::InProgress, &["r1"]);
+        // `done` validates worktrees before it plans anything.
+        std::fs::create_dir_all(self.path().join("ws/prog/r1")).unwrap();
         self.workspace("fin", WorkspaceStatus::Done, &["r1"]);
         self.workspace("gone", WorkspaceStatus::Canceled, &["r1"]);
     }
@@ -410,7 +412,7 @@ fn commands_through_the_daemon_print_what_they_print_locally() {
             ),
             same(&["repo", "remove", "r2"]),
             same(&["cancel", "pend"]),
-            same(&["done", "prog", "--dry-run", "--no-clean"]),
+            same(&["done", "prog", "--dry-run", "--no-merge", "--no-clean"]),
             same(&["prune", "--all"]),
             same(&["list", "--status", "done", "--status", "canceled"]),
             same(&[

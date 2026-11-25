@@ -158,6 +158,9 @@ zootree done my-ws --push
 zootree done my-ws --no-merge
 zootree done my-ws --no-clean
 zootree done my-ws --strategy squash  # squash/rebase/merge
+zootree done my-ws --repo api         # 只合并 api，其余 repo 不合并但仍清理
+zootree done my-ws --skip-repo docs   # 不合并 docs（--repo 与 --skip-repo 互斥）
+zootree merge my-ws --repo api        # 只合并，不清理、不完成
 ```
 
 ### 取消

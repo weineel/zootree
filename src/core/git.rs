@@ -73,6 +73,12 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Full object name of `revision` (used to tie records to a branch HEAD).
+    pub fn revision(&self, repo_path: &str, revision: &str) -> Result<String> {
+        let output = self.git(repo_path, vec!["rev-parse", "--verify", revision])?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     pub fn repo_root(&self, repo_path: &str) -> Result<String> {
         let output = self.git(repo_path, vec!["rev-parse", "--show-toplevel"])?;
         let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -231,6 +237,9 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         self.merge_with_worktree(repo_path, None, branch, target, strategy, message)
     }
 
+    /// Integrates `branch` into `target`. When a step fails after the
+    /// checkout, the half-integrated state is rolled back on a best-effort
+    /// basis so the Source checkout is not left mid-merge.
     pub fn merge_with_worktree(
         &self,
         repo_path: &str,
@@ -240,21 +249,70 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         strategy: Option<&str>,
         message: &str,
     ) -> Result<()> {
+        let started = std::cell::Cell::new(false);
+        let result = self.merge_steps(
+            repo_path,
+            branch_worktree_path,
+            branch,
+            target,
+            strategy,
+            message,
+            &started,
+        );
+        if result.is_err() && started.get() {
+            self.recover_failed_merge(repo_path, branch_worktree_path, strategy);
+        }
+        result
+    }
+
+    fn recover_failed_merge(
+        &self,
+        repo_path: &str,
+        branch_worktree_path: Option<&str>,
+        strategy: Option<&str>,
+    ) {
+        // Errors are ignored on purpose: the original failure is what matters.
+        let _ = match strategy {
+            Some("rebase") => match branch_worktree_path {
+                Some(worktree) => self.git(worktree, vec!["rebase", "--abort"]),
+                None => return,
+            },
+            Some("merge") => self.git(repo_path, vec!["merge", "--abort"]),
+            _ => self.git(repo_path, vec!["reset", "--merge"]),
+        };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn merge_steps(
+        &self,
+        repo_path: &str,
+        branch_worktree_path: Option<&str>,
+        branch: &str,
+        target: &str,
+        strategy: Option<&str>,
+        message: &str,
+        started: &std::cell::Cell<bool>,
+    ) -> Result<()> {
         match strategy {
             Some("rebase") => {
                 let branch_worktree_path = branch_worktree_path.ok_or_else(|| {
                     anyhow::anyhow!("rebase strategy requires branch worktree path")
                 })?;
+                started.set(true);
                 self.git(branch_worktree_path, vec!["rebase", target])?;
+                started.set(false);
                 self.git(repo_path, vec!["checkout", target])?;
+                started.set(true);
                 self.git(repo_path, vec!["merge", "--ff-only", branch])?;
             }
             Some("merge") => {
                 self.git(repo_path, vec!["checkout", target])?;
+                started.set(true);
                 self.git(repo_path, vec!["merge", branch])?;
             }
             _ => {
                 self.git(repo_path, vec!["checkout", target])?;
+                started.set(true);
                 // 默认使用 squash 方式
                 self.git(repo_path, vec!["merge", "--squash", branch])?;
                 // exit 1 表示有 staged 变更，exit 0 表示无变更（已是最新）
@@ -294,6 +352,16 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
         let flag = if force { "-D" } else { "-d" };
         self.git(repo_path, vec!["branch", flag, branch])?;
         Ok(())
+    }
+
+    /// Whether tracked files differ from HEAD (untracked files ignored).
+    /// Used to tell if a checkout of another branch would be refused.
+    pub fn has_tracked_changes(&self, repo_path: &str) -> Result<bool> {
+        let output = self.git(
+            repo_path,
+            vec!["status", "--porcelain", "--untracked-files=no"],
+        )?;
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
     }
 
     pub fn has_uncommitted_changes(&self, worktree_path: &str) -> Result<bool> {

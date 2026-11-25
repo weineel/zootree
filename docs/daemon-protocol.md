@@ -125,7 +125,8 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 | `POST /workspaces/{name}/start` | `multiplexer`、`no_multiplexer`、`run_agent` | `{workspace, dry_run, attach, agent_cli}` |
 | `POST /workspaces/{name}/reopen` | `multiplexer`、`from[]`（`current` 或 `REPO:BRANCH`）、`overwrite[]`、`run_agent`、`skip_hooks`、`no_multiplexer`、`dry_run` | 同 start |
 | `POST /workspaces/{name}/add-repo` | `repo`（必填）、`target_branch` | `{repo, workspace, target_branch, workspace_branch, worktree_path, terminal}`，`terminal` 为 `updated` 或 `absent` |
-| `POST /workspaces/{name}/done` | `no_merge`、`no_clean`、`push`、`strategy`（`squash`/`rebase`/`merge`）、`force`、`skip_hooks`、`dry_run` | `{workspace, dry_run}` |
+| `POST /workspaces/{name}/done` | `no_merge`、`no_clean`、`push`、`strategy`（`squash`/`rebase`/`merge`）、`force`、`skip_hooks`、`dry_run`、`repos[]`（只合并这些 repo）、`skip_repos[]`（不合并这些 repo；与 `repos` 互斥） | `{workspace, dry_run}` |
+| `POST /workspaces/{name}/merge` | `push`、`strategy`、`force`、`dry_run`、`repos[]`、`skip_repos[]`；只合并，不清理、不改生命周期状态、不触发 hook | `{workspace, dry_run}` |
 | `POST /workspaces/{name}/cancel` | `no_clean`、`force`、`skip_hooks`、`confirmed_uncommitted` | `{workspace, dry_run}` |
 | `DELETE /workspaces/{name}` | 仅 `env` | `{pruned: [name]}` |
 | `POST /repos` | `path`（必填）、`name`（缺省取路径的目录名）、`default_target_branch` | `{name, path}` |
@@ -157,7 +158,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 }
 ```
 
-- `kind`：`done`、`cancel`、`start`、`reopen`、`add-repo`、`create`、`prune`（`DELETE /workspaces/{name}`）、`repo-add`、`repo-remove`。
+- `kind`：`done`、`merge`、`cancel`、`start`、`reopen`、`add-repo`、`create`、`prune`（`DELETE /workspaces/{name}`）、`repo-add`、`repo-remove`。
 - `status`：`running`、`succeeded`、`failed`、`canceled`。
 - `output`：服务层事件累计的文本行（进度、子进程输出等，步骤开始/结束以 `==> 名`、`<== 名 ok|failed` 记录，警告带 `warning: ` 前缀）。`done`/`cancel` 的收尾摘要是最后一行。
 - `result`：仅 `succeeded` 时非空，结构见第 5 节。
@@ -189,7 +190,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 
 `stopped_at` 是最后报告的步骤名或 `null`；`cleanup` 为 `rolled_back`（start 的回滚已完成）、`rollback_failed` 或 `none`（该操作没有回滚，已完成的步骤保持生效）；`merge` 被杀时 `notes` 会提示目标仓库可能留有半完成的合并。取消到达时没有命令可打断，或工作先完成了，Operation 保持真实结果（`succeeded` / `failed`），`cancel_requested` 仍为 true。
 
-适用范围：所有类型的 Operation（`done`、`cancel`、`start`、`reopen`、`add-repo`、`create`、`prune`、`repo-add`、`repo-remove`）共用同一条提交路径，子进程命令都接入取消令牌。但只有 `start`（以及带 start 的 `create`）有回滚；其余类型被打断时 `cleanup` 为 `none`，已完成的步骤保持生效。没有子进程命令可打断的工作（例如纯配置读写）不会被中断，按真实结果结束。
+适用范围：所有类型的 Operation（`done`、`merge`、`cancel`、`start`、`reopen`、`add-repo`、`create`、`prune`、`repo-add`、`repo-remove`）共用同一条提交路径，子进程命令都接入取消令牌。但只有 `start`（以及带 start 的 `create`）有回滚；其余类型被打断时 `cleanup` 为 `none`，已完成的步骤保持生效。没有子进程命令可打断的工作（例如纯配置读写）不会被中断，按真实结果结束。
 
 ## 8. 事件流（`GET /events`）
 

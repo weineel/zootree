@@ -8,9 +8,7 @@ use crate::core::hook::{
     HookEngine, HookInvocation, HookOperation, HookStage, RepositoryHookContext,
 };
 use crate::core::terminal_environment::{CallerContext, TerminalEnvironment};
-use crate::core::worktree_status::{
-    ensure_required_worktrees_exist, repo_worktree_statuses, RepoWorktreeStatus,
-};
+use crate::core::worktree_status::{repo_worktree_statuses, RepoWorktreeStatus};
 use crate::runner::{CommandRunner, OutputLine};
 use crate::service::{EnvRunner, RequestContext, ServiceEvent};
 use anyhow::Result;
@@ -28,6 +26,25 @@ pub struct DoneRequest {
     pub force: bool,
     pub skip_hooks: bool,
     pub dry_run: bool,
+    /// Integrate only these Workspace repositories (empty: all). Mutually
+    /// exclusive with `skip_repos`. Unselected repositories are not
+    /// integrated but are still cleaned up.
+    pub repos: Vec<String>,
+    /// Integrate every Workspace repository except these.
+    pub skip_repos: Vec<String>,
+}
+
+/// Integrates Workspace repositories without completing the Workspace: no
+/// cleanup, no lifecycle change, no hooks, and no progress records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeRequest {
+    pub name: String,
+    pub push: bool,
+    pub strategy: Option<String>,
+    pub force: bool,
+    pub dry_run: bool,
+    pub repos: Vec<String>,
+    pub skip_repos: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -255,6 +272,311 @@ pub(crate) fn require_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Names of the Workspace repositories to integrate.
+fn select_repos(
+    workspace: &WorkspaceConfig,
+    repos: &[String],
+    skip_repos: &[String],
+) -> Result<Vec<String>> {
+    if !repos.is_empty() && !skip_repos.is_empty() {
+        anyhow::bail!("--repo and --skip-repo cannot be used together");
+    }
+    let known: Vec<&str> = workspace.repos.iter().map(|r| r.name.as_str()).collect();
+    let unknown: Vec<&str> = repos
+        .iter()
+        .chain(skip_repos)
+        .map(String::as_str)
+        .filter(|name| !known.contains(name))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "workspace '{}' has no repo(s) {} (repos: {})",
+            workspace.name,
+            unknown.join(", "),
+            known.join(", ")
+        );
+    }
+    Ok(workspace
+        .repos
+        .iter()
+        .map(|r| r.name.clone())
+        .filter(|name| {
+            if repos.is_empty() {
+                !skip_repos.contains(name)
+            } else {
+                repos.contains(name)
+            }
+        })
+        .collect())
+}
+
+/// One Workspace repository, checked and ready for the mutating phases.
+struct PreparedRepo {
+    name: String,
+    repo_path: String,
+    worktree_path: String,
+    /// Resolved integration target; `None` for repositories not integrated.
+    target_branch: Option<String>,
+    worktree_exists: bool,
+    /// Integration already recorded by an earlier `done` attempt.
+    already_merged: bool,
+    pre_remove_hook: Option<crate::config::global::HookValue>,
+}
+
+fn merged_marker(repo: &str, branch_head: &str) -> String {
+    format!("{repo}@{branch_head}")
+}
+
+fn has_record(workspace: &WorkspaceConfig, action: &str, marker: &str) -> bool {
+    workspace
+        .events
+        .iter()
+        .any(|e| e.action == action && e.detail.as_deref() == Some(marker))
+}
+
+/// Read-only validation of every repository involved, before any mutation.
+/// All problems are collected into one error.
+#[allow(clippy::too_many_arguments)]
+fn preflight<R: CommandRunner>(
+    config_mgr: &ConfigManager,
+    ctx: &RequestContext<'_>,
+    git: &GitOps<'_, R>,
+    workspace: &WorkspaceConfig,
+    merge_set: &[String],
+    clean: bool,
+    force: bool,
+    honor_records: bool,
+) -> Result<Vec<PreparedRepo>> {
+    let ws_dir = expanded_workspace_dir(workspace);
+    let mut problems = Vec::new();
+    let mut prepared = Vec::new();
+
+    for entry in &workspace.repos {
+        let in_merge = merge_set.contains(&entry.name);
+        let repo_config = match config_mgr.load_repo_config(&entry.name) {
+            Ok(c) => c,
+            Err(e) => {
+                problems.push(format!("{}: cannot load repo config: {e:#}", entry.name));
+                continue;
+            }
+        };
+        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
+        let worktree_path = format!("{}/{}", ws_dir, entry.name);
+        let worktree_exists = Path::new(&worktree_path).exists();
+
+        let already_merged = in_merge
+            && honor_records
+            && git
+                .revision(&repo_path, &workspace.branch)
+                .map(|head| has_record(workspace, "merged", &merged_marker(&entry.name, &head)))
+                .unwrap_or(false);
+
+        if !worktree_exists {
+            if in_merge && !already_merged {
+                if force {
+                    ctx.warn(format!(
+                        "repo '{}': worktree {} is missing; not merged",
+                        entry.name, worktree_path
+                    ));
+                } else {
+                    problems.push(format!(
+                        "{}: worktree {} is missing (use --skip-repo {} to leave it out, or --force)",
+                        entry.name, worktree_path, entry.name
+                    ));
+                }
+            }
+        } else if (in_merge || clean) && !force {
+            match git.has_uncommitted_changes(&worktree_path) {
+                Ok(true) => problems.push(format!(
+                    "{}: uncommitted changes in {} (commit or stash first, or use --force)",
+                    entry.name, worktree_path
+                )),
+                Ok(false) => {}
+                Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
+            }
+        }
+
+        let mut target_branch = None;
+        if in_merge && already_merged {
+            match resolve_target(ctx, git, entry, &repo_path) {
+                Ok(target) => target_branch = Some(target),
+                Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
+            }
+        } else if in_merge && worktree_exists {
+            match resolve_target(ctx, git, entry, &repo_path) {
+                Ok(target) => {
+                    match git.has_tracked_changes(&repo_path) {
+                        Ok(true) => problems.push(format!(
+                            "{}: source checkout {} has uncommitted changes to tracked files; \
+                             cannot check out '{}'",
+                            entry.name, repo_path, target
+                        )),
+                        Ok(false) => {}
+                        Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
+                    }
+                    target_branch = Some(target);
+                }
+                Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
+            }
+        }
+
+        prepared.push(PreparedRepo {
+            name: entry.name.clone(),
+            repo_path,
+            worktree_path,
+            target_branch,
+            worktree_exists,
+            already_merged,
+            pre_remove_hook: repo_config.hooks.pre_remove.clone(),
+        });
+    }
+
+    if problems.is_empty() {
+        Ok(prepared)
+    } else {
+        anyhow::bail!(
+            "workspace '{}' cannot proceed:\n  {}",
+            workspace.name,
+            problems.join("\n  ")
+        )
+    }
+}
+
+fn resolve_target<R: CommandRunner>(
+    ctx: &RequestContext<'_>,
+    git: &GitOps<'_, R>,
+    entry: &RepoEntry,
+    repo_path: &str,
+) -> Result<String> {
+    match &entry.target_branch {
+        Some(tb) if git.branch_exists(repo_path, tb)? => Ok(tb.clone()),
+        Some(tb) => {
+            let current = git.current_branch(repo_path)?;
+            ctx.warn(format!(
+                "target branch '{}' not found in repo '{}', using current branch '{}'",
+                tb, entry.name, current
+            ));
+            Ok(current)
+        }
+        None => {
+            let current = git.current_branch(repo_path)?;
+            ctx.warn(format!(
+                "target branch not configured for repo '{}', using current branch '{}'",
+                entry.name, current
+            ));
+            Ok(current)
+        }
+    }
+}
+
+/// Integrates (and optionally pushes) every prepared repository that has a
+/// target. With `record`, progress is persisted on the Workspace so a retry
+/// skips what already succeeded.
+#[allow(clippy::too_many_arguments)]
+fn integrate_repos<R: CommandRunner>(
+    config_mgr: &ConfigManager,
+    ctx: &RequestContext<'_>,
+    git: &GitOps<'_, R>,
+    workspace: &mut WorkspaceConfig,
+    prepared: &[PreparedRepo],
+    strategy: Option<&str>,
+    push: bool,
+    record: bool,
+) -> Result<()> {
+    let message = if workspace.description.is_empty() {
+        workspace.title.clone()
+    } else {
+        format!("{}\n\n{}", workspace.title, workspace.description)
+    };
+    for repo in prepared {
+        let Some(target) = &repo.target_branch else {
+            continue;
+        };
+        if repo.already_merged {
+            ctx.step(format!(
+                "  skipped {} (already merged {} -> {})",
+                repo.name, workspace.branch, target
+            ));
+        } else if repo.worktree_exists {
+            git_step(ctx, "merge", || {
+                git.merge_with_worktree(
+                    &repo.repo_path,
+                    Some(&repo.worktree_path),
+                    &workspace.branch,
+                    target,
+                    strategy,
+                    &message,
+                )
+            })?;
+            ctx.step(format!(
+                "  merged {} -> {} ({})",
+                workspace.branch, target, repo.name
+            ));
+            if record {
+                // After the merge: a rebase rewrites the branch head, and a
+                // retry compares against the head it will then see.
+                let branch_head = git.revision(&repo.repo_path, &workspace.branch)?;
+                let marker = merged_marker(&repo.name, &branch_head);
+                record_event(config_mgr, workspace, "merged", &marker)?;
+            }
+        } else {
+            continue;
+        }
+
+        if push {
+            let target_head = git.revision(&repo.repo_path, target)?;
+            let pushed = merged_marker(&repo.name, &target_head);
+            if record && has_record(workspace, "pushed", &pushed) {
+                ctx.step(format!("  skipped push {} ({})", target, repo.name));
+                continue;
+            }
+            git_step(ctx, "push", || git.push(&repo.repo_path, target))?;
+            ctx.step(format!("  pushed {} ({})", target, repo.name));
+            if record {
+                record_event(config_mgr, workspace, "pushed", &pushed)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_event(
+    config_mgr: &ConfigManager,
+    workspace: &mut WorkspaceConfig,
+    action: &str,
+    marker: &str,
+) -> Result<()> {
+    workspace.events.push(Event {
+        action: action.into(),
+        timestamp: Local::now().to_rfc3339(),
+        detail: Some(marker.into()),
+    });
+    config_mgr.save_workspace(&WorkspaceStatus::InProgress, workspace)
+}
+
+fn describe_plan(
+    ctx: &RequestContext<'_>,
+    workspace: &WorkspaceConfig,
+    merge_set: &[String],
+    clean: bool,
+) {
+    for entry in &workspace.repos {
+        if merge_set.contains(&entry.name) {
+            ctx.step(format!(
+                "  merge {} -> {} ({})",
+                workspace.branch,
+                entry.target_branch.as_deref().unwrap_or("*"),
+                entry.name
+            ));
+        } else {
+            ctx.step(format!("  skip merge of {}", entry.name));
+        }
+    }
+    if clean {
+        ctx.step("  clean worktrees and workspace directory");
+    }
+}
+
 pub fn done_workspace<R: CommandRunner>(
     config_mgr: &ConfigManager,
     runner: &R,
@@ -276,34 +598,37 @@ pub fn done_workspace<R: CommandRunner>(
     if !matches!(status, WorkspaceStatus::InProgress) {
         anyhow::bail!("workspace '{}' is not in_progress", name);
     }
+    let selected = select_repos(&workspace, &req.repos, &req.skip_repos)?;
+    let merge_set = if req.no_merge {
+        if !req.repos.is_empty() || !req.skip_repos.is_empty() {
+            ctx.warn("--no-merge given: --repo/--skip-repo select nothing to merge".to_string());
+        }
+        Vec::new()
+    } else {
+        selected
+    };
     ctx.emit(ServiceEvent::Started {
         operation: "done",
         workspace: name.clone(),
     });
 
     let ws_dir = expanded_workspace_dir(&workspace);
+    let clean = !req.no_clean;
+
+    // Validate everything before touching anything: a failure here leaves
+    // the Workspace exactly as it was, so `done` can simply be run again.
+    let prepared = preflight(
+        config_mgr, ctx, &git, &workspace, &merge_set, clean, req.force, true,
+    )?;
 
     if req.dry_run {
         ctx.step(format!("dry run for workspace '{}':", name));
-        if !req.no_merge {
-            for repo_entry in &workspace.repos {
-                ctx.step(format!(
-                    "  merge {} -> {}",
-                    workspace.branch,
-                    repo_entry.target_branch.as_deref().unwrap_or("*")
-                ));
-            }
-        }
-        if !req.no_clean {
-            ctx.step("  clean worktrees and workspace directory");
-        }
+        describe_plan(ctx, &workspace, &merge_set, clean);
         return Ok(LifecycleOutcome {
             workspace: name,
             dry_run: true,
         });
     }
-
-    ensure_required_worktrees_exist(&workspace)?;
 
     // pre_done hook
     if !req.skip_hooks {
@@ -320,83 +645,40 @@ pub fn done_workspace<R: CommandRunner>(
         }
     }
 
-    for repo_entry in &workspace.repos {
-        let repo_config = config_mgr.load_repo_config(&repo_entry.name)?;
-        let repo_path = shellexpand::tilde(&repo_config.path).into_owned();
-        let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
+    // Phase 1: integrate everything. Nothing is cleaned until all succeeded.
+    integrate_repos(
+        config_mgr,
+        ctx,
+        &git,
+        &mut workspace,
+        &prepared,
+        req.strategy.as_deref(),
+        req.push,
+        true,
+    )?;
 
-        let target_branch = match &repo_entry.target_branch {
-            Some(tb) if git.branch_exists(&repo_path, tb)? => tb.clone(),
-            Some(tb) => {
-                let current = git.current_branch(&repo_path)?;
-                ctx.warn(format!(
-                    "target branch '{}' not found in repo '{}', using current branch '{}'",
-                    tb, repo_entry.name, current
-                ));
-                current
-            }
-            None => {
-                let current = git.current_branch(&repo_path)?;
-                ctx.warn(format!(
-                    "target branch not configured for repo '{}', using current branch '{}'",
-                    repo_entry.name, current
-                ));
-                current
-            }
-        };
-
-        // Check uncommitted changes
-        if git.has_uncommitted_changes(&worktree_path)? && !req.force {
-            anyhow::bail!(
-                "repo '{}' has uncommitted changes in {}. Commit or stash first, or use --force",
-                repo_entry.name,
-                worktree_path
-            );
-        }
-
-        // Merge
-        if !req.no_merge {
-            let message = if workspace.description.is_empty() {
-                workspace.title.clone()
-            } else {
-                format!("{}\n\n{}", workspace.title, workspace.description)
-            };
-            git_step(ctx, "merge", || {
-                git.merge_with_worktree(
-                    &repo_path,
-                    Some(&worktree_path),
-                    &workspace.branch,
-                    &target_branch,
-                    req.strategy.as_deref(),
-                    &message,
-                )
-            })?;
-            ctx.step(format!(
-                "  merged {} -> {} ({})",
-                workspace.branch, target_branch, repo_entry.name
-            ));
-
-            if req.push {
-                git_step(ctx, "push", || git.push(&repo_path, &target_branch))?;
-                ctx.step(format!("  pushed {} ({})", target_branch, repo_entry.name));
-            }
-        }
-
-        // Clean
-        if !req.no_clean {
-            if !req.skip_hooks {
+    // Phase 2: clean up. Hooks for every repo first, then the removals.
+    if clean {
+        let cleanable: Vec<&PreparedRepo> = prepared.iter().filter(|p| p.worktree_exists).collect();
+        if !req.skip_hooks {
+            for repo in &cleanable {
+                let entry_target = workspace
+                    .repos
+                    .iter()
+                    .find(|r| r.name == repo.name)
+                    .and_then(|r| r.target_branch.as_deref());
                 if let Some(invocation) = HookInvocation::for_repository(
-                    repo_config.hooks.pre_remove.as_ref(),
+                    repo.pre_remove_hook.as_ref(),
                     global.hooks.pre_remove.as_ref(),
                     HookStage::PreRemove,
                     HookOperation::Done,
                     WorkspaceStatus::InProgress,
                     &workspace,
                     RepositoryHookContext {
-                        name: &repo_entry.name,
-                        source_dir: &repo_path,
-                        worktree_path: &worktree_path,
-                        target_branch: Some(&target_branch),
+                        name: &repo.name,
+                        source_dir: &repo.repo_path,
+                        worktree_path: &repo.worktree_path,
+                        target_branch: repo.target_branch.as_deref().or(entry_target),
                     },
                 ) {
                     if let Err(e) = run_hook(ctx, &hook_engine, &invocation, "pre_remove") {
@@ -404,25 +686,24 @@ pub fn done_workspace<R: CommandRunner>(
                     }
                 }
             }
-
-            if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, false) {
+        }
+        for repo in &cleanable {
+            if let Err(e) = git.worktree_remove(&repo.repo_path, &repo.worktree_path, false) {
                 ctx.warn(format!(
                     "failed to remove worktree '{}': {}",
-                    worktree_path, e
+                    repo.worktree_path, e
                 ));
             }
         }
-    }
-
-    // Remove workspace directory
-    if !req.no_clean && Path::new(&ws_dir).exists() {
-        if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
-            warn_or_bail(
-                ctx,
-                req.force,
-                e.into(),
-                "failed to remove workspace directory",
-            )?;
+        if Path::new(&ws_dir).exists() {
+            if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
+                warn_or_bail(
+                    ctx,
+                    req.force,
+                    e.into(),
+                    "failed to remove workspace directory",
+                )?;
+            }
         }
     }
 
@@ -439,6 +720,72 @@ pub fn done_workspace<R: CommandRunner>(
         operation: "done",
         workspace: name.clone(),
         summary: format!("workspace '{}' completed", name),
+    });
+    Ok(LifecycleOutcome {
+        workspace: name,
+        dry_run: false,
+    })
+}
+
+/// Integrates the selected repositories only. Leaves the Workspace in
+/// progress, keeps every worktree, runs no hooks, and records nothing.
+pub fn merge_workspace<R: CommandRunner>(
+    config_mgr: &ConfigManager,
+    runner: &R,
+    ctx: &RequestContext<'_>,
+    req: &MergeRequest,
+) -> Result<LifecycleOutcome> {
+    require_name(&req.name)?;
+    let runner = EnvRunner::new(runner, &ctx.env);
+    let runner = &runner;
+    config_mgr.load_global_config()?;
+    let log_git = |line: &OutputLine| ctx.log_line("git", line);
+    let git = GitOps::with_output(runner, &log_git);
+    let name = req.name.clone();
+
+    let _workspace_lock = config_mgr.lock_workspace(&name)?;
+    let (status, mut workspace) = config_mgr.load_workspace(&name)?;
+    if !matches!(status, WorkspaceStatus::InProgress) {
+        anyhow::bail!("workspace '{}' is not in_progress", name);
+    }
+    let merge_set = select_repos(&workspace, &req.repos, &req.skip_repos)?;
+    ctx.emit(ServiceEvent::Started {
+        operation: "merge",
+        workspace: name.clone(),
+    });
+
+    // Repositories outside the selection are not touched at all, not even
+    // their configuration is read.
+    let mut scoped = workspace.clone();
+    scoped.repos.retain(|r| merge_set.contains(&r.name));
+    let prepared = preflight(
+        config_mgr, ctx, &git, &scoped, &merge_set, false, req.force, false,
+    )?;
+
+    if req.dry_run {
+        ctx.step(format!("dry run for workspace '{}':", name));
+        describe_plan(ctx, &workspace, &merge_set, false);
+        return Ok(LifecycleOutcome {
+            workspace: name,
+            dry_run: true,
+        });
+    }
+
+    integrate_repos(
+        config_mgr,
+        ctx,
+        &git,
+        &mut workspace,
+        &prepared,
+        req.strategy.as_deref(),
+        req.push,
+        false,
+    )?;
+
+    ctx.emit(ServiceEvent::Finished {
+        operation: "merge",
+        workspace: name.clone(),
+        summary: format!("workspace '{}' merged", name),
     });
     Ok(LifecycleOutcome {
         workspace: name,
@@ -526,6 +873,9 @@ pub fn cancel_workspace<R: CommandRunner>(
     }
 
     if !req.no_clean {
+        // Hooks for every repo first, so a failing hook cannot leave some
+        // worktrees removed and others not.
+        let mut removals = Vec::new();
         for repo_entry in &workspace.repos {
             let worktree_path = format!("{}/{}", ws_dir, repo_entry.name);
             match cancel_repo_worktree_decision(repo_entry, &worktree_path, &worktree_statuses) {
@@ -565,7 +915,10 @@ pub fn cancel_workspace<R: CommandRunner>(
                     }
                 }
             }
+            removals.push((repo_path, worktree_path));
+        }
 
+        for (repo_path, worktree_path) in removals {
             if Path::new(&worktree_path).exists() {
                 if let Err(e) = git.worktree_remove(&repo_path, &worktree_path, req.force) {
                     ctx.warn(format!(

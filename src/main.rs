@@ -150,6 +150,9 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
         Commands::Done(args) => {
             zootree::cli::workspace::handle_done(&args)?;
         }
+        Commands::Merge(args) => {
+            zootree::cli::workspace::handle_merge(&args)?;
+        }
         Commands::Cancel(args) => {
             zootree::cli::workspace::handle_cancel(&args)?;
         }

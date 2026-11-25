@@ -49,6 +49,7 @@ fn router(state: AppState) -> Router {
         .route("/repos", get(repos))
         .route("/agents", get(agents))
         .route("/workspaces/{name}/done", post(done))
+        .route("/workspaces/{name}/merge", post(merge))
         .route("/workspaces/{name}/cancel", post(cancel))
         .route("/operations/{id}", get(operation))
         .route("/events", get(event_stream))
@@ -235,6 +236,21 @@ async fn done(
         "done",
         name.clone(),
         operations::done_job(&name, body),
+    )
+    .await
+}
+
+async fn merge(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = operations::parse_body(&body)?;
+    submit(
+        &state,
+        "merge",
+        name.clone(),
+        operations::merge_job(&name, body),
     )
     .await
 }

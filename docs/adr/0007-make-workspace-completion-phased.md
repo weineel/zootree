@@ -1,0 +1,7 @@
+# Make workspace completion phased
+
+`done` used to validate, integrate, and clean up one Workspace repository at a time. A failure in a later repository left earlier ones already merged and their worktrees deleted, and the next `done` then failed on the missing worktrees, so the Workspace could never complete. Completion is now phased across all repositories: validate everything read-only, run `pre_done`, integrate every selected repository, and only then clean up every worktree and archive. A failed integration stops before cleanup, keeps every worktree, and rolls back the half-integrated Source checkout on a best-effort basis.
+
+Integration progress is recorded as `merged` and `pushed` events carrying the repository and the Workspace branch (or target) head, so a retry skips what already succeeded but re-integrates a branch that has moved since. We rejected rolling back already-integrated repositories because a push cannot be undone, and rejected re-integrating on every retry because a squash cannot be detected as already applied and may conflict once the target has moved.
+
+`zootree merge` integrates without any of this state: it neither cleans, completes, runs hooks, nor records progress, so it can be repeated freely and a later `done` will integrate again (a no-op for an unchanged squash). Adding a hook stage for it would widen the hook configuration surface and is left for a separate decision.

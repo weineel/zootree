@@ -17,8 +17,8 @@ use crate::core::worktree_status::{missing_worktrees, repo_worktree_statuses, Re
 use crate::runner::RealRunner;
 use crate::service::create::create_workspace_from_draft;
 use crate::service::lifecycle::{
-    cancel_candidate_statuses, cancel_workspace, done_workspace, CancelRequest, DoneRequest,
-    UncommittedConfirmationRequired,
+    cancel_candidate_statuses, cancel_workspace, done_workspace, merge_workspace, CancelRequest,
+    DoneRequest, MergeRequest, UncommittedConfirmationRequired,
 };
 use crate::service::reopen::{reopen_workspace, ReopenRequest};
 use crate::service::start::{
@@ -973,6 +973,47 @@ pub struct DoneArgs {
     pub skip_hooks: bool,
     #[arg(long, help = "Show what would be done without executing")]
     pub dry_run: bool,
+    #[arg(
+        long,
+        conflicts_with = "skip_repo",
+        help = "Merge only this repo; others are not merged (repeatable)"
+    )]
+    pub repo: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with = "repo",
+        help = "Do not merge this repo (repeatable)"
+    )]
+    pub skip_repo: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct MergeArgs {
+    #[arg(
+        help = "Workspace name whose branches to merge (interactive if omitted)",
+        add = ArgValueCompleter::new(|c: &std::ffi::OsStr| complete_workspace(c, WorkspaceFilter::InProgress))
+    )]
+    pub name: Option<String>,
+    #[arg(long, help = "Push target branch to remote after merge")]
+    pub push: bool,
+    #[arg(long, value_enum, help = "Merge strategy (default: squash)")]
+    pub strategy: Option<MergeStrategy>,
+    #[arg(long, help = "Continue even if checks fail (errors become warnings)")]
+    pub force: bool,
+    #[arg(long, help = "Show what would be done without executing")]
+    pub dry_run: bool,
+    #[arg(
+        long,
+        conflicts_with = "skip_repo",
+        help = "Merge only this repo (repeatable)"
+    )]
+    pub repo: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with = "repo",
+        help = "Do not merge this repo (repeatable)"
+    )]
+    pub skip_repo: Vec<String>,
 }
 
 #[derive(Args)]
@@ -1040,6 +1081,8 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
             "force": args.force,
             "skip_hooks": args.skip_hooks,
             "dry_run": args.dry_run,
+            "repos": args.repo,
+            "skip_repos": args.skip_repo,
         });
         let options = ExecOptions {
             print_summary: true,
@@ -1062,10 +1105,68 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         force: args.force,
         skip_hooks: args.skip_hooks,
         dry_run: args.dry_run,
+        repos: args.repo.clone(),
+        skip_repos: args.skip_repo.clone(),
     };
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
     done_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
+    Ok(())
+}
+
+pub fn handle_merge(args: &MergeArgs) -> Result<()> {
+    let config_mgr = ConfigManager::new()?;
+    config_mgr.load_global_config()?;
+
+    let name = match &args.name {
+        Some(n) => n.clone(),
+        None => {
+            let in_progress = config_mgr.list_workspaces(Some(&[WorkspaceStatus::InProgress]))?;
+            if in_progress.is_empty() {
+                anyhow::bail!("no in_progress workspaces");
+            }
+            let names: Vec<String> = in_progress
+                .iter()
+                .map(|w| format!("{} - {}", w.name, w.title))
+                .collect();
+            let idx = tui::select_one("Select workspace to merge", &names)?;
+            in_progress[idx].name.clone()
+        }
+    };
+
+    if let Some(daemon) = remote::connect(&config_mgr) {
+        let body = json!({
+            "push": args.push,
+            "strategy": args.strategy.map(|s| s.as_str()),
+            "force": args.force,
+            "dry_run": args.dry_run,
+            "repos": args.repo,
+            "skip_repos": args.skip_repo,
+        });
+        let options = ExecOptions {
+            print_summary: true,
+            ..Default::default()
+        };
+        if daemon
+            .execute("POST", &format!("/workspaces/{name}/merge"), body, &options)?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+
+    let request = MergeRequest {
+        name,
+        push: args.push,
+        strategy: args.strategy.map(|s| s.as_str().to_string()),
+        force: args.force,
+        dry_run: args.dry_run,
+        repos: args.repo.clone(),
+        skip_repos: args.skip_repo.clone(),
+    };
+    let sink = CliEventSink;
+    let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
+    merge_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
     Ok(())
 }
 

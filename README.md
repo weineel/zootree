@@ -186,7 +186,21 @@ zootree done --no-clean
 
 # Merge and push
 zootree done --push
+
+# Merge only some repos (the others are cleaned up without merging)
+zootree done --repo api
+zootree done --skip-repo docs
+
+# Merge now, finish later (nothing is cleaned or recorded)
+zootree merge --repo api
 ```
+
+`done` validates every repo before it changes anything (worktree present, no uncommitted
+changes, target branch and source checkout usable) and reports all problems at once. It
+then merges every selected repo, and only after all merges succeeded cleans up all
+worktrees. If a merge fails, every worktree is kept and the half-merged source checkout is
+rolled back; running `done` again skips repos it already merged. For a Workspace stuck on a
+missing worktree, use `--skip-repo <repo>` (or `--force`).
 
 ## Command Reference
 
@@ -252,7 +266,14 @@ zootree done [name]                  # Finish a workspace
   --no-merge                         # Skip merge
   --no-clean                         # Skip cleanup
   --push                             # Push branches
+  --repo <repo>                      # Merge only this repo (repeatable); others are still cleaned up
+  --skip-repo <repo>                 # Do not merge this repo (repeatable; exclusive with --repo)
   --force                            # Force execution
+
+zootree merge [name]                 # Merge branches like `done`, without cleanup or completing
+  --repo <repo> / --skip-repo <repo> # Select repos, as for `done`
+  --push                             # Push target branches
+  --strategy <squash|rebase|merge>
 
 zootree cancel [name]                # Cancel an active workspace (pending or in-progress)
   --no-clean                         # Skip cleanup

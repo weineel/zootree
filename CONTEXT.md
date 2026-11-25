@@ -36,6 +36,10 @@ _Avoid_: Base branch, destination branch
 The development branch named by a Workspace and created in each Workspace repository. Its ownership is established only when zootree creates it.
 _Avoid_: Feature branch, worktree branch
 
+**Integrate**:
+Bring a Workspace branch into the Target branch of one Workspace repository using a chosen strategy. It never leaves the Registered repository's Source checkout in a half-integrated state after a failure. Completing a Workspace integrates the selected Workspace repositories, then cleans up and archives; integrating alone changes no lifecycle state.
+_Avoid_: Merge (reserved for the git operation and CLI command name), land
+
 **Hook stage**:
 A named point in a Workspace lifecycle where zootree invokes configured automation. Multiple Trigger operations may reach the same Hook stage.
 _Avoid_: Hook event, lifecycle event

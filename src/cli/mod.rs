@@ -67,6 +67,8 @@ pub enum Commands {
     Info(info::InfoArgs),
     #[command(about = "Complete a workspace (merge, clean up worktrees)")]
     Done(workspace::DoneArgs),
+    #[command(about = "Merge workspace branches into target branches without completing it")]
+    Merge(workspace::MergeArgs),
     #[command(about = "Cancel a workspace (discard worktrees without merging)")]
     Cancel(workspace::CancelArgs),
     #[command(about = "Manage workspace templates")]
