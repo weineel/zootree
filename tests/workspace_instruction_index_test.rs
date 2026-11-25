@@ -3,7 +3,7 @@ use std::fs;
 use tempfile::TempDir;
 use zootree::config::global::MultiplexerConfig;
 use zootree::config::workspace::{RepoEntry, WorkspaceConfig};
-use zootree::core::workspace_instruction_index;
+use zootree::core::workspace_instruction_index::{self, BOUNDARY_RULE};
 
 fn workspace(temp: &TempDir, repos: &[&str]) -> WorkspaceConfig {
     WorkspaceConfig {
@@ -41,9 +41,11 @@ fn sync_writes_agents_index_in_workspace_membership_order() {
 
     assert_eq!(
         fs::read_to_string(temp.path().join("AGENTS.md")).unwrap(),
-        "# Workspace repository instructions\n\n\
+        format!(
+            "{BOUNDARY_RULE}\n# Workspace repository instructions\n\n\
 - For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n\
 - For work in `backend/`, read and follow `backend/AGENTS.md`.\n"
+        )
     );
 }
 
@@ -61,12 +63,12 @@ fn sync_writes_claude_imports_for_existing_repo_files_only() {
 
     assert_eq!(
         fs::read_to_string(temp.path().join("CLAUDE.md")).unwrap(),
-        "@frontend/CLAUDE.md\n@docs/CLAUDE.md\n"
+        format!("{BOUNDARY_RULE}\n@frontend/CLAUDE.md\n@docs/CLAUDE.md\n")
     );
 }
 
 #[test]
-fn sync_replaces_existing_indexes_with_empty_files_when_only_nested_sources_exist() {
+fn sync_replaces_existing_indexes_with_boundary_rule_only_when_only_nested_sources_exist() {
     let temp = TempDir::new().unwrap();
     let workspace = workspace(&temp, &["frontend"]);
     fs::create_dir_all(temp.path().join("frontend/packages/app")).unwrap();
@@ -80,8 +82,14 @@ fn sync_replaces_existing_indexes_with_empty_files_when_only_nested_sources_exis
 
     workspace_instruction_index::sync(&workspace);
 
-    assert_eq!(fs::read(temp.path().join("AGENTS.md")).unwrap(), b"");
-    assert_eq!(fs::read(temp.path().join("CLAUDE.md")).unwrap(), b"");
+    assert_eq!(
+        fs::read_to_string(temp.path().join("AGENTS.md")).unwrap(),
+        BOUNDARY_RULE
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("CLAUDE.md")).unwrap(),
+        BOUNDARY_RULE
+    );
 }
 
 #[test]
@@ -96,6 +104,6 @@ fn sync_continues_with_claude_when_agents_replace_fails() {
 
     assert_eq!(
         fs::read_to_string(temp.path().join("CLAUDE.md")).unwrap(),
-        "@frontend/CLAUDE.md\n"
+        format!("{BOUNDARY_RULE}\n@frontend/CLAUDE.md\n")
     );
 }

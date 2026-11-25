@@ -233,8 +233,7 @@ fn start_emits_started_runs_post_start_with_in_progress_status_and_syncs_indexes
     );
     assert_eq!(
         std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
-        "# Workspace repository instructions\n\n\
-- For work in `api/`, read and follow `api/AGENTS.md`.\n"
+        format!("{}\n# Workspace repository instructions\n\n- For work in `api/`, read and follow `api/AGENTS.md`.\n", zootree::core::workspace_instruction_index::BOUNDARY_RULE)
     );
 }
 

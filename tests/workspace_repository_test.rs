@@ -215,16 +215,19 @@ fn add_syncs_workspace_instruction_indexes_after_membership_commit() {
     config_manager
         .save_repo_config("backend", &backend)
         .unwrap();
-    let expected_index = "# Workspace repository instructions\n\n\
+    let expected_index = format!(
+        "{}\n# Workspace repository instructions\n\n\
 - For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n\
-- For work in `backend/`, read and follow `backend/AGENTS.md`.\n";
+- For work in `backend/`, read and follow `backend/AGENTS.md`.\n",
+        zootree::core::workspace_instruction_index::BOUNDARY_RULE
+    );
     let runner = AssertIndexBeforeTerminalRunner {
         inner: CreatePathOnWorktreeAddRunner {
             inner: MockRunner::new(),
             worktree_path: workspace_dir.join("backend"),
         },
         index_path: workspace_dir.join("AGENTS.md"),
-        expected_index: expected_index.into(),
+        expected_index: expected_index.clone(),
     };
     runner
         .inner
@@ -312,8 +315,7 @@ fn add_restores_membership_and_indexes_when_terminal_mutation_fails() {
     assert!(saved.events.is_empty());
     assert_eq!(
         std::fs::read_to_string(workspace_dir.join("AGENTS.md")).unwrap(),
-        "# Workspace repository instructions\n\n\
-- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n"
+        format!("{}\n# Workspace repository instructions\n\n- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n", zootree::core::workspace_instruction_index::BOUNDARY_RULE)
     );
 }
 

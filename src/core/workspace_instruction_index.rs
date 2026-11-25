@@ -8,6 +8,10 @@ use crate::config::workspace::WorkspaceConfig;
 const AGENTS_FILE: &str = "AGENTS.md";
 const CLAUDE_FILE: &str = "CLAUDE.md";
 
+/// Written at the top of every generated index, even when no repository file exists.
+pub const BOUNDARY_RULE: &str = "Only modify files under the current directory. \
+To modify any file outside it, stop and ask the user first.\n";
+
 pub fn sync(workspace: &WorkspaceConfig) {
     let workspace_dir = expanded_workspace_dir(workspace);
     let indexes = [
@@ -52,10 +56,10 @@ fn render_agents_index(workspace_dir: &Path, workspace: &WorkspaceConfig) -> Str
         .collect::<Vec<_>>();
 
     if entries.is_empty() {
-        String::new()
+        BOUNDARY_RULE.to_string()
     } else {
         format!(
-            "# Workspace repository instructions\n\n{}\n",
+            "{BOUNDARY_RULE}\n# Workspace repository instructions\n\n{}\n",
             entries.join("\n")
         )
     }
@@ -70,9 +74,9 @@ fn render_claude_index(workspace_dir: &Path, workspace: &WorkspaceConfig) -> Str
         .collect::<Vec<_>>();
 
     if entries.is_empty() {
-        String::new()
+        BOUNDARY_RULE.to_string()
     } else {
-        format!("{}\n", entries.join("\n"))
+        format!("{BOUNDARY_RULE}\n{}\n", entries.join("\n"))
     }
 }
 

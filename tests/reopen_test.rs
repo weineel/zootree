@@ -496,8 +496,7 @@ fn reopen_syncs_workspace_instruction_indexes_when_hooks_are_skipped() {
     assert_eq!(
         std::fs::read_to_string(std::path::Path::new(&workspace.workspace_dir).join("AGENTS.md"))
             .unwrap(),
-        "# Workspace repository instructions\n\n\
-- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n"
+        format!("{}\n# Workspace repository instructions\n\n- For work in `frontend/`, read and follow `frontend/AGENTS.md`.\n", zootree::core::workspace_instruction_index::BOUNDARY_RULE)
     );
 }
 
