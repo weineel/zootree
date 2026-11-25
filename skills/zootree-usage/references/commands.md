@@ -161,7 +161,11 @@ zootree done my-ws --strategy squash  # squash/rebase/merge
 zootree done my-ws --repo api         # 只合并 api，其余 repo 不合并但仍清理
 zootree done my-ws --skip-repo docs   # 不合并 docs（--repo 与 --skip-repo 互斥）
 zootree merge my-ws --repo api        # 只合并，不清理、不完成
+zootree merge my-ws --dry-run         # 预览要切换分支的注册仓库
+zootree merge my-ws --yes             # 同意切换到列入合并计划的目标分支
 ```
+
+`done` 和 `merge` 只在选中仓库的当前分支与实际合入目标不同时要求确认。多个仓库统一确认，默认取消。非交互运行遇到分支切换时须提供全局 `--yes`。
 
 ### 取消
 
@@ -170,6 +174,7 @@ zootree merge my-ws --repo api        # 只合并，不清理、不完成
 ```bash
 zootree cancel my-ws
 zootree cancel my-ws --no-clean
+zootree cancel my-ws --yes           # 同意在有未提交改动时继续取消
 zootree cancel my-ws --force
 ```
 

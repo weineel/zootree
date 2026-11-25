@@ -7,7 +7,8 @@ use zootree::config::ConfigManager;
 use zootree::runner::MockRunner;
 use zootree::service::context::CollectingSink;
 use zootree::service::lifecycle::{
-    cancel_workspace, done_workspace, merge_workspace, CancelRequest, DoneRequest, MergeRequest,
+    cancel_workspace, done_workspace, merge_workspace, BranchSwitch,
+    BranchSwitchConfirmationRequired, CancelRequest, DoneRequest, MergeRequest,
     UncommittedConfirmationRequired,
 };
 use zootree::service::{EnvSnapshot, RequestContext, ServiceEvent};
@@ -98,12 +99,15 @@ fn workspace_with_worktrees(
     (tmp, mgr, dir)
 }
 
-/// Responses for the read-only checks of one repository that merges cleanly:
-/// branch head, uncommitted check, target branch lookup, source status.
 fn preflight_ok(runner: &MockRunner, head: &str) {
     runner.push_response(output(&format!("{head}\n")));
+    merge_preflight_on(runner, "main");
+}
+
+fn merge_preflight_on(runner: &MockRunner, current: &str) {
     runner.push_response(output(""));
     runner.push_response(output("refs/heads/main\n"));
+    runner.push_response(output(current));
     runner.push_response(output(""));
 }
 
@@ -129,7 +133,8 @@ fn done_dry_run_validates_then_prints_the_plan_and_changes_nothing() {
     let sink = CollectingSink::new();
     let ctx = RequestContext::new(&sink, snapshot());
     let runner = MockRunner::new();
-    preflight_ok(&runner, "h1");
+    runner.push_response(output("h1\n"));
+    merge_preflight_on(&runner, "release");
 
     let req = DoneRequest {
         name: "dry".into(),
@@ -152,6 +157,10 @@ fn done_dry_run_validates_then_prints_the_plan_and_changes_nothing() {
                 workspace: "dry".into()
             },
             ServiceEvent::Step("dry run for workspace 'dry':".into()),
+            ServiceEvent::Step(
+                "  api: source checkout release -> main (merging workspace branch zootree/dry)"
+                    .into()
+            ),
             ServiceEvent::Step("  merge zootree/dry -> main (api)".into()),
             ServiceEvent::Step("  clean worktrees and workspace directory".into()),
         ]
@@ -163,6 +172,173 @@ fn done_dry_run_validates_then_prints_the_plan_and_changes_nothing() {
     assert_eq!(
         mgr.load_workspace("dry").unwrap().0,
         WorkspaceStatus::InProgress
+    );
+}
+
+#[test]
+fn done_lists_all_branch_switches_before_hooks_or_mutations() {
+    let (_tmp, mgr, dir) = workspace_with_worktrees("switch", &["api", "web", "same", "skipped"]);
+    let mut global = GlobalConfig::default();
+    global.hooks.pre_done = Some(HookValue::Simple("pre-done".into()));
+    mgr.save_global_config(&global).unwrap();
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    for current in ["release", "HEAD", "main"] {
+        runner.push_response(output("h1\n"));
+        merge_preflight_on(&runner, current);
+    }
+    runner.push_response(output("")); // skipped worktree will still be cleaned
+    let req = DoneRequest {
+        name: "switch".into(),
+        skip_repos: vec!["skipped".into()],
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    let needed = err
+        .downcast_ref::<BranchSwitchConfirmationRequired>()
+        .unwrap();
+    assert_eq!(
+        needed.switches,
+        vec![
+            BranchSwitch {
+                repo: "api".into(),
+                current: "release".into(),
+                target: "main".into(),
+                workspace_branch: "zootree/switch".into(),
+            },
+            BranchSwitch {
+                repo: "web".into(),
+                current: "HEAD".into(),
+                target: "main".into(),
+                workspace_branch: "zootree/switch".into(),
+            },
+        ]
+    );
+    assert!(runner.take_calls().iter().all(|call| call.program == "git"
+        && matches!(
+            call.args[2].as_str(),
+            "rev-parse" | "status" | "for-each-ref"
+        )));
+    let (status, ws) = mgr.load_workspace("switch").unwrap();
+    assert_eq!(status, WorkspaceStatus::InProgress);
+    assert!(ws.events.is_empty());
+    assert!(dir.join("skipped").exists());
+}
+
+#[test]
+fn merge_rechecks_confirmed_switches_and_accepts_only_the_current_plan() {
+    let (_tmp, mgr, _) = workspace_with_worktrees("retry-switch", &["api"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let mut req = MergeRequest {
+        name: "retry-switch".into(),
+        force: true,
+        ..Default::default()
+    };
+    // --force skips the worktree status check but never approves a switch.
+    for current in ["release", "hotfix"] {
+        let runner = MockRunner::new();
+        runner.push_response(output("refs/heads/main\n"));
+        runner.push_response(output(current));
+        runner.push_response(output(""));
+        let err = merge_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+        let needed = err.downcast::<BranchSwitchConfirmationRequired>().unwrap();
+        assert_eq!(needed.switches.len(), 1);
+        assert_eq!(needed.switches[0].current, current);
+        req.confirmed_switches = needed.switches;
+        assert!(!git_calls(&runner)
+            .iter()
+            .any(|call| call.contains("checkout")));
+    }
+    for current_at_execution in ["hotfix", "main"] {
+        let runner = MockRunner::new();
+        runner.push_response(output("refs/heads/main\n"));
+        runner.push_response(output("hotfix"));
+        runner.push_response(output(""));
+        runner.push_response(output(current_at_execution));
+        pad(&runner);
+        merge_workspace(&mgr, &runner, &ctx, &req).unwrap();
+        assert!(git_calls(&runner)
+            .iter()
+            .any(|call| call.ends_with("checkout main")));
+    }
+}
+
+#[test]
+fn done_stops_before_rebase_if_pre_done_changed_the_source_checkout() {
+    let (_tmp, mgr, _) = workspace_with_worktrees("changed", &["api"]);
+    let mut global = GlobalConfig::default();
+    global.hooks.pre_done = Some(HookValue::Simple("git -C /src/api switch release".into()));
+    mgr.save_global_config(&global).unwrap();
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    preflight_ok(&runner, "h1");
+    runner.push_response(output("")); // pre_done
+    runner.push_response(output("refs/heads/release")); // branch after pre_done
+    let req = DoneRequest {
+        name: "changed".into(),
+        strategy: Some("rebase".into()),
+        ..Default::default()
+    };
+    let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();
+    // The CLI must not automatically replay a hook that already ran.
+    assert!(err
+        .downcast_ref::<BranchSwitchConfirmationRequired>()
+        .is_none());
+    assert!(err
+        .to_string()
+        .contains("source checkout changed from 'main' to 'release'"));
+    assert!(err.to_string().contains("target 'main'"));
+    assert!(err.to_string().contains("Run the command again"));
+    let calls = runner.take_calls();
+    assert_eq!(calls[calls.len() - 2].program, "sh");
+    assert!(calls
+        .last()
+        .unwrap()
+        .args
+        .iter()
+        .any(|arg| arg == "--symbolic-full-name"));
+    assert!(!calls.iter().any(|call| call.program == "git"
+        && call
+            .args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "checkout" | "rebase" | "merge"))));
+    let (status, ws) = mgr.load_workspace("changed").unwrap();
+    assert_eq!(status, WorkspaceStatus::InProgress);
+    assert!(ws.events.is_empty());
+}
+
+#[test]
+fn missing_target_falls_back_to_the_current_branch_without_a_switch() {
+    let (_tmp, mgr, _) = workspace_with_worktrees("fallback", &["api"]);
+    let sink = CollectingSink::new();
+    let ctx = RequestContext::new(&sink, snapshot());
+    let runner = MockRunner::new();
+    runner.push_response(output("")); // worktree clean
+    runner.push_response(output("")); // main does not exist locally
+    runner.push_response(output("release"));
+    runner.push_response(output("")); // source checkout clean
+    let req = MergeRequest {
+        name: "fallback".into(),
+        dry_run: true,
+        ..Default::default()
+    };
+    merge_workspace(&mgr, &runner, &ctx, &req).unwrap();
+    let events = sink.events();
+    assert!(events.contains(&ServiceEvent::Step(
+        "  merge zootree/fallback -> release (api)".into()
+    )));
+    assert!(!events.iter().any(
+        |event| matches!(event, ServiceEvent::Step(line) if line.contains("source checkout"))
+    ));
+    assert_eq!(
+        git_calls(&runner)
+            .iter()
+            .filter(|call| call.contains("--symbolic-full-name"))
+            .count(),
+        1
     );
 }
 
@@ -236,10 +412,12 @@ fn a_failed_merge_keeps_every_worktree_and_a_retry_skips_what_already_merged() {
     let runner = MockRunner::new();
     preflight_ok(&runner, "h1");
     preflight_ok(&runner, "h2");
+    runner.push_response(output("main")); // api: branch before integration
     runner.push_response(output("")); // api: checkout
     runner.push_response(output("")); // api: merge --squash
     runner.push_response(output("")); // api: diff --staged (nothing)
     runner.push_response(output("h1\n")); // api: branch head, recorded
+    runner.push_response(output("main")); // web: branch before integration
     runner.push_response(output("")); // web: checkout
     runner.push_response(failing_output("", "CONFLICT\n")); // web: merge --squash
     pad(&runner); // rollback
@@ -268,6 +446,7 @@ fn a_failed_merge_keeps_every_worktree_and_a_retry_skips_what_already_merged() {
     runner.push_response(output("")); // api: uncommitted check
     runner.push_response(output("refs/heads/main\n")); // api: target lookup
     preflight_ok(&runner, "h2"); // web
+    runner.push_response(output("main")); // web: branch before integration
     pad(&runner);
     let outcome = done_workspace(&mgr, &runner, &ctx, &req).unwrap();
     assert!(!outcome.dry_run);
@@ -292,6 +471,7 @@ fn repos_not_selected_are_not_merged_but_are_still_cleaned() {
     let runner = MockRunner::new();
     preflight_ok(&runner, "h1"); // api (selected)
     runner.push_response(output("")); // web (not selected): uncommitted check
+    runner.push_response(output("main")); // api: branch before integration
     pad(&runner);
     let req = DoneRequest {
         name: "sub".into(),
@@ -318,13 +498,11 @@ fn merge_integrates_without_cleaning_completing_or_recording() {
     let sink = CollectingSink::new();
     let ctx = RequestContext::new(&sink, snapshot());
     let runner = MockRunner::new();
-    // Only the selected repo is checked: uncommitted, target, source status.
-    runner.push_response(output(""));
-    runner.push_response(output("refs/heads/main\n"));
-    runner.push_response(output(""));
+    merge_preflight_on(&runner, "release");
     pad(&runner);
     let req = MergeRequest {
         name: "mrg".into(),
+        yes: true,
         repos: vec!["api".into()],
         ..Default::default()
     };
@@ -694,9 +872,8 @@ fn merge_does_not_read_the_configuration_of_unselected_repos() {
     let sink = CollectingSink::new();
     let ctx = RequestContext::new(&sink, snapshot());
     let runner = MockRunner::new();
-    runner.push_response(output(""));
-    runner.push_response(output("refs/heads/main\n"));
-    runner.push_response(output(""));
+    merge_preflight_on(&runner, "main");
+    runner.push_response(output("main")); // branch before integration
     pad(&runner);
     let req = MergeRequest {
         name: "scoped".into(),
@@ -788,6 +965,7 @@ fn rebase_records_the_branch_head_after_the_rebase() {
     let ctx = RequestContext::new(&sink, snapshot());
     let runner = MockRunner::new();
     preflight_ok(&runner, "before");
+    runner.push_response(output("main")); // branch before integration
     runner.push_response(output("")); // rebase
     runner.push_response(output("")); // checkout
     runner.push_response(output("")); // merge --ff-only
@@ -819,10 +997,12 @@ fn tracked_changes_in_the_source_checkout_block_the_merge_with_a_reason() {
     runner.push_response(output("h1\n")); // branch head
     runner.push_response(output("")); // worktree is clean
     runner.push_response(output("refs/heads/main\n")); // target branch exists
+    runner.push_response(output("release"));
     runner.push_response(output(" M tracked.rs\n")); // source checkout is dirty
     pad(&runner);
     let req = DoneRequest {
         name: "dirty".into(),
+        yes: true,
         ..Default::default()
     };
     let err = done_workspace(&mgr, &runner, &ctx, &req).unwrap_err();

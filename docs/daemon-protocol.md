@@ -44,7 +44,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
   "version": "0.1.4",
   "protocol_version": 1,
   "min_compatible_protocol_version": 1,
-  "capabilities": ["status", "read_api", "operations", "events"],
+  "capabilities": ["status", "read_api", "operations", "events", "branch_switch_confirmation"],
   "pid": 12345,
   "started_at": "2026-11-05T08:00:00+00:00"
 }
@@ -66,8 +66,11 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 | `read_api` | 只读接口 `GET /workspaces`、`/workspaces/{name}`、`/repos`、`/agents` |
 | `operations` | 所有修改请求、`GET /operations/{id}`、`POST /operations/{id}/cancel` |
 | `events` | `GET /events` |
+| `branch_switch_confirmation` | `done` 和 `merge` 在切换注册仓库当前分支前要求确认 |
 
 命令行客户端模式要求 `read_api`、`operations`、`events` 三者齐全。`web` 为预留名，在 Web 传输真正存在前不得声明（见 `docs/daemon-extension-points.md`）。
+
+`done` 和 `merge` 还要求 `branch_switch_confirmation`。连接到缺少这项能力的旧 Daemon 时，命令行在本进程执行这两个命令。
 
 ## 4. 错误信封与错误码
 
@@ -84,6 +87,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 | `client_too_new` | 426 | 客户端协议版本高于 Daemon 的 |
 | `protocol_version_required` | 426 | 请求缺少 `X-Zootree-Protocol-Version` 头（`/status` 除外的所有端点，含 `/events` 与 `/shutdown`）；鉴权先于此检查 |
 | `confirmation_required` | - | 仅出现在失败 Operation 的 `error` 里：`cancel` 遇到未提交改动，错误对象带 `repos`（有未提交改动的 repo 名数组）。带 `confirmed_uncommitted: true` 或 `force: true` 重试；Daemon 从不提示 |
+| `branch_switch_confirmation_required` | - | `done` 或 `merge` 的预检发现需要切换分支。失败 Operation 的 `error.switches` 列出所有待切换项 |
 | `operation_failed` | - | 仅出现在失败 Operation 的 `error` 里：操作已执行但失败，`message` 是完整错误链 |
 
 失败 Operation 的 `error.code` 还可能是 `busy`（命令行进程持有该 Workspace 的文件锁，此时没有 `operation_id`）和 `internal_error`（worker panic，Operation 被记为失败，Workspace 不会卡在忙碌）。
@@ -108,6 +112,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 | `POST /workspaces/{name}/reopen` | operations | reopen |
 | `POST /workspaces/{name}/add-repo` | operations | add-repo |
 | `POST /workspaces/{name}/done` | operations | done |
+| `POST /workspaces/{name}/merge` | operations | 只合并所选仓库，保留 worktree 和 Workspace 状态，跳过生命周期 hook |
 | `POST /workspaces/{name}/cancel` | operations | cancel（取消 Workspace，不是取消 Operation） |
 | `DELETE /workspaces/{name}` | operations | 删除一个已归档（done/canceled）的 Workspace，等价于 prune 一项 |
 | `POST /repos` | operations | 登记 repo |
@@ -125,8 +130,8 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 | `POST /workspaces/{name}/start` | `multiplexer`、`no_multiplexer`、`run_agent` | `{workspace, dry_run, attach, agent_cli}` |
 | `POST /workspaces/{name}/reopen` | `multiplexer`、`from[]`（`current` 或 `REPO:BRANCH`）、`overwrite[]`、`run_agent`、`skip_hooks`、`no_multiplexer`、`dry_run` | 同 start |
 | `POST /workspaces/{name}/add-repo` | `repo`（必填）、`target_branch` | `{repo, workspace, target_branch, workspace_branch, worktree_path, terminal}`，`terminal` 为 `updated` 或 `absent` |
-| `POST /workspaces/{name}/done` | `no_merge`、`no_clean`、`push`、`strategy`（`squash`/`rebase`/`merge`）、`force`、`skip_hooks`、`dry_run`、`repos[]`（只合并这些 repo）、`skip_repos[]`（不合并这些 repo；与 `repos` 互斥） | `{workspace, dry_run}` |
-| `POST /workspaces/{name}/merge` | `push`、`strategy`、`force`、`dry_run`、`repos[]`、`skip_repos[]`；只合并，不清理、不改生命周期状态、不触发 hook | `{workspace, dry_run}` |
+| `POST /workspaces/{name}/done` | `no_merge`、`no_clean`、`push`、`strategy`（`squash`/`rebase`/`merge`）、`force`、`skip_hooks`、`dry_run`、`repos[]`（只合并这些 repo）、`skip_repos[]`（跳过所列 repo，与 `repos` 互斥）、`yes`、`confirmed_switches[]` | `{workspace, dry_run}` |
+| `POST /workspaces/{name}/merge` | `push`、`strategy`、`force`、`dry_run`、`repos[]`、`skip_repos[]`、`yes`、`confirmed_switches[]` | `{workspace, dry_run}` |
 | `POST /workspaces/{name}/cancel` | `no_clean`、`force`、`skip_hooks`、`confirmed_uncommitted` | `{workspace, dry_run}` |
 | `DELETE /workspaces/{name}` | 仅 `env` | `{pruned: [name]}` |
 | `POST /repos` | `path`（必填）、`name`（缺省取路径的目录名）、`default_target_branch` | `{name, path}` |
@@ -134,6 +139,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 
 补充规则：
 
+- `done` 和 `merge` 默认使用 `yes: false` 和空的 `confirmed_switches`。收到 `branch_switch_confirmation_required` 时，Consumer 应向用户展示 `switches`。每项包含仓库名 `repo`、注册仓库当前分支 `current`、将切换到的目标分支 `target` 以及将合入该目标的 `workspace_branch`。用户同意后，在新请求的 `confirmed_switches` 中传回获准的项。Daemon 再次预检并核对每项，出现新的切换时再次要求确认。`yes: true` 一次授权该命令的所有分支切换，其他预检仍照常执行。`dry_run: true` 会输出计划，无需确认。
 - `attach` 是 `{program, args[]}` 或 `null`。Daemon 绝不执行前台 attach；start / reopen（以及带 `start` 的 create）把需要的 attach 交给 Consumer，由它在自己的终端执行。`agent_cli` 是 Workspace 上保存的 agent 命令。
 - `create` 缺 `title`、缺 `repos`/`template`、`repos` 为空数组且无 `template`、`name` 非法，都在登记 Operation 前返回 400，不会进入向导。`start: true` 时在同一个 Operation 里 create 后 start；start 失败则 Operation 失败，Workspace 保持 pending。
 - `reopen` 没有人可询问：缺少需要回答的选项（如 `from`）时 Operation 以 `operation_failed` 失败，错误信息指明缺哪个选项，且发生在任何修改之前。
@@ -162,7 +168,7 @@ HTTP/1.1 + JSON，事件流用 SSE，监听权限为 0600 的 unix socket。所�
 - `status`：`running`、`succeeded`、`failed`、`canceled`。
 - `output`：服务层事件累计的文本行（进度、子进程输出等，步骤开始/结束以 `==> 名`、`<== 名 ok|failed` 记录，警告带 `warning: ` 前缀）。`done`/`cancel` 的收尾摘要是最后一行。
 - `result`：仅 `succeeded` 时非空，结构见第 5 节。
-- `error`：仅 `failed` 时非空，`{code, message}`，`confirmation_required` 另带 `repos`。
+- `error`：仅 `failed` 时非空，`{code, message}`。`confirmation_required` 另带 `repos`，`branch_switch_confirmation_required` 另带 `switches`。
 - `canceled`：仅 `canceled` 时非空，见第 7 节。
 - `cancel_requested`：收到过取消请求即为 true，不论最终结果。
 - Operation 记录只存内存：保留最近 100 条已结束记录、至多 24 小时；运行中的从不淘汰。Daemon 重启后全部丢失。

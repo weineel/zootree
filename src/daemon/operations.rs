@@ -18,7 +18,8 @@ use super::{Activity, ActivityGuard};
 use crate::config::{ConfigManager, WorkspaceBusy};
 use crate::runner::{CancelToken, CommandRunner, CommandSpec, OutputLine};
 use crate::service::lifecycle::{
-    cancel_workspace, done_workspace, merge_workspace, CancelRequest, DoneRequest, MergeRequest,
+    cancel_workspace, done_workspace, merge_workspace, BranchSwitch,
+    BranchSwitchConfirmationRequired, CancelRequest, DoneRequest, MergeRequest,
     UncommittedConfirmationRequired,
 };
 use crate::service::{EnvSnapshot, EventSink, RequestContext, ServiceEvent};
@@ -66,7 +67,7 @@ impl OperationError {
     }
 
     /// Maps a service error to a wire error: lock conflicts become `busy`,
-    /// missing confirmation becomes `confirmation_required`, everything else
+    /// confirmation errors carry their specific retry details, everything else
     /// `operation_failed` with the complete error chain as the message.
     pub fn from_service_error(e: &anyhow::Error) -> Self {
         if let Some(busy) = e.chain().find_map(|c| c.downcast_ref::<WorkspaceBusy>()) {
@@ -84,6 +85,13 @@ impl OperationError {
                 code: error::CONFIRMATION_REQUIRED,
                 message: needed.to_string(),
                 details: Some(json!({ "repos": needed.repos })),
+            };
+        }
+        if let Some(needed) = e.downcast_ref::<BranchSwitchConfirmationRequired>() {
+            return Self {
+                code: error::BRANCH_SWITCH_CONFIRMATION_REQUIRED,
+                message: needed.to_string(),
+                details: Some(json!({ "switches": needed.switches })),
             };
         }
         Self {
@@ -564,6 +572,8 @@ pub fn snapshot(env: Option<BTreeMap<String, String>>) -> EnvSnapshot {
 #[serde(default, deny_unknown_fields)]
 pub struct DoneBody {
     pub env: Option<BTreeMap<String, String>>,
+    pub yes: bool,
+    pub confirmed_switches: Vec<BranchSwitch>,
     pub no_merge: bool,
     pub no_clean: bool,
     pub push: bool,
@@ -579,6 +589,8 @@ pub struct DoneBody {
 #[serde(default, deny_unknown_fields)]
 pub struct MergeBody {
     pub env: Option<BTreeMap<String, String>>,
+    pub yes: bool,
+    pub confirmed_switches: Vec<BranchSwitch>,
     pub push: bool,
     pub strategy: Option<String>,
     pub force: bool,
@@ -616,6 +628,8 @@ fn outcome_json(outcome: &crate::service::lifecycle::LifecycleOutcome) -> Value 
 pub fn done_job(name: &str, body: DoneBody) -> Job {
     let req = DoneRequest {
         name: name.to_string(),
+        yes: body.yes,
+        confirmed_switches: body.confirmed_switches,
         no_merge: body.no_merge,
         no_clean: body.no_clean,
         push: body.push,
@@ -637,6 +651,8 @@ pub fn done_job(name: &str, body: DoneBody) -> Job {
 pub fn merge_job(name: &str, body: MergeBody) -> Job {
     let req = MergeRequest {
         name: name.to_string(),
+        yes: body.yes,
+        confirmed_switches: body.confirmed_switches,
         push: body.push,
         strategy: body.strategy,
         force: body.force,

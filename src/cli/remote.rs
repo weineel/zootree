@@ -25,6 +25,7 @@ use crate::config::ConfigManager;
 use crate::daemon::client::{self, EventStream, HttpStatusError, RequestSent};
 use crate::daemon::PROTOCOL_VERSION;
 use crate::daemon::{self, DaemonOptions, DaemonState};
+use crate::service::lifecycle::BranchSwitch;
 use crate::service::start::AttachRequest;
 use crate::service::EnvSnapshot;
 use anyhow::{Context, Result};
@@ -48,6 +49,7 @@ const POLL_SLICE: Duration = Duration::from_millis(200);
 pub struct DaemonClient {
     socket: PathBuf,
     token: String,
+    supports_branch_switch_confirmation: bool,
 }
 
 /// Result of looking for a Daemon.
@@ -83,17 +85,18 @@ pub fn discover(base_dir: &Path) -> Connection {
         }
         Err(e) => return local(format!("{e:#}")),
     };
-    let client = DaemonClient {
-        socket: discovery.endpoint,
-        token: discovery.token,
-    };
+    let mut client = DaemonClient::new(discovery.endpoint, discovery.token);
     // `/status` is exempt from version negotiation, so it always answers.
     let status = match client.call("GET", "/status", None) {
         Ok(status) => status,
         Err(e) => return local(format!("daemon status unavailable: {e}")),
     };
     match check_status(&status) {
-        Ok(()) => Connection::Daemon(client),
+        Ok(()) => {
+            client.supports_branch_switch_confirmation =
+                offers(&status, daemon::BRANCH_SWITCH_CONFIRMATION);
+            Connection::Daemon(client)
+        }
         Err(Mismatch::Incompatible(notice)) => Connection::Local {
             notice: Some(notice),
         },
@@ -113,6 +116,11 @@ pub fn connect(config_mgr: &ConfigManager) -> Option<DaemonClient> {
             None
         }
     }
+}
+
+/// A Daemon that will check branch switches before executing done or merge.
+pub(crate) fn connect_for_integration(config_mgr: &ConfigManager) -> Option<DaemonClient> {
+    connect(config_mgr).filter(|daemon| daemon.supports_branch_switch_confirmation)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -140,15 +148,20 @@ pub fn check_status(status: &Value) -> Result<(), Mismatch> {
             min_compatible,
         )));
     }
-    let offered = status["capabilities"].as_array();
     for needed in REQUIRED_CAPABILITIES {
-        if !offered.is_some_and(|all| all.iter().any(|c| c == needed)) {
+        if !offers(status, needed) {
             return Err(Mismatch::Missing(format!(
                 "daemon does not offer the '{needed}' capability"
             )));
         }
     }
     Ok(())
+}
+
+fn offers(status: &Value, capability: &str) -> bool {
+    status["capabilities"]
+        .as_array()
+        .is_some_and(|all| all.iter().any(|c| c == capability))
 }
 
 fn incompatible_notice(daemon_version: &str, daemon_protocol: u64, min_compatible: u64) -> String {
@@ -235,7 +248,11 @@ impl Unavailable {
 
 impl DaemonClient {
     pub fn new(socket: PathBuf, token: String) -> Self {
-        Self { socket, token }
+        Self {
+            socket,
+            token,
+            supports_branch_switch_confirmation: false,
+        }
     }
 
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, CallError> {
@@ -509,6 +526,8 @@ pub struct OperationFailure {
     pub message: String,
     /// Repos named by a `confirmation_required` failure.
     pub repos: Vec<String>,
+    /// Checkout changes the user is being asked to approve.
+    pub switches: Vec<BranchSwitch>,
 }
 
 impl std::fmt::Display for OperationFailure {
@@ -673,23 +692,40 @@ impl DaemonClient {
                 }))
             }
             "canceled" => anyhow::bail!("{}", describe_canceled(&id, &end.canceled)),
-            _ => Err(anyhow::Error::new(OperationFailure {
-                id,
-                code: end.error["code"].as_str().unwrap_or("unknown").to_string(),
-                message: end.error["message"]
-                    .as_str()
-                    .unwrap_or("operation failed")
-                    .to_string(),
-                repos: end.error["repos"]
-                    .as_array()
-                    .map(|repos| {
-                        repos
-                            .iter()
-                            .filter_map(|r| r.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })),
+            _ => {
+                let code = end.error["code"].as_str().unwrap_or("unknown");
+                let switches = if code == daemon::error::BRANCH_SWITCH_CONFIRMATION_REQUIRED {
+                    let switches: Vec<BranchSwitch> =
+                        serde_json::from_value(end.error["switches"].clone()).with_context(
+                            || format!("operation {id} returned invalid branch switch details"),
+                        )?;
+                    anyhow::ensure!(
+                        !switches.is_empty(),
+                        "operation {id} requested confirmation without any branch switches"
+                    );
+                    switches
+                } else {
+                    Vec::new()
+                };
+                Err(anyhow::Error::new(OperationFailure {
+                    id,
+                    code: code.to_string(),
+                    message: end.error["message"]
+                        .as_str()
+                        .unwrap_or("operation failed")
+                        .to_string(),
+                    repos: end.error["repos"]
+                        .as_array()
+                        .map(|repos| {
+                            repos
+                                .iter()
+                                .filter_map(|r| r.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    switches,
+                }))
+            }
         }
     }
 

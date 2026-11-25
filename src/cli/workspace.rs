@@ -14,11 +14,13 @@ use crate::core::git::GitOps;
 use crate::core::reopen::{ReopenBase, ReopenOptions, ReopenPrompt, ReopenSources};
 use crate::core::repo_status::missing_registered_repo_names;
 use crate::core::worktree_status::{missing_worktrees, repo_worktree_statuses, RepoWorktreeStatus};
+use crate::daemon::error::BRANCH_SWITCH_CONFIRMATION_REQUIRED;
 use crate::runner::RealRunner;
 use crate::service::create::create_workspace_from_draft;
 use crate::service::lifecycle::{
-    cancel_candidate_statuses, cancel_workspace, done_workspace, merge_workspace, CancelRequest,
-    DoneRequest, MergeRequest, UncommittedConfirmationRequired,
+    cancel_candidate_statuses, cancel_workspace, done_workspace, merge_workspace, BranchSwitch,
+    BranchSwitchConfirmationRequired, CancelRequest, DoneRequest, LifecycleOutcome, MergeRequest,
+    UncommittedConfirmationRequired,
 };
 use crate::service::reopen::{reopen_workspace, ReopenRequest};
 use crate::service::start::{
@@ -1051,7 +1053,7 @@ impl EventSink for CliEventSink {
     }
 }
 
-pub fn handle_done(args: &DoneArgs) -> Result<()> {
+pub fn handle_done(args: &DoneArgs, yes: bool) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     // Load up front so a broken config fails before any selection prompt.
     config_mgr.load_global_config()?;
@@ -1072,32 +1074,11 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         }
     };
 
-    if let Some(daemon) = remote::connect(&config_mgr) {
-        let body = json!({
-            "no_merge": args.no_merge,
-            "no_clean": args.no_clean,
-            "push": args.push,
-            "strategy": args.strategy.map(|s| s.as_str()),
-            "force": args.force,
-            "skip_hooks": args.skip_hooks,
-            "dry_run": args.dry_run,
-            "repos": args.repo,
-            "skip_repos": args.skip_repo,
-        });
-        let options = ExecOptions {
-            print_summary: true,
-            ..Default::default()
-        };
-        if daemon
-            .execute("POST", &format!("/workspaces/{name}/done"), body, &options)?
-            .is_some()
-        {
-            return Ok(());
-        }
-    }
-
-    let request = DoneRequest {
+    let path = format!("/workspaces/{name}/done");
+    let mut request = DoneRequest {
         name,
+        yes,
+        confirmed_switches: Vec::new(),
         no_merge: args.no_merge,
         no_clean: args.no_clean,
         push: args.push,
@@ -1108,13 +1089,27 @@ pub fn handle_done(args: &DoneArgs) -> Result<()> {
         repos: args.repo.clone(),
         skip_repos: args.skip_repo.clone(),
     };
+    let body = json!({
+        "yes": request.yes,
+        "no_merge": request.no_merge,
+        "no_clean": request.no_clean,
+        "push": request.push,
+        "strategy": request.strategy,
+        "force": request.force,
+        "skip_hooks": request.skip_hooks,
+        "dry_run": request.dry_run,
+        "repos": request.repos,
+        "skip_repos": request.skip_repos,
+    });
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
-    done_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
-    Ok(())
+    execute_integration(&config_mgr, &path, body, |confirmed| {
+        request.confirmed_switches = confirmed;
+        done_workspace(&config_mgr, &RealRunner, &ctx, &request)
+    })
 }
 
-pub fn handle_merge(args: &MergeArgs) -> Result<()> {
+pub fn handle_merge(args: &MergeArgs, yes: bool) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.load_global_config()?;
 
@@ -1134,29 +1129,11 @@ pub fn handle_merge(args: &MergeArgs) -> Result<()> {
         }
     };
 
-    if let Some(daemon) = remote::connect(&config_mgr) {
-        let body = json!({
-            "push": args.push,
-            "strategy": args.strategy.map(|s| s.as_str()),
-            "force": args.force,
-            "dry_run": args.dry_run,
-            "repos": args.repo,
-            "skip_repos": args.skip_repo,
-        });
-        let options = ExecOptions {
-            print_summary: true,
-            ..Default::default()
-        };
-        if daemon
-            .execute("POST", &format!("/workspaces/{name}/merge"), body, &options)?
-            .is_some()
-        {
-            return Ok(());
-        }
-    }
-
-    let request = MergeRequest {
+    let path = format!("/workspaces/{name}/merge");
+    let mut request = MergeRequest {
         name,
+        yes,
+        confirmed_switches: Vec::new(),
         push: args.push,
         strategy: args.strategy.map(|s| s.as_str().to_string()),
         force: args.force,
@@ -1164,13 +1141,74 @@ pub fn handle_merge(args: &MergeArgs) -> Result<()> {
         repos: args.repo.clone(),
         skip_repos: args.skip_repo.clone(),
     };
+    let body = json!({
+        "yes": request.yes,
+        "push": request.push,
+        "strategy": request.strategy,
+        "force": request.force,
+        "dry_run": request.dry_run,
+        "repos": request.repos,
+        "skip_repos": request.skip_repos,
+    });
     let sink = CliEventSink;
     let ctx = RequestContext::new(&sink, EnvSnapshot::capture());
-    merge_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
-    Ok(())
+    execute_integration(&config_mgr, &path, body, |confirmed| {
+        request.confirmed_switches = confirmed;
+        merge_workspace(&config_mgr, &RealRunner, &ctx, &request)
+    })
 }
 
-pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
+/// A confirmation authorizes only the displayed checkouts. On retry both
+/// local and Daemon execution run preflight again with that exact list.
+fn execute_integration(
+    config_mgr: &ConfigManager,
+    path: &str,
+    mut body: Value,
+    mut run_locally: impl FnMut(Vec<BranchSwitch>) -> Result<LifecycleOutcome>,
+) -> Result<()> {
+    let mut daemon = remote::connect_for_integration(config_mgr);
+    let options = ExecOptions {
+        print_summary: true,
+        ..Default::default()
+    };
+    let mut confirmed = Vec::new();
+    loop {
+        let required = if let Some(client) = &daemon {
+            body["confirmed_switches"] = json!(confirmed);
+            match client.execute("POST", path, body.clone(), &options) {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {
+                    daemon = None;
+                    continue;
+                }
+                Err(error) => {
+                    let failure = error.downcast::<OperationFailure>()?;
+                    if failure.code != BRANCH_SWITCH_CONFIRMATION_REQUIRED {
+                        return Err(failure.into());
+                    }
+                    BranchSwitchConfirmationRequired {
+                        switches: failure.switches,
+                    }
+                }
+            }
+        } else {
+            match run_locally(confirmed.clone()) {
+                Ok(_) => return Ok(()),
+                Err(error) => error.downcast::<BranchSwitchConfirmationRequired>()?,
+            }
+        };
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("{required}\nRun again with --yes to accept the listed branch switches.");
+        }
+        eprintln!("{required}");
+        if !tui::confirm("Switch the listed source checkouts and continue?", false)? {
+            return Err(crate::tui_app::CancelledByUser.into());
+        }
+        confirmed = required.switches;
+    }
+}
+
+pub fn handle_cancel(args: &CancelArgs, yes: bool) -> Result<()> {
     let config_mgr = ConfigManager::new()?;
     config_mgr.load_global_config()?;
 
@@ -1191,7 +1229,7 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
     };
 
     if let Some(daemon) = remote::connect(&config_mgr) {
-        if cancel_through_daemon(&daemon, &name, args)? {
+        if cancel_through_daemon(&daemon, &name, args, yes)? {
             return Ok(());
         }
     }
@@ -1210,14 +1248,7 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
             let Some(needed) = error.downcast_ref::<UncommittedConfirmationRequired>() else {
                 return Err(error);
             };
-            for repo in &needed.repos {
-                if !tui::confirm(
-                    &format!("repo '{}' has uncommitted changes. Continue?", repo),
-                    false,
-                )? {
-                    anyhow::bail!("canceled by user");
-                }
-            }
+            confirm_uncommitted(&needed.repos, yes)?;
             request.confirmed_uncommitted = true;
             cancel_workspace(&config_mgr, &RealRunner, &ctx, &request)?;
             Ok(())
@@ -1229,7 +1260,12 @@ pub fn handle_cancel(args: &CancelArgs) -> Result<()> {
 /// Cancels through the Daemon. The Daemon never asks questions: when it
 /// reports uncommitted changes the question is put here, then the request is
 /// sent again with the answer. `false`: the Daemon could not take it.
-fn cancel_through_daemon(daemon: &DaemonClient, name: &str, args: &CancelArgs) -> Result<bool> {
+fn cancel_through_daemon(
+    daemon: &DaemonClient,
+    name: &str,
+    args: &CancelArgs,
+    yes: bool,
+) -> Result<bool> {
     let path = format!("/workspaces/{name}/cancel");
     let options = ExecOptions {
         print_summary: true,
@@ -1253,18 +1289,32 @@ fn cancel_through_daemon(daemon: &DaemonClient, name: &str, args: &CancelArgs) -
                 let Some(repos) = needed else {
                     return Err(error);
                 };
-                for repo in &repos {
-                    if !tui::confirm(
-                        &format!("repo '{}' has uncommitted changes. Continue?", repo),
-                        false,
-                    )? {
-                        anyhow::bail!("canceled by user");
-                    }
-                }
+                confirm_uncommitted(&repos, yes)?;
                 confirmed = true;
             }
         }
     }
+}
+
+fn confirm_uncommitted(repos: &[String], yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "Uncommitted changes in {}. Run again with --yes to continue canceling.",
+            repos.join(", ")
+        );
+    }
+    for repo in repos {
+        if !tui::confirm(
+            &format!("repo '{}' has uncommitted changes. Continue?", repo),
+            false,
+        )? {
+            anyhow::bail!("canceled by user");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

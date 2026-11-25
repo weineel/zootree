@@ -13,6 +13,7 @@ use crate::runner::{CommandRunner, OutputLine};
 use crate::service::{EnvRunner, RequestContext, ServiceEvent};
 use anyhow::Result;
 use chrono::Local;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -26,6 +27,10 @@ pub struct DoneRequest {
     pub force: bool,
     pub skip_hooks: bool,
     pub dry_run: bool,
+    /// Approve all Source checkout branch switches for this operation.
+    pub yes: bool,
+    /// Switches approved by the caller after an earlier read-only preflight.
+    pub confirmed_switches: Vec<BranchSwitch>,
     /// Integrate only these Workspace repositories (empty: all). Mutually
     /// exclusive with `skip_repos`. Unselected repositories are not
     /// integrated but are still cleaned up.
@@ -43,9 +48,46 @@ pub struct MergeRequest {
     pub strategy: Option<String>,
     pub force: bool,
     pub dry_run: bool,
+    pub yes: bool,
+    pub confirmed_switches: Vec<BranchSwitch>,
     pub repos: Vec<String>,
     pub skip_repos: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchSwitch {
+    pub repo: String,
+    pub current: String,
+    pub target: String,
+    pub workspace_branch: String,
+}
+
+impl std::fmt::Display for BranchSwitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: source checkout {} -> {} (merging workspace branch {})",
+            self.repo, self.current, self.target, self.workspace_branch
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchSwitchConfirmationRequired {
+    pub switches: Vec<BranchSwitch>,
+}
+
+impl std::fmt::Display for BranchSwitchConfirmationRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Source checkouts will stay on their target branches after integration. Confirm these branch switches:")?;
+        for switch in &self.switches {
+            write!(f, "\n  {switch}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BranchSwitchConfirmationRequired {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CancelRequest {
@@ -317,6 +359,7 @@ struct PreparedRepo {
     worktree_path: String,
     /// Resolved integration target; `None` for repositories not integrated.
     target_branch: Option<String>,
+    branch_switch: Option<BranchSwitch>,
     worktree_exists: bool,
     /// Integration already recorded by an earlier `done` attempt.
     already_merged: bool,
@@ -392,23 +435,27 @@ fn preflight<R: CommandRunner>(
         }
 
         let mut target_branch = None;
-        if in_merge && already_merged {
-            match resolve_target(ctx, git, entry, &repo_path) {
-                Ok(target) => target_branch = Some(target),
-                Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
-            }
-        } else if in_merge && worktree_exists {
-            match resolve_target(ctx, git, entry, &repo_path) {
-                Ok(target) => {
-                    match git.has_tracked_changes(&repo_path) {
-                        Ok(true) => problems.push(format!(
-                            "{}: source checkout {} has uncommitted changes to tracked files; \
-                             they would end up in the same commit as the merge into '{}'",
-                            entry.name, repo_path, target
-                        )),
-                        Ok(false) => {}
-                        Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
+        let mut branch_switch = None;
+        if in_merge && (already_merged || worktree_exists) {
+            match resolve_target(ctx, git, entry, &repo_path, !already_merged) {
+                Ok((target, switch_from)) => {
+                    if !already_merged {
+                        match git.has_tracked_changes(&repo_path) {
+                            Ok(true) => problems.push(format!(
+                                "{}: source checkout {} has uncommitted changes to tracked files; \
+                                 they would end up in the same commit as the merge into '{}'",
+                                entry.name, repo_path, target
+                            )),
+                            Ok(false) => {}
+                            Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
+                        }
                     }
+                    branch_switch = switch_from.map(|current| BranchSwitch {
+                        repo: entry.name.clone(),
+                        current,
+                        target: target.clone(),
+                        workspace_branch: workspace.branch.clone(),
+                    });
                     target_branch = Some(target);
                 }
                 Err(e) => problems.push(format!("{}: {e:#}", entry.name)),
@@ -420,6 +467,7 @@ fn preflight<R: CommandRunner>(
             repo_path,
             worktree_path,
             target_branch,
+            branch_switch,
             worktree_exists,
             already_merged,
             pre_remove_hook: repo_config.hooks.pre_remove.clone(),
@@ -437,21 +485,30 @@ fn preflight<R: CommandRunner>(
     }
 }
 
+/// Returns the effective target and the branch we would switch away from.
 fn resolve_target<R: CommandRunner>(
     ctx: &RequestContext<'_>,
     git: &GitOps<'_, R>,
     entry: &RepoEntry,
     repo_path: &str,
-) -> Result<String> {
+    will_checkout: bool,
+) -> Result<(String, Option<String>)> {
     match &entry.target_branch {
-        Some(tb) if git.branch_exists(repo_path, tb)? => Ok(tb.clone()),
+        Some(tb) if git.branch_exists(repo_path, tb)? => {
+            let switch_from = if will_checkout {
+                Some(git.current_branch(repo_path)?).filter(|current| current != tb)
+            } else {
+                None
+            };
+            Ok((tb.clone(), switch_from))
+        }
         Some(tb) => {
             let current = git.current_branch(repo_path)?;
             ctx.warn(format!(
                 "target branch '{}' not found in repo '{}', using current branch '{}'",
                 tb, entry.name, current
             ));
-            Ok(current)
+            Ok((current, None))
         }
         None => {
             let current = git.current_branch(repo_path)?;
@@ -459,9 +516,29 @@ fn resolve_target<R: CommandRunner>(
                 "target branch not configured for repo '{}', using current branch '{}'",
                 entry.name, current
             ));
-            Ok(current)
+            Ok((current, None))
         }
     }
+}
+
+fn confirm_branch_switches(
+    prepared: &[PreparedRepo],
+    yes: bool,
+    confirmed: &[BranchSwitch],
+) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    let switches = prepared
+        .iter()
+        .filter_map(|repo| repo.branch_switch.as_ref());
+    if switches.clone().all(|switch| confirmed.contains(switch)) {
+        return Ok(());
+    }
+    Err(BranchSwitchConfirmationRequired {
+        switches: switches.cloned().collect(),
+    }
+    .into())
 }
 
 /// Integrates (and optionally pushes) every prepared repository that has a
@@ -477,6 +554,7 @@ fn integrate_repos<R: CommandRunner>(
     strategy: Option<&str>,
     push: bool,
     record: bool,
+    yes: bool,
 ) -> Result<()> {
     let message = if workspace.description.is_empty() {
         workspace.title.clone()
@@ -493,6 +571,22 @@ fn integrate_repos<R: CommandRunner>(
                 repo.name, workspace.branch, target
             ));
         } else if repo.worktree_exists {
+            if !yes {
+                // The pre_done hook or another Workspace can change the Source checkout
+                // after preflight. Stop before modifying even the Workspace worktree.
+                let current = git.current_branch(&repo.repo_path)?;
+                let original = repo
+                    .branch_switch
+                    .as_ref()
+                    .map_or(target.as_str(), |s| s.current.as_str());
+                if current != original && current != *target {
+                    anyhow::bail!(
+                        "{}: source checkout changed from '{}' to '{}' after preflight; \
+                         switching to target '{}' requires a new confirmation. Run the command again.",
+                        repo.name, original, current, target
+                    );
+                }
+            }
             git_step(ctx, "merge", || {
                 git.merge_with_worktree(
                     &repo.repo_path,
@@ -552,19 +646,23 @@ fn record_event(
 fn describe_plan(
     ctx: &RequestContext<'_>,
     workspace: &WorkspaceConfig,
-    merge_set: &[String],
+    prepared: &[PreparedRepo],
     clean: bool,
 ) {
     for entry in &workspace.repos {
-        if merge_set.contains(&entry.name) {
-            ctx.step(format!(
+        let repo = prepared.iter().find(|repo| repo.name == entry.name);
+        if let Some(switch) = repo.and_then(|repo| repo.branch_switch.as_ref()) {
+            ctx.step(format!("  {switch}"));
+        }
+        match repo.and_then(|repo| repo.target_branch.as_deref()) {
+            Some(_) if repo.is_some_and(|repo| repo.already_merged) => {
+                ctx.step(format!("  skip merge of {} (already merged)", entry.name));
+            }
+            Some(target) => ctx.step(format!(
                 "  merge {} -> {} ({})",
-                workspace.branch,
-                entry.target_branch.as_deref().unwrap_or("*"),
-                entry.name
-            ));
-        } else {
-            ctx.step(format!("  skip merge of {}", entry.name));
+                workspace.branch, target, entry.name
+            )),
+            None => ctx.step(format!("  skip merge of {}", entry.name)),
         }
     }
     if clean {
@@ -618,12 +716,14 @@ pub fn done_workspace<R: CommandRunner>(
 
     if req.dry_run {
         ctx.step(format!("dry run for workspace '{}':", name));
-        describe_plan(ctx, &workspace, &merge_set, clean);
+        describe_plan(ctx, &workspace, &prepared, clean);
         return Ok(LifecycleOutcome {
             workspace: name,
             dry_run: true,
         });
     }
+
+    confirm_branch_switches(&prepared, req.yes, &req.confirmed_switches)?;
 
     // pre_done hook
     if !req.skip_hooks {
@@ -650,6 +750,7 @@ pub fn done_workspace<R: CommandRunner>(
         req.strategy.as_deref(),
         req.push,
         true,
+        req.yes,
     )?;
 
     // Phase 2: clean up. Hooks for every repo first, then the removals.
@@ -759,12 +860,14 @@ pub fn merge_workspace<R: CommandRunner>(
 
     if req.dry_run {
         ctx.step(format!("dry run for workspace '{}':", name));
-        describe_plan(ctx, &workspace, &merge_set, false);
+        describe_plan(ctx, &workspace, &prepared, false);
         return Ok(LifecycleOutcome {
             workspace: name,
             dry_run: true,
         });
     }
+
+    confirm_branch_switches(&prepared, req.yes, &req.confirmed_switches)?;
 
     integrate_repos(
         config_mgr,
@@ -775,6 +878,7 @@ pub fn merge_workspace<R: CommandRunner>(
         req.strategy.as_deref(),
         req.push,
         false,
+        req.yes,
     )?;
 
     ctx.emit(ServiceEvent::Finished {

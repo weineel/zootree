@@ -562,6 +562,16 @@ fn test_delete_local_branch() {
 }
 
 #[test]
+fn unreadable_worktree_status_returns_the_git_error() {
+    let runner = MockRunner::new();
+    runner.push_response(failure_output(128, "invalid worktree"));
+    let error = GitOps::new(&runner)
+        .has_uncommitted_changes("/worktrees/api")
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid worktree"));
+}
+
+#[test]
 fn test_has_uncommitted_changes() {
     let runner = MockRunner::new();
     runner.push_response(Output {

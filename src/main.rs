@@ -92,7 +92,7 @@ fn main() {
         }
     };
 
-    if let Err(e) = run(cli.command, &config_mgr, &global) {
+    if let Err(e) = run(cli, &config_mgr, &global) {
         if e.downcast_ref::<zootree::tui_app::CancelledByUser>()
             .is_some()
         {
@@ -109,8 +109,8 @@ fn main() {
     }
 }
 
-fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> Result<()> {
-    match command {
+fn run(cli: Cli, config_mgr: &ConfigManager, global: &GlobalConfig) -> Result<()> {
+    match cli.command {
         Commands::Config(args) => {
             zootree::cli::config::handle_config_command(&args.command, global)?;
         }
@@ -148,13 +148,13 @@ fn run(command: Commands, config_mgr: &ConfigManager, global: &GlobalConfig) -> 
             zootree::cli::info::handle_info(&args)?;
         }
         Commands::Done(args) => {
-            zootree::cli::workspace::handle_done(&args)?;
+            zootree::cli::workspace::handle_done(&args, cli.yes)?;
         }
         Commands::Merge(args) => {
-            zootree::cli::workspace::handle_merge(&args)?;
+            zootree::cli::workspace::handle_merge(&args, cli.yes)?;
         }
         Commands::Cancel(args) => {
-            zootree::cli::workspace::handle_cancel(&args)?;
+            zootree::cli::workspace::handle_cancel(&args, cli.yes)?;
         }
         Commands::Template(args) => {
             zootree::cli::template::handle_template_command(&args.command)?;

@@ -35,6 +35,13 @@ pub struct Cli {
 
     #[arg(long, global = true, help = "Suppress all output except errors")]
     pub quiet: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Accept source checkout branch switches in done/merge and uncommitted changes in cancel"
+    )]
+    pub yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -79,4 +86,29 @@ pub enum Commands {
     Logs,
     #[command(about = "Generate shell completion script")]
     Completions(completions::CompletionsArgs),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yes_is_global_and_independent_of_force() {
+        for args in [
+            ["zootree", "--yes", "done", "example"],
+            ["zootree", "done", "example", "--yes"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(cli.yes);
+            let Commands::Done(done) = cli.command else {
+                panic!("expected done");
+            };
+            assert!(!done.force);
+        }
+        assert!(
+            !Cli::try_parse_from(["zootree", "done", "example", "--force"])
+                .unwrap()
+                .yes
+        );
+    }
 }

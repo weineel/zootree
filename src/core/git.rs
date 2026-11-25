@@ -63,9 +63,14 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
     }
 
     pub fn current_branch(&self, repo_path: &str) -> Result<String> {
-        let output = self.git(repo_path, vec!["rev-parse", "--abbrev-ref", "HEAD"])?;
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(branch)
+        // An abbreviated ref becomes "heads/main" when a tag is also named "main".
+        let output = self.git(repo_path, vec!["rev-parse", "--symbolic-full-name", "HEAD"])?;
+        let reference = String::from_utf8_lossy(&output.stdout);
+        let reference = reference.trim();
+        Ok(reference
+            .strip_prefix("refs/heads/")
+            .unwrap_or(reference)
+            .to_owned())
     }
 
     pub fn short_revision(&self, repo_path: &str, revision: &str) -> Result<String> {
@@ -365,19 +370,7 @@ impl<'a, R: CommandRunner> GitOps<'a, R> {
     }
 
     pub fn has_uncommitted_changes(&self, worktree_path: &str) -> Result<bool> {
-        let spec = CommandSpec {
-            program: "git".into(),
-            args: vec![
-                "-C".into(),
-                worktree_path.into(),
-                "status".into(),
-                "--porcelain".into(),
-            ],
-            cwd: None,
-            env: HashMap::new(),
-            env_remove: vec![],
-        };
-        let output = self.runner.run(&spec)?;
+        let output = self.git(worktree_path, vec!["status", "--porcelain"])?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(!stdout.trim().is_empty())
     }

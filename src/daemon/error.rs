@@ -36,6 +36,9 @@ pub const PROTOCOL_VERSION_REQUIRED: &str = "protocol_version_required";
 /// uncommitted changes). The error carries `repos`; retry with
 /// `confirmed_uncommitted` or `force`. Only appears in an Operation's `error`.
 pub const CONFIRMATION_REQUIRED: &str = "confirmation_required";
+/// A done or merge Operation needs approval to switch Source checkout branches.
+/// Its `switches` list can be sent back as `confirmed_switches`.
+pub const BRANCH_SWITCH_CONFIRMATION_REQUIRED: &str = "branch_switch_confirmation_required";
 /// Operation failure: the operation ran and failed; `message` carries the full
 /// error chain. Only appears in an Operation's `error`.
 pub const OPERATION_FAILED: &str = "operation_failed";
@@ -47,6 +50,7 @@ pub const ERROR_CODES: &[&str] = &[
     NOT_FOUND,
     BUSY,
     CONFIRMATION_REQUIRED,
+    BRANCH_SWITCH_CONFIRMATION_REQUIRED,
     OPERATION_FAILED,
     INTERNAL_ERROR,
     CLIENT_TOO_OLD,

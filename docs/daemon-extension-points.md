@@ -16,7 +16,7 @@
 
 ## 3. 能力串（`src/daemon/mod.rs` 的 `CAPABILITIES`）
 
-预留名称 `web`，默认不声明，测试断言当前集合恰为 `status`、`read_api`、`operations`、`events`。
+当前能力集合由 `tests/daemon_test.rs` 校验。协议文档列出了每项能力以及客户端使用它的条件。`web` 留给未来的 Web 传输。
 意图：Web 传输真正可用时才加入，供客户端判断。
 边界：声明 `web` 之前不得出现依赖它的行为；新增能力不需要 bump 协议版本。
 

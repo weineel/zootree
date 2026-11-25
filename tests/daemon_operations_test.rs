@@ -52,6 +52,8 @@ struct Script {
     stdout: String,
     /// Stdout of the first command only (for example dirty `git status`).
     first_stdout: Arc<Mutex<Option<String>>>,
+    /// Git command arguments (after `-C <path>`) with distinct responses.
+    git_stdout: BTreeMap<String, String>,
     /// When set, every command fails with this stderr.
     fail_stderr: Option<String>,
     /// Environments the commands ran with.
@@ -84,6 +86,12 @@ impl CommandRunner for ScriptRunner {
             .lock()
             .unwrap()
             .take()
+            .or_else(|| {
+                self.0
+                    .git_stdout
+                    .get(&spec.args.get(2..)?.join(" "))
+                    .cloned()
+            })
             .unwrap_or_else(|| self.0.stdout.clone());
         Ok(Output {
             status: ExitStatus::from_raw(0),
@@ -333,10 +341,8 @@ fn failure_carries_the_complete_error_output() {
     stop(daemon);
 }
 
-#[test]
-fn cancel_asks_for_confirmation_through_a_request_field_never_a_prompt() {
-    let env = env();
-    let ws = workspace(&env, "dirty", &["api"]);
+fn workspace_with_api(env: &Env, name: &str) {
+    let ws = workspace(env, name, &["api"]);
     std::fs::create_dir_all(std::path::Path::new(&ws.workspace_dir).join("api")).unwrap();
     env.mgr
         .save_repo_config(
@@ -358,6 +364,63 @@ fn cancel_asks_for_confirmation_through_a_request_field_never_a_prompt() {
     env.mgr
         .save_workspace(&WorkspaceStatus::InProgress, &ws)
         .unwrap();
+}
+
+#[test]
+fn integration_returns_branch_switches_before_accepting_confirmed_switches_or_yes() {
+    let env = env();
+    workspace_with_api(&env, "alpha");
+    let git_stdout = BTreeMap::from([
+        (
+            "for-each-ref --format=%(refname) refs/heads/main".into(),
+            "refs/heads/main".into(),
+        ),
+        (
+            "rev-parse --symbolic-full-name HEAD".into(),
+            "refs/heads/release".into(),
+        ),
+    ]);
+    let daemon = start(
+        &env,
+        Script {
+            git_stdout,
+            ..Default::default()
+        },
+        |_| {},
+    );
+    let switches = json!([{
+        "repo": "api", "current": "release", "target": "main", "workspace_branch": "zootree/alpha"
+    }]);
+    for command in ["merge", "done"] {
+        let path = format!("/workspaces/alpha/{command}");
+        let id = submit(&daemon, &path, json!({}));
+        let needed = wait_finished(&daemon, &id);
+        assert_eq!(
+            needed["error"]["code"], "branch_switch_confirmation_required",
+            "{needed}"
+        );
+        assert_eq!(needed["error"]["switches"], switches);
+        assert_eq!(
+            env.mgr.load_workspace("alpha").unwrap().0,
+            WorkspaceStatus::InProgress
+        );
+
+        let accepted = if command == "merge" {
+            json!({"confirmed_switches": needed["error"]["switches"]})
+        } else {
+            json!({"yes": true, "no_clean": true})
+        };
+        let id = submit(&daemon, &path, accepted);
+        let finished = wait_finished(&daemon, &id);
+        assert_eq!(finished["status"], "succeeded", "{finished}");
+    }
+    stop(daemon);
+}
+
+#[test]
+fn cancel_asks_for_confirmation_through_a_request_field_never_a_prompt() {
+    let env = env();
+    workspace_with_api(&env, "dirty");
     let script = Script {
         first_stdout: Arc::new(Mutex::new(Some(" M file.rs\n".into()))),
         ..Default::default()

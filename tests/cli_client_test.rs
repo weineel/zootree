@@ -184,6 +184,19 @@ impl Home {
         self.command(args).output().unwrap()
     }
 
+    // Completing a real workspace looks up a Zellij session by name. Keep
+    // the real Git and hook processes, but isolate that lookup from the host.
+    fn run_without_terminal_sessions(&self, args: &[&str]) -> Output {
+        let bin = TempDir::new().unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", bin.path().join("zellij")).unwrap();
+        let path = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(bin.path().to_owned()).chain(std::env::split_paths(&path)),
+        )
+        .unwrap();
+        self.command(args).env("PATH", path).output().unwrap()
+    }
+
     /// stdout with this Home's paths replaced, so two Homes compare equal.
     fn stdout(&self, output: &Output) -> String {
         self.normalize(&String::from_utf8_lossy(&output.stdout))
@@ -358,7 +371,7 @@ fn compatible_status() -> Value {
         "version": "0.1.4",
         "protocol_version": 1,
         "min_compatible_protocol_version": 1,
-        "capabilities": ["status", "read_api", "operations", "events"],
+        "capabilities": ["status", "read_api", "operations", "events", "branch_switch_confirmation"],
         "pid": 1,
         "started_at": "2026-01-01T00:00:00Z",
     })
@@ -640,6 +653,24 @@ fn a_daemon_missing_a_capability_is_ignored_quietly() {
     assert_success(&home, &list);
     assert!(home.stdout(&list).contains("pend (pending)"));
     assert_eq!(home.stderr(&list), "");
+}
+
+#[test]
+fn done_and_merge_use_local_preflight_when_daemon_predates_branch_confirmation() {
+    let home = Home::new();
+    home.workspace("alpha", WorkspaceStatus::InProgress, &[]);
+    let mut status = compatible_status();
+    status["capabilities"] = json!(["status", "read_api", "operations", "events"]);
+    let fake = FakeDaemon::start(&home, status, vec![]);
+
+    for command in ["merge", "done"] {
+        let output = home.run(&[command, "alpha", "--dry-run"]);
+        assert_success(&home, &output);
+        assert!(home
+            .stdout(&output)
+            .contains("dry run for workspace 'alpha'"));
+    }
+    assert_eq!(fake.requests(), ["GET /status", "GET /status"]);
 }
 
 #[test]
@@ -1167,4 +1198,148 @@ fn a_failure_before_the_request_is_written_still_falls_back_to_local_execution()
         home.mgr.load_workspace("prog").unwrap().0,
         WorkspaceStatus::Canceled
     );
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.org"])
+        .args([
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn cli_confirms_only_actual_branch_switches_with_or_without_daemon() {
+    for with_daemon in [false, true] {
+        let home = Home::new();
+        home.register_repo("api");
+        home.workspace("task", WorkspaceStatus::InProgress, &["api"]);
+        let repo = home.repo_dir("api");
+        let worktree = home.path().join("ws/task/api");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "base"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "zootree/task",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(&worktree, &["commit", "--allow-empty", "-m", "task change"]);
+        git(&repo, &["switch", "-c", "release"]);
+
+        let daemon = with_daemon
+            .then(|| daemon::start(DaemonOptions::new(home.mgr.base_dir.clone())).unwrap());
+        for args in [vec!["merge", "task"], vec!["done", "task", "--force"]] {
+            let output = home.run(&args);
+            let message = format!("{}{}", home.stdout(&output), home.stderr(&output));
+            assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+            for detail in ["api", "release", "main", "zootree/task", "--yes"] {
+                assert!(message.contains(detail), "{message}");
+            }
+            assert_eq!(git(&repo, &["branch", "--show-current"]), "release");
+            assert_eq!(git(&repo, &["rev-parse", "main"]), base);
+            assert!(worktree.join(".git").exists());
+        }
+        let output = home.run(&["merge", "task", "--dry-run"]);
+        assert_success(&home, &output);
+        assert!(home.stdout(&output).contains("release"));
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "release");
+
+        assert_success(
+            &home,
+            &home.run(&["--yes", "merge", "task", "--strategy", "merge"]),
+        );
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
+        assert_eq!(
+            git(&repo, &["rev-parse", "main"]),
+            git(&worktree, &["rev-parse", "HEAD"])
+        );
+        // A tag sharing the target's name does not require a branch switch.
+        git(&repo, &["tag", "main"]);
+        assert_success(
+            &home,
+            &home.run_without_terminal_sessions(&[
+                "done",
+                "task",
+                "--no-clean",
+                "--strategy",
+                "merge",
+            ]),
+        );
+        assert_eq!(
+            home.mgr.load_workspace("task").unwrap().0,
+            WorkspaceStatus::Done
+        );
+        if let Some(daemon) = daemon {
+            stop(daemon);
+        }
+    }
+}
+
+#[test]
+fn cancel_yes_accepts_uncommitted_changes_and_still_respects_hook_failures() {
+    for with_daemon in [false, true] {
+        let home = Home::new();
+        home.standard_fixture();
+        let worktree = home.path().join("ws/prog/r1");
+        git(&worktree, &["init", "-b", "main"]);
+        std::fs::write(worktree.join("draft"), "uncommitted").unwrap();
+        let mut global = GlobalConfig::default();
+        global.hooks.pre_cancel = Some(HookValue::Simple("false".into()));
+        home.mgr.save_global_config(&global).unwrap();
+        let daemon = with_daemon
+            .then(|| daemon::start(DaemonOptions::new(home.mgr.base_dir.clone())).unwrap());
+
+        let output = home.run(&["cancel", "prog", "--no-clean"]);
+        let message = format!("{}{}", home.stdout(&output), home.stderr(&output));
+        assert!(!output.status.success());
+        assert!(
+            message.contains("r1") && message.contains("--yes"),
+            "{message}"
+        );
+
+        let output = home.run(&["cancel", "prog", "--no-clean", "--yes"]);
+        assert!(!output.status.success());
+        let message = format!("{}{}", home.stdout(&output), home.stderr(&output));
+        assert!(message.contains("pre_cancel hook failed"), "{message}");
+        assert_eq!(
+            home.mgr.load_workspace("prog").unwrap().0,
+            WorkspaceStatus::InProgress
+        );
+
+        let output = home.run_without_terminal_sessions(&[
+            "cancel",
+            "prog",
+            "--no-clean",
+            "--yes",
+            "--skip-hooks",
+        ]);
+        assert_success(&home, &output);
+        assert_eq!(
+            home.mgr.load_workspace("prog").unwrap().0,
+            WorkspaceStatus::Canceled
+        );
+        assert!(worktree.join("draft").exists());
+        if let Some(daemon) = daemon {
+            stop(daemon);
+        }
+    }
 }

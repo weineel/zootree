@@ -1177,7 +1177,7 @@ fn build_repo_entries_falls_back_to_current_branch() {
     )
     .unwrap();
     let runner = MockRunner::new();
-    runner.push_response(success_branch_output("mainline"));
+    runner.push_response(success_branch_output("refs/heads/mainline"));
 
     let entries = build_repo_entries(&mgr, &runner, vec![("frontend".to_string(), None)]).unwrap();
 
@@ -1185,7 +1185,13 @@ fn build_repo_entries_falls_back_to_current_branch() {
     let calls = runner.take_calls();
     assert_eq!(
         calls[0].args,
-        vec!["-C", "/repo/frontend", "rev-parse", "--abbrev-ref", "HEAD"]
+        vec![
+            "-C",
+            "/repo/frontend",
+            "rev-parse",
+            "--symbolic-full-name",
+            "HEAD"
+        ]
     );
 }
 

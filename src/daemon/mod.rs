@@ -32,10 +32,17 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Oldest client protocol version this Daemon still serves.
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
+pub(crate) const BRANCH_SWITCH_CONFIRMATION: &str = "branch_switch_confirmation";
 /// Capability strings; new behavior is gated by adding one here.
 /// `web` is reserved for a future Web UI transport and must not be declared
 /// until that exists (docs/daemon-extension-points.md).
-pub const CAPABILITIES: &[&str] = &["status", "read_api", "operations", "events"];
+pub const CAPABILITIES: &[&str] = &[
+    "status",
+    "read_api",
+    "operations",
+    "events",
+    BRANCH_SWITCH_CONFIRMATION,
+];
 /// Idle time without connections or Operations before the Daemon exits.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 

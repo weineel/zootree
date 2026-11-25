@@ -202,6 +202,12 @@ worktrees. If a merge fails, every worktree is kept and the half-merged source c
 rolled back; running `done` again skips repos it already merged. For a Workspace stuck on a
 missing worktree, use `--skip-repo <repo>`; `--force` does not excuse it.
 
+If a selected repository is on a different branch from its merge target, `done` and
+`merge` list the repositories that will switch branches and ask once before running
+hooks or changing any checkout. Press Enter to cancel. Repositories already on their
+target merge without a prompt. Use `zootree merge my-workspace --dry-run` to preview
+the switches, or `zootree merge my-workspace --yes` to accept them in a script.
+
 ## Command Reference
 
 ### Repository Management
@@ -578,6 +584,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # literal command
 ```bash
 -v, --verbose    # Verbose output
 -q, --quiet      # Quiet output
+    --yes        # Accept branch switches in done/merge and uncommitted changes in cancel
 -h, --help       # Help
 -V, --version    # Version
 ```

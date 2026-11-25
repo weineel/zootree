@@ -685,14 +685,20 @@ fn repo_draft_falls_back_to_current_branch_when_no_default() {
     mgr.save_repo_config("backend", &repo_config("/repo/backend", None))
         .unwrap();
     let runner = MockRunner::new();
-    runner.push_response(success_stdout("main\n"));
+    runner.push_response(success_stdout("refs/heads/main\n"));
 
     let repos = build_repo_draft_entries(&mgr, &runner, None).unwrap();
 
     assert_eq!(repos[0].target_branch, "main");
     assert_eq!(
         runner.take_calls()[0].args,
-        vec!["-C", "/repo/backend", "rev-parse", "--abbrev-ref", "HEAD"]
+        vec![
+            "-C",
+            "/repo/backend",
+            "rev-parse",
+            "--symbolic-full-name",
+            "HEAD"
+        ]
     );
 }
 

@@ -192,6 +192,8 @@ zootree merge --repo api
 
 `done` 会先校验所有 repo（worktree 存在、无未提交改动、目标分支与源 checkout 可用），一次性汇总所有问题，之后才开始改动。校验通过后先合并所有选中的 repo，全部成功才统一清理 worktree。合并失败时所有 worktree 都会保留，半合并的源 checkout 会被回滚；再次运行 `done` 会跳过已合并的 repo。如果 Workspace 因缺失的 worktree 被卡住，用 `--skip-repo <repo>`；`--force` 不会放行缺失的 worktree。
 
+如果选中的注册仓库当前检出的分支与合入目标不同，`done` 和 `merge` 会列出所有需要切换的仓库，在运行 hook 或切换分支前统一确认一次，直接回车会取消。仓库都已在目标分支上时直接合并。用 `zootree merge my-workspace --dry-run` 可预览切换清单，脚本可用 `zootree merge my-workspace --yes` 接受切换。
+
 ## 命令参考
 
 ### 仓库管理
@@ -523,6 +525,7 @@ zootree start ws --run-agent="codex --skip -- $prompt"  # 直接传字面量
 ```bash
 -v, --verbose    # 详细输出
 -q, --quiet      # 静默输出
+    --yes        # 同意 done/merge 切换分支，以及 cancel 遇到未提交改动时继续
 -h, --help       # 帮助
 -V, --version    # 版本
 ```
