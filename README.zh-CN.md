@@ -76,6 +76,8 @@ mise shell --unset cargo:zootree
 npx skills install weineel/zootree
 ```
 
+在本仓库中，可用 `$deploy dev` 安装本地开发版，用 `$deploy patch` 发布补丁版本。[Deploy 技能](skills/deploy/SKILL.md)
+
 ## Shell 补全
 
 zootree 支持 5 种 shell 的补全：bash、zsh、fish、PowerShell、elvish，

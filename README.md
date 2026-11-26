@@ -77,6 +77,8 @@ mise shell --unset cargo:zootree
 npx skills install weineel/zootree
 ```
 
+In this checkout, use `$deploy dev` to install a local development build or `$deploy patch` to publish a patch release. [Deploy skill](skills/deploy/SKILL.md)
+
 ## Shell Completions
 
 zootree supports completion for subcommands, flags, and dynamic values
